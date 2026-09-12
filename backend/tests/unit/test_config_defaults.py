@@ -44,3 +44,9 @@ class TestDomainDefaults:
             f"MICROSOFT_REDIRECT_URI should have an empty default "
             f"(got {default!r}). The VPS .env must set it explicitly."
         )
+
+
+class TestTranscriptionDefaults:
+    def test_gpu_local_timeout_default_supports_long_cpu_jobs(self):
+        default = Settings.model_fields["GPU_LOCAL_TIMEOUT"].default
+        assert default == 7200

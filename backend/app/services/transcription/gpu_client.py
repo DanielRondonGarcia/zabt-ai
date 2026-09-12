@@ -32,7 +32,11 @@ class GpuTranscriptionClient:
     def __init__(self, backend: TranscriptionBackend = TranscriptionBackend.RUNPOD) -> None:
         self._backend = backend
         self._poll_interval = settings.RUNPOD_POLL_INTERVAL
-        self._timeout = settings.RUNPOD_TIMEOUT
+        self._timeout = (
+            settings.GPU_LOCAL_TIMEOUT
+            if backend == TranscriptionBackend.GPU_LOCAL
+            else settings.RUNPOD_TIMEOUT
+        )
 
         if backend == TranscriptionBackend.RUNPOD:
             import runpod
@@ -119,9 +123,14 @@ class GpuTranscriptionClient:
 
         # Timeout
         self._cancel(job_id)
+        timeout_setting = (
+            "GPU_LOCAL_TIMEOUT"
+            if self._backend == TranscriptionBackend.GPU_LOCAL
+            else "RUNPOD_TIMEOUT"
+        )
         raise TimeoutError(
             f"GPU job {job_id} timed out after {self._timeout}s. "
-            "Increase RUNPOD_TIMEOUT for long audio files."
+            f"Increase {timeout_setting} for long audio files."
         )
 
     async def transcribe_chunk(self, data: bytes) -> str:

@@ -95,6 +95,7 @@ class Settings(BaseSettings):
 
     # GPU Service (used when TRANSCRIPTION_BACKEND=gpu-local)
     GPU_SERVICE_URL: str = "http://gpu-worker:8001"
+    GPU_LOCAL_TIMEOUT: int = 7200
 
     # RunPod Serverless (used when TRANSCRIPTION_BACKEND=runpod)
     RUNPOD_API_KEY: str = ""
