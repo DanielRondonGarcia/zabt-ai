@@ -11,6 +11,7 @@ from app.models import Meeting, User, VisualSegment
 from app.services.visual_breakdown.types import VisualSegmentResponse, VisionWorkerResult
 from app.worker import (
     _acquire_visual_lease,
+    _fresh_visual_url,
     stage_extract_intelligence,
     stage_optional_visual_breakdown,
     stage_summarize,
@@ -65,6 +66,7 @@ def test_happy_path_completes_meeting_and_persists_segments(meeting_with_file):
     worker_result = _completed_worker_result()
 
     with (
+        patch("app.worker.settings.VISION_BACKEND", "LOCAL"),
         patch("app.services.visual_breakdown.vision_client.VisionClient") as mock_cls,
         patch("app.services.storage.storage.get_presigned_download_url", return_value="https://signed/"),
         patch("app.services.analytics.capture") as mock_capture,
@@ -77,6 +79,7 @@ def test_happy_path_completes_meeting_and_persists_segments(meeting_with_file):
         out = stage_visual_breakdown(meeting_id)
 
     assert out == meeting_id
+    mock_cls.assert_called_once_with(backend="local")
 
     # Meeting fields updated
     with Session(engine) as session:
@@ -104,6 +107,42 @@ def test_happy_path_completes_meeting_and_persists_segments(meeting_with_file):
     # Notify called once with the right event type
     mock_notify.assert_called_once()
     assert mock_notify.call_args.args[0] == "visual_breakdown_completed"
+
+
+def test_local_visual_backend_uses_internal_presigned_download_url():
+    storage = MagicMock()
+    storage.get_presigned_download_url.return_value = "http://minio:9000/internal/video"
+
+    with (
+        patch("app.worker.storage", storage),
+        patch("app.worker.settings.VISION_SIGNED_URL_EXPIRATION", 1234),
+    ):
+        url = _fresh_visual_url("media/video.mp4", backend="LoCaL")
+
+    assert url == "http://minio:9000/internal/video"
+    storage.get_presigned_download_url.assert_called_once_with(
+        "media/video.mp4", expiration=1234
+    )
+    storage.get_fresh_presigned_download_url.assert_not_called()
+    storage.get_public_presigned_download_url.assert_not_called()
+
+
+def test_external_visual_backend_uses_fresh_public_presigned_download_url():
+    storage = MagicMock()
+    storage.get_fresh_presigned_download_url.return_value = "https://public.example/video"
+
+    with (
+        patch("app.worker.storage", storage),
+        patch("app.worker.settings.VISION_SIGNED_URL_EXPIRATION", 1234),
+    ):
+        url = _fresh_visual_url("media/video.mp4", backend="RUNPOD")
+
+    assert url == "https://public.example/video"
+    storage.get_fresh_presigned_download_url.assert_called_once_with(
+        "media/video.mp4", expiration=1234
+    )
+    storage.get_public_presigned_download_url.assert_not_called()
+    storage.get_presigned_download_url.assert_not_called()
 
 
 def test_worker_failure_falls_back_without_failing_meeting(meeting_with_file):

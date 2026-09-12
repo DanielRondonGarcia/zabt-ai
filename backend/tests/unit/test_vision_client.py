@@ -1,13 +1,31 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 """Tests for VisionClient — HTTP local mode (mocked httpx)."""
+import sys
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
 
+# Keep this focused module independent of repository settings and the real `.env`.
+fake_config = ModuleType("app.core.config")
+fake_config.settings = SimpleNamespace(
+    VISION_BACKEND="local",
+    VISION_LOCAL_URL="http://worker:8003",
+    VISION_TIMEOUT=1800,
+    VISION_POLL_INTERVAL=5,
+)
+original_config = sys.modules.get("app.core.config")
+sys.modules["app.core.config"] = fake_config
+
 from app.services.visual_breakdown.types import VisionWorkerResult
 from app.services.visual_breakdown.vision_client import VisionClient, VisionClientError
+
+if original_config is not None:
+    sys.modules["app.core.config"] = original_config
+else:
+    del sys.modules["app.core.config"]
 
 
 def _make_client_with_mocked_httpx(post_response: dict | Exception):

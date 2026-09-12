@@ -833,16 +833,31 @@ def _acquire_visual_lease(meeting_id: int, run_epoch: str) -> bool:
         return True
 
 
-def _fresh_visual_url(file_path: str) -> str:
-    """Generate a new signed URL for each attempt, with a compatibility fallback."""
+def _fresh_visual_url(file_path: str, *, backend: str | None = None) -> str:
+    """Generate a signed URL reachable by the selected vision backend."""
     expiration = int(getattr(settings, "VISION_SIGNED_URL_EXPIRATION", 3600))
-    fresh = getattr(storage, "get_fresh_presigned_download_url", None)
-    if fresh is not None:
-        try:
-            return fresh(file_path, expiration=expiration)
-        except Exception:
-            logger.warning("fresh visual URL generation failed; using legacy URL method")
-    return storage.get_presigned_download_url(file_path, expiration=expiration)
+    selected_backend = str(
+        settings.VISION_BACKEND if backend is None else backend
+    ).strip().casefold()
+    if selected_backend == "local":
+        method_names = (
+            "get_presigned_download_url",
+            "get_fresh_presigned_download_url",
+            "get_public_presigned_download_url",
+        )
+    else:
+        method_names = (
+            "get_fresh_presigned_download_url",
+            "get_public_presigned_download_url",
+            "get_presigned_download_url",
+        )
+
+    for method_name in method_names:
+        method = getattr(storage, method_name, None)
+        if callable(method):
+            return method(file_path, expiration=expiration)
+
+    raise RuntimeError("Storage provider cannot generate a visual download URL")
 
 
 def _safe_visual_params(result) -> dict:
@@ -992,8 +1007,9 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
     meeting_service.update_sub_status(meeting_id, "analyzing_video")
     meeting_service.increment_visual_breakdown_attempt(meeting_id, run_epoch)
     try:
-        video_url = _fresh_visual_url(file_path)
-        result = VisionClient().submit_and_wait(
+        vision_backend = str(settings.VISION_BACKEND).strip().casefold()
+        video_url = _fresh_visual_url(file_path, backend=vision_backend)
+        result = VisionClient(backend=vision_backend).submit_and_wait(
             {
                 "video_url": video_url,
                 "owner_id": str(owner_id) if owner_id is not None else "unknown",
