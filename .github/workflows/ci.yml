@@ -63,13 +63,19 @@ jobs:
         run: |
           docker run -d --name minio -p 9000:9000 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            minio/minio server /data
+            quay.io/minio/minio:latest server /data
+          healthy=0
           for _ in $(seq 1 20); do
-            if curl -sf http://localhost:9000/minio/health/live; then break; fi
+            if curl -sf http://localhost:9000/minio/health/live; then healthy=1; break; fi
             sleep 2
           done
-          docker run --rm --network host minio/mc alias set m http://localhost:9000 minioadmin minioadmin
-          docker run --rm --network host minio/mc mb --ignore-existing m/zabt-media
+          if [ "$healthy" -ne 1 ]; then
+            echo "MinIO did not become healthy after 40 seconds." >&2
+            docker logs minio || true
+            exit 1
+          fi
+          docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc:latest -c \
+            'mc alias set m http://localhost:9000 minioadmin minioadmin && mc mb --ignore-existing m/zabt-media'
       - name: Install backend deps
         working-directory: backend
         run: uv sync
