@@ -156,6 +156,7 @@ services:
       RUNPOD_ENDPOINT_ID: ${RUNPOD_ENDPOINT_ID:-}
       RUNPOD_POLL_INTERVAL: ${RUNPOD_POLL_INTERVAL:-5}
       RUNPOD_TIMEOUT: ${RUNPOD_TIMEOUT:-1800}
+      GPU_LOCAL_TIMEOUT: ${GPU_LOCAL_TIMEOUT:-7200}
       # Vision (visual breakdown) backend: "local" or "runpod"
       VISION_ENABLED: ${VISION_ENABLED:-false}
       VISION_BACKEND: ${VISION_BACKEND:-local}
@@ -324,6 +325,13 @@ services:
     build:
       context: .
       dockerfile: frontend-2/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+        NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:-http://localhost:3000}
+        NEXT_PUBLIC_POSTHOG_KEY: ${NEXT_PUBLIC_POSTHOG_KEY:-}
+        NEXT_PUBLIC_POSTHOG_HOST: ${NEXT_PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+        NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-development}
     ports:
       - "3000:3000"
     environment:
@@ -367,7 +375,7 @@ services:
     depends_on:
       - redis
 
-  # Visual breakdown worker (needs an Ollama host for the vision model).
+  # Visual breakdown worker. Supports local Ollama or explicit OpenAI cloud inference.
   # Enable the profile and VISION_ENABLED explicitly; the default remains disabled.
   zabt-vision-worker:
     image: zabt-vision-worker:latest
@@ -380,18 +388,29 @@ services:
       - "8003:8003"
     environment:
       VISION_JUDGE_MODEL: ${VISION_JUDGE_MODEL:-qwen3-vl:8b-thinking}
+      VISION_INFERENCE_BACKEND: ${VISION_INFERENCE_BACKEND:-ollama}
+      # Keep the vision credential separate from OPENAI_API_KEY, which may target
+      # an OpenRouter or other-compatible summary endpoint.
+      VISION_OPENAI_API_KEY: ${VISION_OPENAI_API_KEY:-}
+      VISION_OPENAI_BASE_URL: ${VISION_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      VISION_OPENAI_MODEL: ${VISION_OPENAI_MODEL:-gpt-4o-mini}
+      VISION_OPENAI_IMAGE_DETAIL: ${VISION_OPENAI_IMAGE_DETAIL:-low}
+      VISION_OPENAI_MAX_TOKENS: ${VISION_OPENAI_MAX_TOKENS:-1024}
       VISION_ENABLED: ${VISION_ENABLED:-false}
       VISION_REQUIRE_VISION: ${VISION_REQUIRE_VISION:-true}
+      # Cloud access is opt-in; OpenAI mode requires explicitly setting these
+      # values in the deployment environment.
       VISION_CLOUD_ALLOWED: ${VISION_CLOUD_ALLOWED:-false}
       VISION_EGRESS_POLICY: ${VISION_EGRESS_POLICY:-deny}
       VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:-}
-      VISION_INFERENCE_BACKEND: ${VISION_INFERENCE_BACKEND:-ollama}
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
       OLLAMA_NO_CLOUD: ${OLLAMA_NO_CLOUD:-1}
-      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
-      S3_REGION: ${S3_REGION:-auto}
-      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+      # Visual artifacts stay in the bundled MinIO by default. Explicit S3_*
+      # variables override these local fallbacks for external S3-compatible storage.
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-http://minio:9000}
+      S3_REGION: ${S3_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-minioadmin}
       S3_BUCKET: ${S3_BUCKET_NAME:-zabt-ai-bucket}
       OCR_USE_GPU: "false"
     extra_hosts:

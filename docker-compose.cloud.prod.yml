@@ -1,0 +1,149 @@
+# Production cloud-oriented override for the base Compose topology.
+#
+# Run this file together with docker-compose.yml. The deployment host still keeps
+# its values in .env; the process-level COMPOSE_PROFILES=cloud-prod setting must
+# override any local value from .env so that local db/minio/worker-gpu services do
+# not start. Do not copy secrets into this file.
+#
+# TLS is terminated by the external NetBird/Caddy/reverse-proxy layer. Route the
+# web public domain to the peer's HTTP port 3000 and the API public domain to the
+# peer's HTTP port 8000. This file intentionally adds neither Kong nor certificates.
+
+x-cloud-backend-environment: &cloud-backend-environment
+  # Managed PostgreSQL. The same URL and auth settings are required by every
+  # backend process because api, worker, and beat import the application settings.
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set for cloud production}
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  AUTH_ENVIRONMENT: production
+  AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET must be set for cloud production}
+  AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-zabt-api}
+  AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-zabt-client}
+  AUTH_COOKIE_SECURE: "true"
+  AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+  AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:?AUTH_ALLOWED_ORIGINS must be set for cloud production}
+  BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:?BACKEND_CORS_ORIGINS must be set for cloud production}
+  APP_URL: ${APP_URL:?APP_URL must be set for cloud production}
+
+  # Managed S3-compatible object storage. S3_PUBLIC_URL must be reachable by
+  # browsers and by RunPod when the API returns presigned media URLs.
+  STORAGE_PROVIDER: s3
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:?S3_ENDPOINT_URL must be set for cloud production}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID must be set for cloud production}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY must be set for cloud production}
+  S3_BUCKET_NAME: ${S3_BUCKET_NAME:?S3_BUCKET_NAME must be set for cloud production}
+  S3_PUBLIC_URL: ${S3_PUBLIC_URL:?S3_PUBLIC_URL must be set for cloud production}
+  S3_REGION: ${S3_REGION:-auto}
+
+  # RunPod is the production transcription provider; do not require worker-gpu.
+  TRANSCRIPTION_BACKEND: runpod
+  GPU_SERVICE_URL: ""
+  RUNPOD_API_KEY: ${RUNPOD_API_KEY:?RUNPOD_API_KEY must be set for cloud production}
+  RUNPOD_ENDPOINT_ID: ${RUNPOD_ENDPOINT_ID:?RUNPOD_ENDPOINT_ID must be set for cloud production}
+  RUNPOD_POLL_INTERVAL: ${RUNPOD_POLL_INTERVAL:-5}
+  RUNPOD_TIMEOUT: ${RUNPOD_TIMEOUT:-1800}
+
+  # Text summaries use the first-party OpenAI endpoint in this production file.
+  # The key is intentionally separate from the vision key below.
+  OPENAI_BASE_URL: https://api.openai.com/v1
+  OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set for cloud summaries}
+  OPENAI_MODEL: gpt-4o-mini
+
+  # Visual processing is enabled only through this explicit cloud configuration.
+  # The vision worker receives the same values through its own environment below.
+  VISION_ENABLED: "true"
+  VISION_BACKEND: local
+  VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://zabt-vision-worker:8003}
+  VISION_INFERENCE_BACKEND: openai
+  VISION_CLOUD_ALLOWED: "true"
+  VISION_EGRESS_POLICY: allowlist
+  VISION_ALLOWED_HOSTS: api.openai.com
+  VISION_JUDGE_MODEL: gpt-4o-mini
+  VISION_REQUIRE_VISION: "true"
+  VISION_OPENAI_API_KEY: ${VISION_OPENAI_API_KEY:?VISION_OPENAI_API_KEY must be set for cloud vision}
+  VISION_OPENAI_BASE_URL: https://api.openai.com/v1
+  VISION_OPENAI_MODEL: gpt-4o-mini
+  VISION_OPENAI_IMAGE_DETAIL: low
+  VISION_OPENAI_MAX_TOKENS: 1024
+  VISION_SIGNED_URL_EXPIRATION: ${VISION_SIGNED_URL_EXPIRATION:-3600}
+
+  SENTRY_ENVIRONMENT: production
+
+  # Make the absence of the local MinIO profile explicit in backend settings.
+  MINIO_ENDPOINT: ""
+  MINIO_PUBLIC_ENDPOINT: ""
+  MINIO_ACCESS_KEY: ""
+  MINIO_SECRET_KEY: ""
+  MINIO_BUCKET_NAME: ""
+  MINIO_WEBHOOK_SECRET: ""
+
+services:
+  api:
+    image: ${ZABT_API_IMAGE:?ZABT_API_IMAGE must be set to an immutable GHCR release image}
+    environment: *cloud-backend-environment
+
+  worker:
+    image: ${ZABT_WORKER_IMAGE:?ZABT_WORKER_IMAGE must be set to an immutable GHCR release image}
+    environment: *cloud-backend-environment
+
+  beat:
+    image: ${ZABT_WORKER_IMAGE:?ZABT_WORKER_IMAGE must be set to an immutable GHCR release image}
+    environment: *cloud-backend-environment
+
+  # The base file keeps Redis always-on. REDIS_URL above may point api/worker/beat
+  # at a managed broker; in that case the bundled Redis container is harmless but
+  # unused unless the variable is left at its default.
+  redis: {}
+
+  web:
+    image: ${ZABT_WEB_IMAGE:?ZABT_WEB_IMAGE must be set to an immutable GHCR release image}
+    # Replace, rather than append to, the base [local] profile.
+    profiles: !override [cloud-prod]
+    build:
+      context: .
+      dockerfile: frontend-2/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL must be set for cloud production}
+        NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:?NEXT_PUBLIC_FRONTEND_URL must be set for cloud production}
+        NEXT_PUBLIC_POSTHOG_KEY: ${NEXT_PUBLIC_POSTHOG_KEY:-}
+        NEXT_PUBLIC_POSTHOG_HOST: ${NEXT_PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}
+        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+        NEXT_PUBLIC_SENTRY_ENVIRONMENT: production
+    ports: !override
+      - "3000:3000"
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL must be set for cloud production}
+      NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:?NEXT_PUBLIC_FRONTEND_URL must be set for cloud production}
+      NEXT_PUBLIC_POSTHOG_KEY: ${NEXT_PUBLIC_POSTHOG_KEY:-}
+      NEXT_PUBLIC_POSTHOG_HOST: ${NEXT_PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}
+      NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+      NEXT_PUBLIC_SENTRY_ENVIRONMENT: production
+
+  zabt-vision-worker:
+    image: ${ZABT_VISION_IMAGE:?ZABT_VISION_IMAGE must be set to an immutable GHCR release image}
+    # Replace the base [vision] profile; this service is internal to api.
+    profiles: !override [cloud-prod]
+    ports: !override []
+    deploy: !reset null
+    extra_hosts: !override []
+    environment:
+      VISION_ENABLED: "true"
+      VISION_INFERENCE_BACKEND: openai
+      VISION_JUDGE_MODEL: gpt-4o-mini
+      VISION_CLOUD_ALLOWED: "true"
+      VISION_EGRESS_POLICY: allowlist
+      VISION_ALLOWED_HOSTS: api.openai.com
+      VISION_OPENAI_API_KEY: ${VISION_OPENAI_API_KEY:?VISION_OPENAI_API_KEY must be set for cloud vision}
+      VISION_OPENAI_BASE_URL: https://api.openai.com/v1
+      VISION_OPENAI_MODEL: gpt-4o-mini
+      VISION_OPENAI_IMAGE_DETAIL: low
+      VISION_OPENAI_MAX_TOKENS: 1024
+      VISION_REQUIRE_VISION: "true"
+      # The vision worker writes keyframes/raw output to the same external bucket.
+      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:?S3_ENDPOINT_URL must be set for cloud production}
+      S3_REGION: ${S3_REGION:-auto}
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID must be set for cloud production}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY must be set for cloud production}
+      S3_BUCKET: ${S3_BUCKET_NAME:?S3_BUCKET_NAME must be set for cloud production}
+      OCR_USE_GPU: "false"
+      OLLAMA_NO_CLOUD: "1"
