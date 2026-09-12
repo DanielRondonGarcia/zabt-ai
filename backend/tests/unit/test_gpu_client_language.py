@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-from unittest.mock import patch
+import sys
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 from app.services.transcription.types import TranscriptionConfig
 
 
@@ -28,7 +30,11 @@ def test_job_input_includes_language_and_allowed_languages():
         "audio_duration_seconds": 1.0, "estimated_cost": 0.0,
     }, None)
 
-    with patch("app.services.storage.storage") as storage:
+    storage = MagicMock()
+    with patch.dict(
+        sys.modules,
+        {"app.services.storage": SimpleNamespace(storage=storage)},
+    ):
         storage.get_public_presigned_download_url.return_value = "https://x"
         cfg = TranscriptionConfig(
             storage_key="k", language="ur", allowed_languages={"ur", "en"},

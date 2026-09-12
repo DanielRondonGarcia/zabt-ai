@@ -22,6 +22,39 @@ MULTIMODAL_EVIDENCE_RULES = """\
 """
 
 
+_LANGUAGE_LABELS = {
+    "ar": "Arabic",
+    "de": "German",
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "hi": "Hindi",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "nl": "Dutch",
+    "pa": "Punjabi",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "ur": "Urdu",
+    "zh": "Chinese",
+}
+
+_LANGUAGE_CODE_ALIASES = {
+    "arabic": "ar",
+    "english": "en",
+    "french": "fr",
+    "german": "de",
+    "hindi": "hi",
+    "mandarin": "zh",
+    "punjabi-gurmukhi": "pa",
+    "punjabi-shahmukhi": "pa",
+    "spanish": "es",
+    "urdu-arabic": "ur",
+    "urdu-roman": "ur",
+}
+
+
 # ── Output schema (unused for now — will be used via dedicated UI button) ───
 
 class ActionItem(BaseModel):
@@ -116,6 +149,47 @@ def _build_system_prompt(style_examples: list[str] | None = None) -> str:
     return prompt
 
 
+def _language_label(language_code: str) -> str:
+    """Return a deterministic display label without hiding unknown language codes."""
+    raw_code = language_code.strip()
+    normalized_code = raw_code.replace("_", "-").lower()
+    parts = normalized_code.split("-")
+    language_key = _LANGUAGE_CODE_ALIASES.get(normalized_code)
+    is_catalog_alias = language_key is not None
+    if language_key is None:
+        language_key = _LANGUAGE_CODE_ALIASES.get(parts[0], parts[0])
+
+    label = _LANGUAGE_LABELS.get(language_key)
+    if label is None:
+        return f"the language identified by code '{raw_code}'"
+    if len(parts) == 1 or is_catalog_alias:
+        return label
+
+    canonical_code = "-".join([parts[0], *(part.upper() for part in parts[1:])])
+    return f"{label} ({canonical_code})"
+
+
+def _append_output_language_instruction(
+    system_prompt: str,
+    output_language: str | None,
+) -> str:
+    """Append a mandatory output-language directive when one was selected."""
+    if not output_language or not output_language.strip():
+        return system_prompt
+
+    language_code = output_language.strip()
+    language_label = _language_label(language_code)
+    return (
+        system_prompt
+        + "\n\n---\nMANDATORY OUTPUT LANGUAGE:\n"
+        f"Write the complete meeting notes and any inferred title in {language_label} "
+        f"(selected language code: {language_code}). "
+        "Use that language for headings, the summary, decisions, action items, and "
+        "follow-up points. Preserve proper names, URLs, and quoted evidence as "
+        "appropriate. Do not answer in another language."
+    )
+
+
 def _format_time(seconds: float) -> str:
     minutes, remainder = divmod(max(0.0, seconds), 60.0)
     hours, minutes = divmod(int(minutes), 60)
@@ -189,6 +263,7 @@ def summarize_context(
     style_examples: list[str] | None = None,
     template_body: str | None = None,
     upload_date: str | None = None,
+    output_language: str | None = None,
 ) -> str:
     """Generate a hierarchical summary from complete, ephemeral context chunks."""
     system_prompt = _build_system_prompt(style_examples)
@@ -199,6 +274,7 @@ def summarize_context(
             f"{upload_date} as the meeting date.\n"
         )
     system_prompt = _append_template_instruction(system_prompt, template_body)
+    system_prompt = _append_output_language_instruction(system_prompt, output_language)
 
     warning_text = ""
     if context.warning_codes:
@@ -256,19 +332,26 @@ def summarize_context(
     )
 
 
-def infer_title(summary_text: str) -> str | None:
+def infer_title(
+    summary_text: str,
+    output_language: str | None = None,
+) -> str | None:
     """Ask the LLM for a short, specific meeting title based on the summary."""
     try:
+        title_system_prompt = _append_output_language_instruction(
+            (
+                "Given a meeting summary, respond with ONLY a short meeting title (5-10 words). "
+                "Be specific about the subject discussed. "
+                "Never use generic titles like 'Meeting Summary', 'Meeting Notes', or 'Team Meeting'. "
+                "Examples: 'Sprint 42 Planning — API Integration', 'Invoice Financing Feature Review', "
+                "'Q2 Marketing Budget Approval'."
+            ),
+            output_language,
+        )
         response = _client.chat.completions.create(
             model=settings.OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": (
-                    "Given a meeting summary, respond with ONLY a short meeting title (5-10 words). "
-                    "Be specific about the subject discussed. "
-                    "Never use generic titles like 'Meeting Summary', 'Meeting Notes', or 'Team Meeting'. "
-                    "Examples: 'Sprint 42 Planning — API Integration', 'Invoice Financing Feature Review', "
-                    "'Q2 Marketing Budget Approval'."
-                )},
+                {"role": "system", "content": title_system_prompt},
                 {"role": "user", "content": summary_text[:2000]},
             ],
             temperature=0.1,
@@ -291,6 +374,7 @@ def summarize_transcript(
     context: ContextBuildResult | None = None,
     spoken_segments: Iterable[object] | None = None,
     visual_segments: Iterable[object] | None = None,
+    output_language: str | None = None,
 ) -> str:
     """Generate a markdown summary from transcript-only or ephemeral context."""
     if context is None and (spoken_segments is not None or visual_segments is not None):
@@ -306,6 +390,7 @@ def summarize_transcript(
             style_examples=style_examples,
             template_body=template_body,
             upload_date=upload_date,
+            output_language=output_language,
         )
 
     system_prompt = _build_system_prompt(style_examples)
@@ -316,6 +401,7 @@ def summarize_transcript(
             f"use {upload_date} as the meeting date."
         )
     system_prompt = _append_template_instruction(system_prompt, template_body)
+    system_prompt = _append_output_language_instruction(system_prompt, output_language)
     response = _client.chat.completions.create(
         model=settings.OPENAI_MODEL,
         messages=[

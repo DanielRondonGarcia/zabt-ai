@@ -540,13 +540,17 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             template_id=str(active_template.id) if active_template else None,
             upload_date=meeting.created_at.strftime("%B %d, %Y") if meeting.created_at else None,
             context=context_result,
+            output_language=meeting.requested_language,
         )
 
     # Infer a meaningful title from the summary via LLM
     inferred_title = None
     if summary_text:
         from app.services.ai_agent import infer_title
-        inferred_title = infer_title(summary_text)
+        inferred_title = infer_title(
+            summary_text,
+            output_language=meeting.requested_language,
+        )
 
     meeting_service.save_summary(
         meeting_id,
