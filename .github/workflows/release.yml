@@ -1,0 +1,360 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: Semantic version increment to apply when version is omitted
+        required: true
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      version:
+        description: Optional exact version override, for example v1.2.3 or 1.2.3
+        required: false
+        type: string
+      include_optional:
+        description: Also publish the vision and bot worker images
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+concurrency:
+  group: "release-${{ github.repository }}"
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Prepare release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      ghcr_owner: ${{ steps.release.outputs.ghcr_owner }}
+      matrix: ${{ steps.release.outputs.matrix }}
+    steps:
+      - name: Require dispatch from main
+        shell: bash
+        env:
+          EVENT_REF: "${{ github.ref }}"
+        run: |
+          set -Eeuo pipefail
+
+          if [[ "$EVENT_REF" != "refs/heads/main" ]]; then
+            echo "::error::Releases must be dispatched from the main branch; received $EVENT_REF."
+            exit 1
+          fi
+
+      - name: Check out repository history
+        uses: actions/checkout@v4
+        with:
+          ref: "${{ github.sha }}"
+          fetch-depth: 0
+
+      - name: Resolve and validate version
+        id: release
+        shell: bash
+        env:
+          EVENT_REF: "${{ github.ref }}"
+          RELEASE_TYPE: "${{ inputs.release_type }}"
+          VERSION_INPUT: "${{ inputs.version }}"
+          INCLUDE_OPTIONAL: "${{ inputs.include_optional }}"
+          REPOSITORY_OWNER: "${{ github.repository_owner }}"
+        run: |
+          set -Eeuo pipefail
+
+          case "$RELEASE_TYPE" in
+            patch|minor|major) ;;
+            *)
+              echo "::error::release_type must be patch, minor, or major."
+              exit 1
+              ;;
+          esac
+
+          case "$INCLUDE_OPTIONAL" in
+            true|false) ;;
+            *)
+              echo "::error::include_optional must be a boolean input."
+              exit 1
+              ;;
+          esac
+
+          owner="$(printf '%s' "$REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          if [[ ! "$owner" =~ ^[a-z0-9-]+$ ]]; then
+            echo "::error::The repository owner is not a valid lowercase GHCR namespace."
+            exit 1
+          fi
+
+          git fetch --force --tags origin
+
+          version="$(python3 - <<'PY'
+          import os
+          import re
+          import subprocess
+
+          release_type = os.environ["RELEASE_TYPE"]
+          version_input = os.environ["VERSION_INPUT"]
+          version_pattern = re.compile(
+              r"^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+          )
+
+          if version_input:
+              match = version_pattern.fullmatch(version_input)
+              if not match:
+                  raise SystemExit(
+                      "version must match the exact X.Y.Z or vX.Y.Z format "
+                      "without leading zeroes"
+                  )
+              next_version = tuple(int(part) for part in match.groups())
+          else:
+              tags = subprocess.check_output(
+                  ["git", "tag", "--list", "v*"],
+                  text=True,
+              ).splitlines()
+              existing_versions = []
+              for tag in tags:
+                  match = version_pattern.fullmatch(tag)
+                  if match:
+                      existing_versions.append(tuple(int(part) for part in match.groups()))
+
+              highest = max(existing_versions, default=(0, 0, 0))
+              major, minor, patch = highest
+              if release_type == "major":
+                  next_version = (major + 1, 0, 0)
+              elif release_type == "minor":
+                  next_version = (major, minor + 1, 0)
+              else:
+                  next_version = (major, minor, patch + 1)
+
+          print(".".join(str(part) for part in next_version))
+          PY
+          )"
+          tag="v${version}"
+
+          if git rev-parse --verify --quiet "refs/tags/${tag}" >/dev/null; then
+            echo "::error::Release tag ${tag} already exists. Choose another version."
+            exit 1
+          fi
+
+          matrix="$(python3 - <<'PY'
+          import json
+          import os
+
+          images = [
+              {
+                  "name": "api",
+                  "image": "zabt-ai-api",
+                  "context": "backend",
+                  "file": "backend/Dockerfile",
+                  "target": "api",
+              },
+              {
+                  "name": "worker",
+                  "image": "zabt-ai-worker",
+                  "context": "backend",
+                  "file": "backend/Dockerfile",
+                  "target": "worker",
+              },
+              {
+                  "name": "web",
+                  "image": "zabt-ai-web",
+                  "context": ".",
+                  "file": "frontend-2/Dockerfile",
+                  "target": "",
+              },
+              {
+                  "name": "gpu-worker",
+                  "image": "zabt-ai-gpu-worker",
+                  "context": "zabt-gpu-worker",
+                  "file": "zabt-gpu-worker/Dockerfile",
+                  "target": "",
+              },
+              {
+                  "name": "cpu-worker",
+                  "image": "zabt-ai-cpu-worker",
+                  "context": "zabt-gpu-worker",
+                  "file": "zabt-gpu-worker/Dockerfile.cpu",
+                  "target": "",
+              },
+          ]
+
+          if os.environ["INCLUDE_OPTIONAL"] == "true":
+              images.extend(
+                  [
+                      {
+                          "name": "vision-worker",
+                          "image": "zabt-ai-vision-worker",
+                          "context": "zabt-vision-worker",
+                          "file": "zabt-vision-worker/Dockerfile",
+                          "target": "",
+                      },
+                      {
+                          "name": "bot-worker",
+                          "image": "zabt-ai-bot-worker",
+                          "context": "zabt-bot-worker",
+                          "file": "zabt-bot-worker/Dockerfile",
+                          "target": "",
+                      },
+                  ]
+              )
+
+          print(json.dumps({"include": images}, separators=(",", ":")))
+          PY
+          )"
+
+          {
+            echo "version=${version}"
+            echo "tag=${tag}"
+            echo "ghcr_owner=${owner}"
+            echo "matrix<<MATRIX_JSON"
+            printf '%s\n' "$matrix"
+            echo "MATRIX_JSON"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build ${{ matrix.name }} image
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          ref: "${{ github.sha }}"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: "${{ github.actor }}"
+          password: "${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v5
+        with:
+          images: "ghcr.io/${{ needs.prepare.outputs.ghcr_owner }}/${{ matrix.image }}"
+          tags: |
+            type=raw,value=${{ needs.prepare.outputs.tag }}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ needs.prepare.outputs.version }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: "${{ matrix.context }}"
+          file: "${{ matrix.file }}"
+          target: "${{ matrix.target }}"
+          push: true
+          tags: "${{ steps.metadata.outputs.tags }}"
+          labels: "${{ steps.metadata.outputs.labels }}"
+          cache-from: "type=gha,scope=${{ matrix.image }}"
+          cache-to: "type=gha,mode=max,scope=${{ matrix.image }}"
+          provenance: mode=max
+          sbom: true
+
+  publish:
+    name: Publish tag and GitHub Release
+    needs:
+      - prepare
+      - build
+    if: ${{ needs.prepare.result == 'success' && needs.build.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      EVENT_REF: "${{ github.ref }}"
+      VERSION: "${{ needs.prepare.outputs.version }}"
+      TAG: "${{ needs.prepare.outputs.tag }}"
+      GHCR_OWNER: "${{ needs.prepare.outputs.ghcr_owner }}"
+      INCLUDE_OPTIONAL: "${{ inputs.include_optional }}"
+    steps:
+      - name: Check out repository history
+        uses: actions/checkout@v4
+        with:
+          ref: "${{ github.sha }}"
+          fetch-depth: 0
+
+      - name: Re-check branch and tag availability
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          if [[ "$EVENT_REF" != "refs/heads/main" ]]; then
+            echo "::error::The release target is no longer main."
+            exit 1
+          fi
+
+          if [[ "$(git rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "::error::The checked-out commit does not match the dispatch commit."
+            exit 1
+          fi
+
+          git fetch --force --tags origin
+          if git rev-parse --verify --quiet "refs/tags/${TAG}" >/dev/null; then
+            echo "::error::Release tag ${TAG} already exists; refusing to overwrite it."
+            exit 1
+          fi
+
+      - name: Create and push annotated Git tag
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag --annotate "$TAG" "$GITHUB_SHA" --message "Release $TAG"
+          git push origin "$TAG"
+
+      - name: Create GitHub Release with generated notes
+        shell: bash
+        env:
+          GH_TOKEN: "${{ secrets.GITHUB_TOKEN }}"
+        run: |
+          set -Eeuo pipefail
+
+          notes_file="$(mktemp)"
+          trap 'rm -f "$notes_file"' EXIT
+
+          {
+            echo "## Published container images"
+            echo
+            for image in \
+              zabt-ai-api \
+              zabt-ai-worker \
+              zabt-ai-web \
+              zabt-ai-gpu-worker \
+              zabt-ai-cpu-worker; do
+              echo "- ghcr.io/${GHCR_OWNER}/${image}:${TAG}"
+              echo "- ghcr.io/${GHCR_OWNER}/${image}:latest"
+            done
+
+            if [[ "$INCLUDE_OPTIONAL" == "true" ]]; then
+              for image in zabt-ai-vision-worker zabt-ai-bot-worker; do
+                echo "- ghcr.io/${GHCR_OWNER}/${image}:${TAG}"
+                echo "- ghcr.io/${GHCR_OWNER}/${image}:latest"
+              done
+            fi
+          } > "$notes_file"
+
+          gh release create "$TAG" \
+            --verify-tag \
+            --generate-notes \
+            --notes-file "$notes_file"
