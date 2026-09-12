@@ -17,6 +17,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libavutil-dev \
     libswresample-dev \
     libswscale-dev \
+    curl \
     git \
     && rm -rf /var/lib/apt/lists/*
 
@@ -38,6 +39,20 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 # Activate venv via PATH
 ENV PATH="/app/.venv/bin:$PATH"
+
+# WhisperX alignment uses NLTK's language-aware Punkt tables. Keep the data in
+# the image so Spanish and other supported languages work on a clean host.
+ENV NLTK_DATA="/usr/local/share/nltk_data"
+RUN mkdir -p "${NLTK_DATA}/tokenizers" \
+    && curl --fail --silent --show-error --location --retry 5 --retry-delay 2 --retry-all-errors \
+        "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/tokenizers/punkt.zip?download=1" \
+        --output /tmp/punkt.zip \
+    && curl --fail --silent --show-error --location --retry 5 --retry-delay 2 --retry-all-errors \
+        "https://raw.githubusercontent.com/nltk/nltk_data/gh-pages/packages/tokenizers/punkt_tab.zip?download=1" \
+        --output /tmp/punkt_tab.zip \
+    && python -c "import zipfile; zipfile.ZipFile('/tmp/punkt.zip').extractall('${NLTK_DATA}/tokenizers'); zipfile.ZipFile('/tmp/punkt_tab.zip').extractall('${NLTK_DATA}/tokenizers')" \
+    && python -c "import nltk; nltk.data.find('tokenizers/punkt_tab/spanish')" \
+    && rm -f /tmp/punkt.zip /tmp/punkt_tab.zip
 
 # Copy source code (fast layer — rebuilds on every code change)
 COPY scripts/ scripts/
