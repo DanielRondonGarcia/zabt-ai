@@ -3,13 +3,34 @@
 """Regression tests for backend-specific GPU transcription timeouts."""
 
 import sys
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Keep this focused module independent of repository settings and the real `.env`.
+fake_config = ModuleType("app.core.config")
+fake_config.settings = SimpleNamespace()
+sys.modules["app.core.config"] = fake_config
+
 from app.models import TranscriptionBackend
-from app.services.transcription.types import TranscriptionConfig
+
+
+from app.services.transcription.gpu_client import GpuTranscriptionClient
+
+
+gpu_client_module = sys.modules["app.services.transcription.gpu_client"]
+
+
+def _transcription_config(storage_key: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        storage_key=storage_key,
+        min_speakers=1,
+        max_speakers=10,
+        language=None,
+        allowed_languages=None,
+        transcription_type=SimpleNamespace(value="general"),
+    )
 
 
 def test_local_backend_uses_gpu_local_timeout():
@@ -21,11 +42,9 @@ def test_local_backend_uses_gpu_local_timeout():
     )
 
     with (
-        patch("app.services.transcription.gpu_client.settings", config),
-        patch("app.services.transcription.gpu_client.httpx.Client"),
+        patch.object(gpu_client_module, "settings", config),
+        patch.object(gpu_client_module.httpx, "Client"),
     ):
-        from app.services.transcription.gpu_client import GpuTranscriptionClient
-
         client = GpuTranscriptionClient(backend=TranscriptionBackend.GPU_LOCAL)
 
     assert client._timeout == 7200
@@ -42,20 +61,86 @@ def test_runpod_backend_retains_runpod_timeout():
     runpod = MagicMock()
 
     with (
-        patch("app.services.transcription.gpu_client.settings", config),
+        patch.object(gpu_client_module, "settings", config),
         patch.dict(sys.modules, {"runpod": runpod}),
     ):
-        from app.services.transcription.gpu_client import GpuTranscriptionClient
-
         client = GpuTranscriptionClient(backend=TranscriptionBackend.RUNPOD)
 
     assert client._timeout == 1800
     runpod.Endpoint.assert_called_once_with("test-endpoint")
 
 
-def test_local_long_job_times_out_with_local_setting_and_preserves_polling():
-    from app.services.transcription.gpu_client import GpuTranscriptionClient
+def test_local_backend_uses_internal_presigned_download_url():
+    client = GpuTranscriptionClient.__new__(GpuTranscriptionClient)
+    client._backend = TranscriptionBackend.GPU_LOCAL
+    client._poll_interval = 0
+    client._timeout = 60
+    client._submit = MagicMock(return_value="job-1")
+    client._poll = MagicMock(
+        return_value=("COMPLETED", {"text": "ok", "segments": []}, None)
+    )
+    storage = MagicMock()
+    storage.get_presigned_download_url.return_value = "http://minio:9000/internal/audio"
 
+    with patch.dict(
+        sys.modules,
+        {"app.services.storage": SimpleNamespace(storage=storage)},
+    ):
+        client.process_audio(
+            "/tmp/audio.mp4",
+            config=_transcription_config("media/audio.mp4"),
+        )
+
+    storage.get_presigned_download_url.assert_called_once_with(
+        "media/audio.mp4", expiration=3600
+    )
+    storage.get_public_presigned_download_url.assert_not_called()
+    client._submit.assert_called_once_with(
+        {
+            "audio_url": "http://minio:9000/internal/audio",
+            "min_speakers": 1,
+            "max_speakers": 10,
+            "transcription_type": "general",
+        }
+    )
+
+
+def test_runpod_backend_uses_public_presigned_download_url():
+    client = GpuTranscriptionClient.__new__(GpuTranscriptionClient)
+    client._backend = TranscriptionBackend.RUNPOD
+    client._poll_interval = 0
+    client._timeout = 60
+    client._submit = MagicMock(return_value="job-1")
+    client._poll = MagicMock(
+        return_value=("COMPLETED", {"text": "ok", "segments": []}, None)
+    )
+    storage = MagicMock()
+    storage.get_public_presigned_download_url.return_value = "https://public.example/audio"
+
+    with patch.dict(
+        sys.modules,
+        {"app.services.storage": SimpleNamespace(storage=storage)},
+    ):
+        client.process_audio(
+            "/tmp/audio.mp4",
+            config=_transcription_config("media/audio.mp4"),
+        )
+
+    storage.get_public_presigned_download_url.assert_called_once_with(
+        "media/audio.mp4", expiration=3600
+    )
+    storage.get_presigned_download_url.assert_not_called()
+    client._submit.assert_called_once_with(
+        {
+            "audio_url": "https://public.example/audio",
+            "min_speakers": 1,
+            "max_speakers": 10,
+            "transcription_type": "general",
+        }
+    )
+
+
+def test_local_long_job_times_out_with_local_setting_and_preserves_polling():
     client = GpuTranscriptionClient.__new__(GpuTranscriptionClient)
     client._backend = TranscriptionBackend.GPU_LOCAL
     client._poll_interval = 0
@@ -74,11 +159,11 @@ def test_local_long_job_times_out_with_local_setting_and_preserves_polling():
         patch("app.services.transcription.gpu_client.time.time", side_effect=[0, 1, 7201]),
         patch("app.services.transcription.gpu_client.time.sleep"),
     ):
-        storage.get_public_presigned_download_url.return_value = "https://example.test/audio"
+        storage.get_presigned_download_url.return_value = "http://gpu-worker/audio"
         with pytest.raises(TimeoutError, match="GPU_LOCAL_TIMEOUT") as exc_info:
             client.process_audio(
                 "/tmp/audio.mp4",
-                config=TranscriptionConfig(storage_key="media/audio.mp4"),
+                config=_transcription_config("media/audio.mp4"),
                 on_status_change=status_changes.append,
             )
 

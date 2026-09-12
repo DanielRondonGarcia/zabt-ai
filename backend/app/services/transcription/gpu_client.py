@@ -73,9 +73,14 @@ class GpuTranscriptionClient:
                 "GpuTranscriptionClient requires config.storage_key to generate a presigned URL."
             )
 
-        download_url = storage.get_public_presigned_download_url(
-            config.storage_key, expiration=3600
-        )
+        if self._backend == TranscriptionBackend.GPU_LOCAL:
+            download_url = storage.get_presigned_download_url(
+                config.storage_key, expiration=3600
+            )
+        else:
+            download_url = storage.get_public_presigned_download_url(
+                config.storage_key, expiration=3600
+            )
 
         job_input: dict[str, Any] = {
             "audio_url": download_url,
