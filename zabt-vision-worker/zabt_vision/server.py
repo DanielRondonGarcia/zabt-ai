@@ -24,6 +24,14 @@ def health() -> dict[str, str]:
 @app.post("/run", response_model=JobResult)
 def run(job: JobInput) -> JobResult:
     settings = get_settings()
+    if not settings.vision_enabled:
+        return JobResult(
+            status="failed",
+            segments=[],
+            model=settings.effective_vision_model,
+            params={},
+            error="visual processing is disabled",
+        )
     try:
         inference = make_inference(settings)
         s3_client = make_s3_client(settings)
@@ -33,7 +41,7 @@ def run(job: JobInput) -> JobResult:
         return JobResult(
             status="failed",
             segments=[],
-            model=settings.vision_judge_model,
+            model=settings.effective_vision_model,
             params=dict(job.params),
             failed_stage=e.stage,
             error=_safe_error(e.original),
@@ -43,7 +51,7 @@ def run(job: JobInput) -> JobResult:
         return JobResult(
             status="failed",
             segments=[],
-            model=settings.vision_judge_model,
+            model=settings.effective_vision_model,
             params=dict(job.params),
             error=_safe_error(e),
         )

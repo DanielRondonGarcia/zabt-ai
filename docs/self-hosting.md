@@ -3,7 +3,8 @@
 This is the default and simplest deployment: everything runs on one machine via Docker
 Compose — API, workers, CPU/GPU transcription, Postgres, Redis, MinIO object storage, and the
 web UI. Authentication is first-party and stored in local PostgreSQL. The only optional remote
-dependency in this guide is an OpenAI-compatible LLM endpoint such as Ollama Cloud.
+dependencies in this guide are the OpenAI-compatible summary endpoint and, when explicitly
+enabled, the OpenAI visual-analysis endpoint. Local Ollama remains supported for visual analysis.
 
 ## 1. Prerequisites
 
@@ -12,7 +13,8 @@ dependency in this guide is an OpenAI-compatible LLM endpoint such as Ollama Clo
   [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
   No GPU is fine — see [CPU-only](#cpu-only).
 - ~10-15 GB free disk for model weights and media.
-- An **OpenAI-compatible LLM** key (OpenRouter, OpenAI, or a local Ollama/vLLM/LM Studio).
+- An **OpenAI-compatible LLM** key (OpenRouter, OpenAI, or a local Ollama/vLLM/LM Studio) for
+  summaries. OpenAI visual analysis uses a separate `VISION_OPENAI_API_KEY` when enabled.
 - A **Hugging Face** token with the pyannote gate accepted (see below).
 
 Optional visual processing is disabled by default. It is not required for transcript-only
@@ -88,7 +90,14 @@ docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
 ```
 
 Set a smaller model for usable speed, e.g. `WHISPER_MODEL=base` in `.env`. CPU transcription
-runs `int8` compute automatically and is roughly 1-5× real-time.
+runs `int8` compute automatically and is roughly 1-5× real-time. The local backend timeout is
+`GPU_LOCAL_TIMEOUT=7200` seconds by default, independent of `RUNPOD_TIMEOUT`. If a recording needs
+more time, edit `GPU_LOCAL_TIMEOUT` in `.env` and recreate only the backend worker without rebuilding
+the image:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d --no-build --force-recreate worker
+```
 
 ## Optional add-ons
 
@@ -96,20 +105,55 @@ Enable by editing `COMPOSE_PROFILES` in `.env` (comma-separated):
 
 - `COMPOSE_PROFILES=local,bot` — Microsoft Teams meeting bot (headless browser).
 - `COMPOSE_PROFILES=local,vision` — visual breakdown worker. It still requires
-  `VISION_ENABLED=true` and an Ollama host serving the vision model; set `OLLAMA_HOST` and keep
-  `OLLAMA_NO_CLOUD=1` for local inference.
+  `VISION_ENABLED=true` and an explicit inference backend selection.
 
-### Optional local visual processing
+### Optional OpenAI visual processing
 
-1. Set `VISION_ENABLED=true` and keep `VISION_BACKEND=local`.
-2. Set `VISION_EGRESS_POLICY=deny` for an in-network worker, or use `allowlist` with explicit
-   `VISION_ALLOWED_HOSTS` entries for the inference host.
-3. Start the add-on with `docker compose --profile vision up -d --build`.
+1. Set `VISION_OPENAI_API_KEY` to an OpenAI key. Keep `OPENAI_API_KEY` unchanged for summaries;
+   it may target OpenRouter or another compatible provider and is not passed to the vision worker.
+2. Set `VISION_ENABLED=true`, keep `VISION_BACKEND=local`, and select OpenAI explicitly:
+
+   ```dotenv
+   VISION_INFERENCE_BACKEND=openai
+   VISION_OPENAI_API_KEY=your-openai-vision-key
+   VISION_CLOUD_ALLOWED=true
+   VISION_EGRESS_POLICY=allowlist
+   VISION_ALLOWED_HOSTS=api.openai.com
+   VISION_OPENAI_BASE_URL=https://api.openai.com/v1
+   VISION_OPENAI_MODEL=gpt-4o-mini
+   VISION_OPENAI_IMAGE_DETAIL=low
+   VISION_OPENAI_MAX_TOKENS=1024
+   ```
+
+3. Start or recreate only the visual worker:
+
+   ```bash
+   docker compose --profile vision up -d --build --force-recreate zabt-vision-worker
+   ```
+
 4. Confirm the worker health endpoint before processing a video:
 
    ```bash
    curl http://localhost:8003/health
    ```
+
+OpenAI receives selected keyframes as base64 image inputs for visual inference. The vision worker
+does not use the local GPU for that inference; `OCR_USE_GPU=false` remains set for its local OCR
+signal. The separate `worker-gpu` transcription service is unchanged. Keyframes and raw pipeline
+output are written to local MinIO by default (`S3_ENDPOINT_URL=http://minio:9000`, region
+`us-east-1`, `minioadmin` credentials, and bucket `zabt-ai-bucket`). Set the explicit `S3_*`
+variables in `.env` to override those vision-worker fallbacks for external S3-compatible storage.
+`low` image detail reduces image-token usage but can miss small screen text; use `auto` or `high`
+when needed. Image cost varies by resolution, model, and detail; there is no fixed per-image price.
+
+### Optional local visual processing with Ollama
+
+1. Set `VISION_ENABLED=true`, keep `VISION_BACKEND=local`, and set
+   `VISION_INFERENCE_BACKEND=ollama`.
+2. Set `OLLAMA_HOST` to the local Ollama endpoint and keep `OLLAMA_NO_CLOUD=1`.
+3. Set `VISION_EGRESS_POLICY=deny` for an in-network worker, or use `allowlist` with explicit
+   `VISION_ALLOWED_HOSTS` entries for the inference host.
+4. Start the add-on with `docker compose --profile vision up -d --build`.
 
 Visual failures are non-fatal: the meeting remains usable and the summary falls back to
 transcript-only evidence. The pipeline keeps retries bounded and never switches to RunPod or
@@ -153,8 +197,12 @@ Tunnel). Update `APP_URL`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_FRONTEND_URL`,
   browser origin. Existing Supabase-only users are not silently migrated; create a local account.
 - **Visual processing is skipped** → confirm both `COMPOSE_PROFILES` contains `vision` and
   `VISION_ENABLED=true`; audio-only and YouTube inputs intentionally remain transcript-only.
+- **Visual worker cannot reach OpenAI** → confirm `VISION_OPENAI_API_KEY` is an OpenAI key, the
+  worker uses `VISION_INFERENCE_BACKEND=openai`, `VISION_CLOUD_ALLOWED=true`,
+  `VISION_EGRESS_POLICY=allowlist`, `VISION_ALLOWED_HOSTS=api.openai.com`, and an HTTPS endpoint.
+  Do not broaden the allowlist or reuse an OpenRouter summary key as a first troubleshooting step.
 - **Visual worker cannot reach Ollama** → verify `OLLAMA_HOST`, `OLLAMA_NO_CLOUD`, and the
-  `VISION_EGRESS_POLICY`/`VISION_ALLOWED_HOSTS` combination. No cloud provider is selected
+  `VISION_EGRESS_POLICY`/`VISION_ALLOWED_HOSTS` combination. No provider is selected
   automatically.
 - **Video analysis fails repeatedly** → leave visual processing disabled while recovering the
   endpoint, then retry after the worker health check succeeds. Existing transcript summaries do

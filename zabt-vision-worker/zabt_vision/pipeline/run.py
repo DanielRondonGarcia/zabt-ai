@@ -168,7 +168,7 @@ def _skip_result(job: JobInput, settings: Settings, reason: str) -> JobResult:
     return JobResult(
         status="completed",
         segments=[],
-        model=settings.vision_judge_model,
+        model=settings.effective_vision_model,
         params={"skip_reason": reason},
         stage_metrics={"skipped": {"reason": reason}},
     )
@@ -476,7 +476,7 @@ def _run_pipeline(
         status="completed",
         segments=segments,
         raw_output_s3_key=raw_key,
-        model=settings.vision_judge_model,
+        model=settings.effective_vision_model,
         params=dict(job.params)
         | {
             "fps": fps,
@@ -507,7 +507,7 @@ def run_pipeline(
         return JobResult(
             status="failed",
             segments=[],
-            model=settings.vision_judge_model,
+            model=settings.effective_vision_model,
             params={},
             failed_stage=error.stage,
             error=_safe_error(error.original),
@@ -516,7 +516,7 @@ def run_pipeline(
         return JobResult(
             status="failed",
             segments=[],
-            model=settings.vision_judge_model,
+            model=settings.effective_vision_model,
             params={},
             error=_safe_error(error),
         )

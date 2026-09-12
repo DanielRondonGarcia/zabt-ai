@@ -3,19 +3,38 @@
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     # Inference backend
-    vision_inference_backend: Literal["ollama", "lmstudio", "llamacpp", "transformers"] = "ollama"
+    vision_inference_backend: Literal[
+        "ollama", "openai", "lmstudio", "llamacpp", "transformers"
+    ] = "ollama"
     vision_judge_model: str = "qwen3-vl:8b-thinking"
 
     # Ollama
     ollama_host: str = "http://localhost:11434"
     ollama_no_cloud: bool = True
+
+    # OpenAI-compatible vision provider. This key is intentionally independent
+    # from OPENAI_API_KEY, which may target a different summary provider.
+    vision_openai_api_key: str | None = Field(
+        default=None,
+        validation_alias="VISION_OPENAI_API_KEY",
+    )
+    vision_openai_base_url: str = "https://api.openai.com/v1"
+    vision_openai_model: str = "gpt-4o-mini"
+    vision_openai_image_detail: Literal["low", "auto", "high"] = "low"
+    vision_openai_max_tokens: int = Field(default=1024, ge=1, le=4096)
 
     # Provider capability and egress policy
     vision_enabled: bool = False
@@ -50,6 +69,13 @@ class Settings(BaseSettings):
 
     # Output
     work_dir: str = "/tmp/zabt-vision-worker"
+
+    @property
+    def effective_vision_model(self) -> str:
+        """Return the model used by the selected inference backend."""
+        if self.vision_inference_backend == "openai":
+            return self.vision_openai_model
+        return self.vision_judge_model
 
 
 @lru_cache(maxsize=1)
