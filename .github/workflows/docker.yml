@@ -34,24 +34,26 @@ jobs:
         env:
           COMPOSE_DISABLE_ENV_FILE: '1'
           COMPOSE_PROFILES: cloud-prod
-          ZABT_API_IMAGE: ghcr.io/example/zabt-ai-api:v0.0.0
-          ZABT_WORKER_IMAGE: ghcr.io/example/zabt-ai-worker:v0.0.0
-          ZABT_WEB_IMAGE: ghcr.io/example/zabt-ai-web:v0.0.0
-          ZABT_VISION_IMAGE: ghcr.io/example/zabt-ai-vision-worker:v0.0.0
-          DATABASE_URL: postgresql+asyncpg://ci:ci@managed-db.example.test:5432/zabt
-          AUTH_JWT_SECRET: ci-dummy-auth-secret-not-a-real-secret
+          ZABT_API_IMAGE: ghcr.io/example/zabt-ai-api:v0.1.0
+          ZABT_WORKER_IMAGE: ghcr.io/example/zabt-ai-worker:v0.1.0
+          ZABT_WEB_IMAGE: ghcr.io/example/zabt-ai-web:v0.1.0
+          ZABT_GPU_IMAGE: ghcr.io/example/zabt-ai-gpu-worker:v0.1.0
+          ZABT_VISION_IMAGE: ghcr.io/example/zabt-ai-vision-worker:v0.1.0
+          DATABASE_URL: postgresql+asyncpg://ci:ci@db:5432/zabt
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-dummy-postgres-password
+          POSTGRES_DB: zabt
+          AUTH_JWT_SECRET: ci-dummy-auth-secret-with-enough-diversity-1234
           AUTH_ALLOWED_ORIGINS: https://web.example.test
           BACKEND_CORS_ORIGINS: https://web.example.test
           APP_URL: https://web.example.test
-          S3_ENDPOINT_URL: https://s3.example.test
-          S3_ACCESS_KEY_ID: ci-dummy-s3-access-key
-          S3_SECRET_ACCESS_KEY: ci-dummy-s3-secret-key
-          S3_BUCKET_NAME: ci-dummy-bucket
-          S3_PUBLIC_URL: https://s3-public.example.test
-          RUNPOD_API_KEY: ci-dummy-runpod-key
-          RUNPOD_ENDPOINT_ID: ci-dummy-runpod-endpoint
+          MINIO_ACCESS_KEY: ci-dummy-minio-access-key
+          MINIO_SECRET_KEY: ci-dummy-minio-secret-key
+          MINIO_BUCKET_NAME: ci-dummy-zabt-bucket
+          MINIO_PUBLIC_ENDPOINT: http://localhost:9000
           OPENAI_API_KEY: ci-dummy-openai-summary-key
           VISION_OPENAI_API_KEY: ci-dummy-openai-vision-key
+          HF_TOKEN: ci-dummy-hf-token
           NEXT_PUBLIC_API_URL: https://api.example.test/api/v1
           NEXT_PUBLIC_FRONTEND_URL: https://web.example.test
         run: docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml config --quiet

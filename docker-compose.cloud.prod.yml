@@ -1,55 +1,60 @@
-# Production cloud-oriented override for the base Compose topology.
+# Single-machine production image override for the base Compose topology.
 #
-# Run this file together with docker-compose.yml. The deployment host still keeps
-# its values in .env; the process-level COMPOSE_PROFILES=cloud-prod setting must
-# override any local value from .env so that local db/minio/worker-gpu services do
-# not start. Do not copy secrets into this file.
+# Run this file together with docker-compose.yml. The cloud-prod profile keeps
+# PostgreSQL, MinIO, Redis, and the bundled GPU transcription worker on the same
+# Compose network as the published API, worker, web, and vision images.
+# Do not copy secrets into this file.
 #
 # TLS is terminated by the external NetBird/Caddy/reverse-proxy layer. Route the
 # web public domain to the peer's HTTP port 3000 and the API public domain to the
 # peer's HTTP port 8000. This file intentionally adds neither Kong nor certificates.
 
 x-cloud-backend-environment: &cloud-backend-environment
-  # Managed PostgreSQL. The same URL and auth settings are required by every
-  # backend process because api, worker, and beat import the application settings.
+  # Local stateful services. The service names resolve on the Compose network.
   DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set for cloud production}
-  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+  REDIS_URL: redis://redis:6379/0
+
+  # First-party local authentication shared by api, worker, and beat.
   AUTH_ENVIRONMENT: production
   AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET must be set for cloud production}
   AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-zabt-api}
   AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-zabt-client}
+  AUTH_ACCESS_TOKEN_EXPIRE_MINUTES: ${AUTH_ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+  AUTH_REFRESH_SESSION_EXPIRE_DAYS: ${AUTH_REFRESH_SESSION_EXPIRE_DAYS:-30}
+  AUTH_ACCESS_COOKIE_NAME: ${AUTH_ACCESS_COOKIE_NAME:-zabt_access_token}
+  AUTH_REFRESH_COOKIE_NAME: ${AUTH_REFRESH_COOKIE_NAME:-zabt_refresh_token}
   AUTH_COOKIE_SECURE: "true"
   AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+  AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
   AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:?AUTH_ALLOWED_ORIGINS must be set for cloud production}
   BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:?BACKEND_CORS_ORIGINS must be set for cloud production}
   APP_URL: ${APP_URL:?APP_URL must be set for cloud production}
 
-  # Managed S3-compatible object storage. S3_PUBLIC_URL must be reachable by
-  # browsers and by RunPod when the API returns presigned media URLs.
-  STORAGE_PROVIDER: s3
-  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:?S3_ENDPOINT_URL must be set for cloud production}
-  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID must be set for cloud production}
-  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY must be set for cloud production}
-  S3_BUCKET_NAME: ${S3_BUCKET_NAME:?S3_BUCKET_NAME must be set for cloud production}
-  S3_PUBLIC_URL: ${S3_PUBLIC_URL:?S3_PUBLIC_URL must be set for cloud production}
-  S3_REGION: ${S3_REGION:-auto}
-
-  # RunPod is the production transcription provider; do not require worker-gpu.
-  TRANSCRIPTION_BACKEND: runpod
-  GPU_SERVICE_URL: ""
-  RUNPOD_API_KEY: ${RUNPOD_API_KEY:?RUNPOD_API_KEY must be set for cloud production}
-  RUNPOD_ENDPOINT_ID: ${RUNPOD_ENDPOINT_ID:?RUNPOD_ENDPOINT_ID must be set for cloud production}
-  RUNPOD_POLL_INTERVAL: ${RUNPOD_POLL_INTERVAL:-5}
-  RUNPOD_TIMEOUT: ${RUNPOD_TIMEOUT:-1800}
-
-  # Text summaries use the first-party OpenAI endpoint in this production file.
-  # The key is intentionally separate from the vision key below.
+  # Text summaries use the first-party OpenAI endpoint.
   OPENAI_BASE_URL: https://api.openai.com/v1
   OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set for cloud summaries}
   OPENAI_MODEL: gpt-4o-mini
 
-  # Visual processing is enabled only through this explicit cloud configuration.
-  # The vision worker receives the same values through its own environment below.
+  # Local MinIO is the only backend storage provider in this topology. The
+  # public endpoint must be reachable by the browser when it uploads/downloads
+  # objects through presigned URLs.
+  STORAGE_PROVIDER: minio
+  MINIO_ENDPOINT: minio:9000
+  MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-http://localhost:9000}
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set for cloud production}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set for cloud production}
+  MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:?MINIO_BUCKET_NAME must be set for cloud production}
+  MINIO_WEBHOOK_SECRET: ${MINIO_WEBHOOK_SECRET:-change-me-in-production}
+  MINIO_SECURE: ${MINIO_SECURE:-false}
+
+  # Transcription is performed by the bundled GPU worker over the internal
+  # Compose network. No external transcription provider is configured here.
+  TRANSCRIPTION_BACKEND: gpu-local
+  GPU_SERVICE_URL: http://worker-gpu:8001
+  GPU_LOCAL_TIMEOUT: ${GPU_LOCAL_TIMEOUT:-7200}
+
+  # Visual analysis uses the internal vision worker, which calls OpenAI over
+  # HTTPS with a separate credential and an explicit host allowlist.
   VISION_ENABLED: "true"
   VISION_BACKEND: local
   VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://zabt-vision-worker:8003}
@@ -64,35 +69,85 @@ x-cloud-backend-environment: &cloud-backend-environment
   VISION_OPENAI_MODEL: gpt-4o-mini
   VISION_OPENAI_IMAGE_DETAIL: low
   VISION_OPENAI_MAX_TOKENS: 1024
+  VISION_MAX_RETRIES: ${VISION_MAX_RETRIES:-2}
+  VISION_RETRY_BACKOFF_SECONDS: ${VISION_RETRY_BACKOFF_SECONDS:-5}
+  VISION_POLL_INTERVAL: ${VISION_POLL_INTERVAL:-5}
+  VISION_TIMEOUT: ${VISION_TIMEOUT:-1800}
   VISION_SIGNED_URL_EXPIRATION: ${VISION_SIGNED_URL_EXPIRATION:-3600}
 
-  SENTRY_ENVIRONMENT: production
+  SUMMARY_CHUNK_SECONDS: ${SUMMARY_CHUNK_SECONDS:-120}
+  SUMMARY_MAX_INPUT_TOKENS: ${SUMMARY_MAX_INPUT_TOKENS:-6000}
 
-  # Make the absence of the local MinIO profile explicit in backend settings.
-  MINIO_ENDPOINT: ""
-  MINIO_PUBLIC_ENDPOINT: ""
-  MINIO_ACCESS_KEY: ""
-  MINIO_SECRET_KEY: ""
-  MINIO_BUCKET_NAME: ""
-  MINIO_WEBHOOK_SECRET: ""
+  # Optional integrations and observability retain the base Compose defaults.
+  MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+  MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+  MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-common}
+  MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI:-http://localhost:8000/api/v1/integrations/microsoft/callback}
+  TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+  RESEND_API_KEY: ${RESEND_API_KEY:-}
+  RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-no-reply@zabt.ai}
+  NOTIFICATION_PROVIDER: ${NOTIFICATION_PROVIDER:-}
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+  BOT_WORKER_URL: ${BOT_WORKER_URL:-http://worker-bot:8002}
+  POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
+  POSTHOG_HOST: ${POSTHOG_HOST:-https://us.i.posthog.com}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: production
+  LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+  LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
 
 services:
   api:
     image: ${ZABT_API_IMAGE:?ZABT_API_IMAGE must be set to an immutable GHCR release image}
-    environment: *cloud-backend-environment
+    environment: !override
+      <<: *cloud-backend-environment
 
   worker:
     image: ${ZABT_WORKER_IMAGE:?ZABT_WORKER_IMAGE must be set to an immutable GHCR release image}
-    environment: *cloud-backend-environment
+    environment: !override
+      <<: *cloud-backend-environment
 
   beat:
     image: ${ZABT_WORKER_IMAGE:?ZABT_WORKER_IMAGE must be set to an immutable GHCR release image}
-    environment: *cloud-backend-environment
+    environment: !override
+      <<: *cloud-backend-environment
 
-  # The base file keeps Redis always-on. REDIS_URL above may point api/worker/beat
-  # at a managed broker; in that case the bundled Redis container is harmless but
-  # unused unless the variable is left at its default.
+  # Redis remains always-on and keeps the local worker network unchanged.
   redis: {}
+
+  # Activate the base local stateful services in the production profile. Their
+  # named volumes and service names are intentionally inherited unchanged.
+  db:
+    profiles: !override [cloud-prod]
+
+  minio:
+    profiles: !override [cloud-prod]
+
+  minio-init:
+    profiles: !override [cloud-prod]
+
+  # Local GPU transcription worker. The base service retains its NVIDIA device
+  # reservation and model-cache volume; only its profile, image, and host ports
+  # are changed for this internal production deployment.
+  worker-gpu:
+    image: ${ZABT_GPU_IMAGE:?ZABT_GPU_IMAGE must be set to an immutable GHCR release image}
+    profiles: !override [cloud-prod]
+    ports: !override []
+    environment:
+      MODE: local
+      PORT: 8001
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-3.1}
+      MEDASR_MODEL: ${MEDASR_MODEL:-google/medasr}
+      HF_TOKEN: ${HF_TOKEN:-}
+      DIARIZATION_MIN_SPEAKERS: ${DIARIZATION_MIN_SPEAKERS:-1}
+      DIARIZATION_MAX_SPEAKERS: ${DIARIZATION_MAX_SPEAKERS:-10}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: production
+      LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
 
   web:
     image: ${ZABT_WEB_IMAGE:?ZABT_WEB_IMAGE must be set to an immutable GHCR release image}
@@ -139,11 +194,12 @@ services:
       VISION_OPENAI_IMAGE_DETAIL: low
       VISION_OPENAI_MAX_TOKENS: 1024
       VISION_REQUIRE_VISION: "true"
-      # The vision worker writes keyframes/raw output to the same external bucket.
-      S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:?S3_ENDPOINT_URL must be set for cloud production}
-      S3_REGION: ${S3_REGION:-auto}
-      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID must be set for cloud production}
-      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY must be set for cloud production}
-      S3_BUCKET: ${S3_BUCKET_NAME:?S3_BUCKET_NAME must be set for cloud production}
+      # The worker uses MinIO's S3-compatible API with fixed internal service
+      # networking; no managed-storage variables are required.
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set for cloud production}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set for cloud production}
+      S3_BUCKET: ${MINIO_BUCKET_NAME:?MINIO_BUCKET_NAME must be set for cloud production}
       OCR_USE_GPU: "false"
       OLLAMA_NO_CLOUD: "1"
