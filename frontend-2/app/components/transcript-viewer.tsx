@@ -3,7 +3,7 @@
 "use client";
 
 import { memo } from "react";
-import { TranscriptSegment, TranscriptWord } from "@/app/lib/api";
+import type { TranscriptSegment, TranscriptWord } from "@/app/lib/api";
 import { useTranscriptStore } from "@/app/lib/use-transcript-store";
 
 const formatTime = (seconds: number) => {
@@ -89,6 +89,8 @@ function SegmentRow({
                         {getSpeakerLabel(segment.speaker)}
                     </span>
                     <button
+                        type="button"
+                        aria-label={`Seek to ${formatTime(segment.start)}`}
                         className="text-xs text-stone-400 hover:text-primary transition-colors tabular-nums cursor-pointer"
                         onClick={() => setSeekRequest(segment.start)}
                     >

@@ -167,9 +167,14 @@ def test_get_visual_segments_returns_aligned_segments(
         body = r.json()
         assert body["visual_breakdown_status"] == "completed"
         assert len(body["visual_segments"]) == 2
+        assert body["visual_segments"][0]["id"]
+        assert body["visual_segments"][0]["start_time"] == 0.0
+        assert body["visual_segments"][0]["end_time"] == 5.0
         assert body["visual_segments"][0]["caption"] == "Login page"
         assert body["visual_segments"][0]["screenshot_url"].startswith("https://signed/")
         assert body["visual_segments"][0]["transcript_lines"][0]["text"] == "hi from login"
+        assert body["visual_segments"][0]["transcript_lines"][0]["start"] == 1.0
+        assert body["visual_segments"][0]["transcript_lines"][0]["end"] == 2.0
         # Segment 1 has no transcript lines (only one line at t=1.0 which falls in segment 0)
         assert body["visual_segments"][1]["transcript_lines"] == []
     finally:
@@ -184,3 +189,53 @@ def test_get_visual_segments_404_when_meeting_missing(
         headers=normal_user_token_headers,
     )
     assert r.status_code == 404
+
+
+def test_get_visual_segments_preserves_fallback_as_a_non_fatal_outcome(
+    client: TestClient, normal_user_token_headers
+):
+    meeting_id = _make_meeting()
+    try:
+        with Session(engine) as session:
+            meeting = session.get(Meeting, meeting_id)
+            meeting.visual_breakdown_status = "fallback"
+            meeting.visual_breakdown_error = "vision_worker_error"
+            session.add(meeting)
+            session.commit()
+
+        response = client.get(
+            f"/api/v1/meetings/{meeting_id}/visual-segments",
+            headers=normal_user_token_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["visual_breakdown_status"] == "fallback"
+        assert body["visual_segments"] == []
+    finally:
+        _delete_meeting(meeting_id)
+
+
+def test_meeting_status_remains_processing_while_context_is_built(
+    client: TestClient, normal_user_token_headers
+):
+    meeting_id = _make_meeting()
+    try:
+        with Session(engine) as session:
+            meeting = session.get(Meeting, meeting_id)
+            meeting.status = "processing"
+            meeting.sub_status = "building_context"
+            session.add(meeting)
+            session.commit()
+
+        response = client.get(
+            f"/api/v1/meetings/{meeting_id}",
+            headers=normal_user_token_headers,
+        )
+
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "processing"
+        assert body["sub_status"] == "building_context"
+    finally:
+        _delete_meeting(meeting_id)

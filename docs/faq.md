@@ -62,11 +62,13 @@ recommended for `large-v3` and for reasonable throughput.
 No. Kong is only in the optional cloud/production topology as a TLS gateway. The default
 single-machine stack does not use it.
 
-### Do I need Supabase? Can I self-host auth?
+### Do I need Supabase for authentication?
 
-zabt.ai delegates authentication to Supabase. The easiest path is a **free Supabase cloud
-project**. You can also run **self-hosted Supabase** separately and point the `SUPABASE_*`
-variables at it — the app only needs the auth endpoints and the JWT secret.
+No. Authentication is first-party local email/password authentication backed by PostgreSQL.
+Supabase, Keycloak, Authentik, OAuth SaaS, and external email providers are not required. The
+first slice intentionally does not include password reset or email verification because there is
+no email delivery dependency. Existing Supabase-only rows are retained for compatibility but are
+not silently migrated; create a local account instead.
 
 ### Can I use S3 / Cloudflare R2 instead of MinIO?
 

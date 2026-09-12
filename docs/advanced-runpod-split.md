@@ -86,4 +86,4 @@ In this topology the Next.js UI is usually hosted separately (e.g. Vercel) point
 - Keep the API VPS firewalled to 80/443 only; Postgres/Redis should not be publicly reachable.
 - RunPod cold starts add latency to the first job after idle; tune endpoint min-workers to
   trade cost for latency.
-- Rotate `RUNPOD_API_KEY`, storage keys, and `SUPABASE_JWT_SECRET` on any suspected exposure.
+- Rotate `RUNPOD_API_KEY`, storage keys, and `AUTH_JWT_SECRET` on any suspected exposure.

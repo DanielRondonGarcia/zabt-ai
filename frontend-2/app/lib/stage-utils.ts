@@ -2,13 +2,24 @@
 // Copyright (C) 2025-2026 Afeef Janjua
 import type { Meeting } from "@/app/lib/api";
 
-export type UserStage = "uploaded" | "transcribing" | "aligning" | "diarizing" | "summarizing" | "done" | "failed";
+export type UserStage =
+  | "uploaded"
+  | "transcribing"
+  | "aligning"
+  | "diarizing"
+  | "analyzing_video"
+  | "building_context"
+  | "summarizing"
+  | "done"
+  | "failed";
 
 export const STAGE_ORDER: UserStage[] = [
   "uploaded",
   "transcribing",
   "aligning",
   "diarizing",
+  "analyzing_video",
+  "building_context",
   "summarizing",
   "done",
 ];
@@ -18,6 +29,8 @@ export const STAGE_LABELS: Record<UserStage, string> = {
   transcribing: "Transcribing…",
   aligning: "Aligning…",
   diarizing: "Diarizing…",
+  analyzing_video: "Analyzing video…",
+  building_context: "Building context…",
   summarizing: "Summarizing…",
   done: "Done",
   failed: "Failed",
@@ -46,6 +59,10 @@ export function getUserStage(meeting: Pick<Meeting, "status" | "sub_status">): U
     case "diarizing":
     case "parsing":
       return "diarizing";
+    case "analyzing_video":
+      return "analyzing_video";
+    case "building_context":
+      return "building_context";
     case "summarizing":
       return "summarizing";
     case "cleaning_up":

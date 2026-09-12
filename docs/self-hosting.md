@@ -1,9 +1,9 @@
 # Self-hosting zabt.ai (single machine)
 
 This is the default and simplest deployment: everything runs on one machine via Docker
-Compose — API, workers, GPU transcription, Postgres, Redis, MinIO object storage, and the web
-UI. The only external dependency is a Supabase project for authentication (a free one works)
-and an LLM API key.
+Compose — API, workers, CPU/GPU transcription, Postgres, Redis, MinIO object storage, and the
+web UI. Authentication is first-party and stored in local PostgreSQL. The only optional remote
+dependency in this guide is an OpenAI-compatible LLM endpoint such as Ollama Cloud.
 
 ## 1. Prerequisites
 
@@ -12,9 +12,11 @@ and an LLM API key.
   [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
   No GPU is fine — see [CPU-only](#cpu-only).
 - ~10-15 GB free disk for model weights and media.
-- A **Supabase** project (free): https://supabase.com
 - An **OpenAI-compatible LLM** key (OpenRouter, OpenAI, or a local Ollama/vLLM/LM Studio).
 - A **Hugging Face** token with the pyannote gate accepted (see below).
+
+Optional visual processing is disabled by default. It is not required for transcript-only
+summaries and should be enabled only after the local/private egress controls are configured.
 
 ## 2. Configure
 
@@ -28,13 +30,34 @@ Edit `.env` and set at minimum:
 
 | Variable | Where to get it |
 |----------|-----------------|
-| `SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_URL` | Supabase → Project Settings → API |
-| `SUPABASE_JWT_SECRET` | Supabase → Project Settings → API → JWT Settings |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Supabase → Project Settings → API (anon/publishable key) |
+| `AUTH_JWT_SECRET` | Required in every environment. Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"` and paste the result into `.env` |
+| `AUTH_ENVIRONMENT` | Leave `development` for localhost; set `production` for an explicit production deployment |
+| `AUTH_ALLOWED_ORIGINS` | Exact web origin(s), normally `http://localhost:3000` locally |
 | `OPENAI_API_KEY` | Your LLM provider (e.g. https://openrouter.ai/keys) |
 | `HF_TOKEN` | https://huggingface.co/settings/tokens (accept pyannote gate first) |
 
-Leave `COMPOSE_PROFILES=local` and the bundled `DATABASE_URL` / MinIO defaults as-is.
+Leave `COMPOSE_PROFILES=local`, `VISION_ENABLED=false`, and the bundled `DATABASE_URL` / MinIO
+defaults as-is for the private transcript-only deployment.
+
+The local development defaults allow plain HTTP on localhost with `AUTH_COOKIE_SECURE=false` and
+`AUTH_COOKIE_SAMESITE=lax`. For an internet-facing deployment, set
+`AUTH_ENVIRONMENT=production`, put the web and API behind HTTPS, set `AUTH_COOKIE_SECURE=true`,
+use a deployment secret generated with the command above, and set `AUTH_ALLOWED_ORIGINS` and
+`BACKEND_CORS_ORIGINS` to exact HTTPS origins. Startup rejects a missing/placeholder/weak secret,
+production insecure cookies, and `AUTH_COOKIE_SAMESITE=none` without secure cookies. Do not put
+access or refresh tokens in browser localStorage.
+
+The web login/register flow sends `client=web` and receives HttpOnly cookies. The mobile flow sends
+`client=mobile`, stores the JSON access/refresh pair through SecureStore, and refreshes rotated
+sessions after a 401. Refresh sessions are revocable in PostgreSQL. Password reset and email
+verification are intentionally not available in this first slice because no email provider is
+configured.
+
+For live transcription, prefer the WebSocket access cookie or an `Authorization: Bearer ...`
+header. The legacy query-string bearer form (`?token=`) is accepted only with an exact allowed
+`Origin`, but URLs can still leak through browser history and proxy/access logs; treat it as a
+compatibility path, not the preferred credential transport. The WebSocket also rejects inactive
+users and preserves meeting ownership checks.
 
 ### pyannote Hugging Face gate
 
@@ -72,8 +95,28 @@ runs `int8` compute automatically and is roughly 1-5× real-time.
 Enable by editing `COMPOSE_PROFILES` in `.env` (comma-separated):
 
 - `COMPOSE_PROFILES=local,bot` — Microsoft Teams meeting bot (headless browser).
-- `COMPOSE_PROFILES=local,vision` — visual breakdown worker (needs an Ollama host serving
-  the vision model; set `OLLAMA_HOST`).
+- `COMPOSE_PROFILES=local,vision` — visual breakdown worker. It still requires
+  `VISION_ENABLED=true` and an Ollama host serving the vision model; set `OLLAMA_HOST` and keep
+  `OLLAMA_NO_CLOUD=1` for local inference.
+
+### Optional local visual processing
+
+1. Set `VISION_ENABLED=true` and keep `VISION_BACKEND=local`.
+2. Set `VISION_EGRESS_POLICY=deny` for an in-network worker, or use `allowlist` with explicit
+   `VISION_ALLOWED_HOSTS` entries for the inference host.
+3. Start the add-on with `docker compose --profile vision up -d --build`.
+4. Confirm the worker health endpoint before processing a video:
+
+   ```bash
+   curl http://localhost:8003/health
+   ```
+
+Visual failures are non-fatal: the meeting remains usable and the summary falls back to
+transcript-only evidence. The pipeline keeps retries bounded and never switches to RunPod or
+another provider automatically. If the endpoint is unavailable, set `VISION_ENABLED=false`,
+restart the worker and API stack, then retry the meeting after `/health` is healthy. Inspect the
+meeting's bounded visual status/error fields rather than searching logs for media, transcripts,
+prompts, or signed URLs.
 
 ## Operations
 
@@ -105,5 +148,24 @@ Tunnel). Update `APP_URL`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_FRONTEND_URL`,
   accepted.
 - **Uploads don't trigger transcription** → check the `minio-init` container configured the
   bucket webhook, and that `MINIO_WEBHOOK_SECRET` matches between MinIO and the API.
-- **Auth errors** → verify the four `SUPABASE_*` values and that `SUPABASE_JWT_SECRET` matches
-  your project.
+- **Auth errors** → confirm the API and web use the same `AUTH_JWT_SECRET`, the database migration
+  reached the `m1n2o3p4q5` local-auth revision, and `AUTH_ALLOWED_ORIGINS` exactly matches the
+  browser origin. Existing Supabase-only users are not silently migrated; create a local account.
+- **Visual processing is skipped** → confirm both `COMPOSE_PROFILES` contains `vision` and
+  `VISION_ENABLED=true`; audio-only and YouTube inputs intentionally remain transcript-only.
+- **Visual worker cannot reach Ollama** → verify `OLLAMA_HOST`, `OLLAMA_NO_CLOUD`, and the
+  `VISION_EGRESS_POLICY`/`VISION_ALLOWED_HOSTS` combination. No cloud provider is selected
+  automatically.
+- **Video analysis fails repeatedly** → leave visual processing disabled while recovering the
+  endpoint, then retry after the worker health check succeeds. Existing transcript summaries do
+  not need to be regenerated.
+
+## Known limitations not covered by this correction
+
+- Refresh retries in concurrent clients still need single-flight coordination around token rotation.
+- Login/register still need rate limiting, lockout policy, and timing equalization for unknown users.
+- Existing Supabase-only accounts retain their legacy identifiers but have no automatic local
+  password migration.
+- Multipart upload URL/completion ownership remains a pre-existing issue and was not changed here.
+- Refresh cookies retain their existing API-wide path and should receive a separate scope review.
+- Email verification and password reset require a separate delivery-provider feature.

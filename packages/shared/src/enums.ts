@@ -9,6 +9,30 @@ export type MeetingStatus =
   | "completed"
   | "failed";
 
+/** Known pipeline sub-statuses. Error messages may still use arbitrary strings. */
+export type MeetingSubStatus =
+  | "downloading"
+  | "downloading_youtube"
+  | "validating"
+  | "extracting_audio"
+  | "uploading"
+  | "transcribing"
+  | "aligning"
+  | "diarizing"
+  | "parsing"
+  | "analyzing_video"
+  | "building_context"
+  | "summarizing"
+  | "cleaning_up";
+
+/** Terminal states for the optional visual breakdown stage. */
+export type VisualBreakdownStatus =
+  | "queued"
+  | "processing"
+  | "completed"
+  | "skipped"
+  | "fallback";
+
 export type TranscriptionType = "general" | "medical";
 
 export type MeetingSource = "upload" | "youtube" | "record";
@@ -48,6 +72,30 @@ export const MEETING_STATUSES: readonly MeetingStatus[] = [
   "processing",
   "completed",
   "failed",
+] as const;
+
+export const MEETING_SUB_STATUSES: readonly MeetingSubStatus[] = [
+  "downloading",
+  "downloading_youtube",
+  "validating",
+  "extracting_audio",
+  "uploading",
+  "transcribing",
+  "aligning",
+  "diarizing",
+  "parsing",
+  "analyzing_video",
+  "building_context",
+  "summarizing",
+  "cleaning_up",
+] as const;
+
+export const VISUAL_BREAKDOWN_STATUSES: readonly VisualBreakdownStatus[] = [
+  "queued",
+  "processing",
+  "completed",
+  "skipped",
+  "fallback",
 ] as const;
 
 export const TRANSCRIPTION_TYPES: readonly TranscriptionType[] = [

@@ -38,11 +38,15 @@ export function StatusBadge({ status, subStatus }: StatusBadgeProps) {
   let label = labels[status];
   if (status === "processing" && subStatus) {
     const stage = getUserStage({ status, sub_status: subStatus });
-    label = STAGE_LABELS[stage];
+    label = STAGE_LABELS[stage] ?? labels.processing;
   }
 
   return (
-    <Badge variant="secondary" className={cn("gap-1.5", badgeColors[status])}>
+    <Badge
+      variant="secondary"
+      className={cn("gap-1.5", badgeColors[status])}
+      aria-label={`Meeting status: ${label.replace("…", "")}`}
+    >
       <span className={cn("size-1.5 rounded-full shrink-0", dotColors[status])} />
       {label}
     </Badge>

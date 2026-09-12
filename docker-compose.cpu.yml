@@ -2,9 +2,8 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
 #
-# Removes the NVIDIA device reservation so the GPU worker starts on any machine.
-# The zabt-gpu-worker image auto-detects the absence of CUDA and runs faster-whisper
-# with int8 compute on CPU.
+# Builds the dedicated CPU image, then removes the NVIDIA device reservation so the
+# worker starts on any machine. The service name and internal URL stay unchanged.
 #
 # TRADE-OFF: CPU transcription is SLOW — expect roughly 1-5x the audio duration per
 # file depending on cores and the WHISPER_MODEL size. For usable CPU performance set a
@@ -12,5 +11,10 @@
 # (pyannote) is also markedly slower on CPU.
 services:
   worker-gpu:
-    # Drop the whole GPU reservation so the container starts on any host.
+    build:
+      context: ./zabt-gpu-worker
+      dockerfile: Dockerfile.cpu
+    ports: !override
+      - "${ZABT_WORKER_HOST_PORT:-8002}:8001"
+    # Drop the whole GPU reservation so the CPU image starts on any host.
     deploy: !reset null

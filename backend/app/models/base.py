@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Optional, List
 from enum import Enum
 from sqlmodel import Field, SQLModel, Relationship
-from sqlalchemy import Column
+from sqlalchemy import Column, String
 from sqlalchemy.dialects.postgresql import JSONB
 
 
@@ -90,7 +90,10 @@ class UserBase(SQLModel):
     tier: UserTier = Field(default=UserTier.FREE)
     is_active: bool = True
     minutes_used_this_month: int = Field(default=0)
-    supabase_id: str = Field(unique=True, index=True)  # Mapped from Supabase JWT 'sub'
+    # Kept nullable for compatibility with data created by the former Supabase
+    # integration. New local users intentionally leave this field unset.
+    supabase_id: Optional[str] = Field(default=None, unique=True, index=True)
+    password_hash: Optional[str] = Field(default=None)
 
 class User(UserBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -100,6 +103,31 @@ class User(UserBase, table=True):
     )
 
     meetings: List["Meeting"] = Relationship(back_populates="owner")
+
+
+class AuthSession(SQLModel, table=True):
+    """A revocable database-backed refresh session.
+
+    Only the SHA-256 digest of the refresh token is stored. The raw token is
+    returned once to the client and is never persisted or logged by the API.
+    """
+
+    __tablename__ = "authsession"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    refresh_token_hash: str = Field(
+        sa_column=Column(
+            String(64),
+            nullable=False,
+            unique=True,
+            index=True,
+        )
+    )
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    expires_at: datetime = Field(index=True)
+    revoked_at: Optional[datetime] = Field(default=None, index=True)
+    last_used_at: Optional[datetime] = None
 
 class MeetingBase(SQLModel):
     title: str
@@ -146,7 +174,10 @@ class Meeting(MeetingBase, table=True):
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
 
-    # Visual breakdown (populated by stage_visual_breakdown Celery task — Plan 2)
+    # Visual breakdown (reuses the existing Plan 2 columns; no media-kind or
+    # fused-context migration).  Status values are queued, processing,
+    # completed, skipped, or fallback.  Run epochs and one-time side-effect
+    # markers live in visual_breakdown_params.
     visual_breakdown_status: Optional[str] = None
     visual_breakdown_error: Optional[str] = None
     visual_breakdown_completed_at: Optional[datetime] = None
@@ -262,6 +293,8 @@ class MeetingRead(MeetingBase):
     audio_url: Optional[str] = None
     # Visual breakdown (Plan 2 — frontend uses this to drive the tab state machine)
     visual_breakdown_status: Optional[str] = None
+    visual_breakdown_error: Optional[str] = None
+    visual_breakdown_completed_at: Optional[datetime] = None
 
 
 class MeetingSummaryUpdate(SQLModel):

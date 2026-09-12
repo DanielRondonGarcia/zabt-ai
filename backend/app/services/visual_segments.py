@@ -45,13 +45,24 @@ class VisualSegmentService(BaseService):
         """Delete prior rows for this meeting, bulk-insert new. Matches the
         overwrite pattern used by re-transcribe."""
         with Session(engine) as session:
-            session.exec(delete(VisualSegment).where(VisualSegment.meeting_id == meeting_id))
-            for seg in segments:
-                # Detach from any other session — caller may have built these from worker output
-                seg.id = None
-                seg.meeting_id = meeting_id
-                session.add(seg)
+            self.replace_for_meeting_in_session(session, meeting_id, segments)
             session.commit()
+
+    @staticmethod
+    def replace_for_meeting_in_session(
+        session: Session, meeting_id: int, segments: List[VisualSegment]
+    ) -> None:
+        """Replace segments in a caller-owned transaction.
+
+        The visual task uses this method while the meeting row is locked so the
+        segment replacement and terminal outcome commit atomically.
+        """
+        session.exec(delete(VisualSegment).where(VisualSegment.meeting_id == meeting_id))
+        for seg in segments:
+            # Detach from any other session — callers build these from worker output.
+            seg.id = None
+            seg.meeting_id = meeting_id
+            session.add(seg)
 
     def get_with_transcript_alignment(
         self, meeting_id: int

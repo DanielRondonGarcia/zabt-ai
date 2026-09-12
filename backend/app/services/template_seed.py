@@ -370,6 +370,21 @@ BUILT_IN_TEMPLATES = [
 ]
 
 
+MULTIMODAL_TEMPLATE_GUIDANCE = (
+    "\n\n## Evidence and uncertainty\n"
+    "When visual context is supplied, preserve these labels in the resulting notes: "
+    "SPOKEN CONTENT, VISUAL CONTEXT, and INFERENCE/UNCERTAINTY. Cite source IDs and "
+    "bounded timestamps for supported claims. Keep observed visual facts separate from "
+    "inference, and never invent an owner, commitment, decision, or deadline. Do not "
+    "include hidden reasoning or chain-of-thought.\n"
+)
+
+# Built-ins share the same multimodal safety contract. Custom templates are not
+# rewritten here; ai_agent.py appends the contract while preserving their body.
+for _template in BUILT_IN_TEMPLATES:
+    _template["body"] = _template["body"].rstrip() + MULTIMODAL_TEMPLATE_GUIDANCE
+
+
 def seed_built_in_templates() -> None:
     with Session(engine) as session:
         seeded_names = {tmpl["name"] for tmpl in BUILT_IN_TEMPLATES}

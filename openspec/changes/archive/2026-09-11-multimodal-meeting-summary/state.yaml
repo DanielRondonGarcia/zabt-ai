@@ -1,0 +1,111 @@
+change: multimodal-meeting-summary
+phase: tasks
+artifact_store: openspec
+last_updated: 2026-09-11
+next_recommended: sdd-apply
+blocker: null
+artifacts:
+  exploration: true
+  research: true
+  proposal: true
+  specs: true
+  design: true
+  tasks: true
+  apply_progress: false
+  verify_report: false
+# Design rerun completed; downstream phases remain intentionally pending.
+tasks_progress:
+  completed: []
+  pending:
+    - "1.1"
+    - "1.2"
+    - "1.3"
+    - "1.4"
+    - "1.5"
+    - "1.6"
+    - "2.1"
+    - "2.2"
+    - "2.3"
+    - "2.4"
+    - "3.1"
+    - "3.2"
+    - "3.3"
+    - "4.1"
+    - "4.2"
+review_workload:
+  estimated_changed_lines: 850-1100
+  risk: high
+  chained_prs_recommended: true
+  delivery_strategy: ask-on-risk
+  chain_strategy: stacked-to-main
+  decision_needed_before_apply: false
+research:
+  selected: true
+  revision: 3
+  outcome: done
+  artifact: openspec/changes/multimodal-meeting-summary/research.md
+  next_recommended: sdd-propose
+  blocker: null
+preproposal:
+  schema: gentle-ai.sdd-preproposal/v1
+  schemaVersion: 1
+  revision: 3
+  exploration:
+    outcome: explored
+    reference:
+      store: openspec
+      path: openspec/changes/multimodal-meeting-summary/exploration.md
+  research_request:
+    selected: true
+    source_classes:
+      - open-web
+    questions:
+      - Q1
+      - Q2
+      - Q3
+      - Q4
+      - Q5
+  admission:
+    capability: gentle-ai.sdd-research-capability/v1
+    exact_grants:
+      documentation: []
+      open-web:
+        - firecrawl-mcp:public-search-and-scrape
+    observed_grants:
+      documentation: []
+      open-web:
+        - firecrawl-mcp:public-search-and-scrape
+    admitted_source_class: open-web
+    blocker: null
+  outcome: done
+  evidence_references:
+    openspec:
+      exploration: openspec/changes/multimodal-meeting-summary/exploration.md
+      research: openspec/changes/multimodal-meeting-summary/research.md
+    engram: []
+  product_decisions:
+    status: confirmed
+    items:
+      - multimodal summary only in the first slice; intelligence remains transcript-only
+      - conservative original-media MIME/codec or ffprobe video detection without a new database column
+      - completed status after the full processing chain
+      - configurable hierarchical chunks followed by final synthesis
+      - no automatic provider switching; bounded vision failure with transcript-only fallback
+      - dynamic relevance and provenance without a migration
+      - backend-first exposure using the existing viewer and timestamp seeking
+  proposal_ready: true
+  recovery:
+    reason: >-
+      Revision 3 replaces the blocked revision with Firecrawl-collected,
+      source-mapped evidence for all five selected questions.
+    next_action: sdd-propose
+  readiness:
+    evidence_valid: true
+    research_done: true
+    decisions_confirmed: true
+    evidence_references_valid: true
+    selected_store_ready: true
+    reason: >-
+      Selected research is done, all five questions have valid mapped public
+      sources, the exact and observed Firecrawl grants match, product decisions
+      remain confirmed, and the OpenSpec artifact read/write completed.

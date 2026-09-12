@@ -3,122 +3,100 @@
 import axios from "axios";
 import { createApiClient } from "@zabt/shared";
 import type {
-  AuthToken,
   Meeting,
   MeetingHighlight,
   MeetingList,
+  MeetingStatus,
+  MeetingSubStatus,
   MeetingType,
-  OAuthProvider,
-  SSOLookupRequest,
-  SSOLookupResponse,
   SpeakerBreakdown,
   SummaryTemplate,
   SummaryTemplateListItem,
   TranscriptSegment,
   TranscriptWord,
   User,
+  VisualBreakdownResponse,
+  VisualBreakdownStatus,
 } from "@zabt/shared";
-import { createClient } from "@/app/lib/supabase/client";
 
 // Re-export for internal consumers that import from @/app/lib/api
 export type {
-  AuthToken,
   Meeting,
   MeetingHighlight,
   MeetingList,
+  MeetingStatus,
+  MeetingSubStatus,
   MeetingType,
-  OAuthProvider,
-  SSOLookupRequest,
-  SSOLookupResponse,
   SpeakerBreakdown,
   SummaryTemplate,
   SummaryTemplateListItem,
   TranscriptSegment,
   TranscriptWord,
   User,
+  VisualBreakdownResponse,
+  VisualBreakdownStatus,
 };
 
 const API_URL =
   process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
 
-// ── Token helpers (Supabase manages sessions; these read from its session) ────
+// The browser never receives an auth secret. The API owns both HttpOnly
+// cookies, and this compatibility helper intentionally returns no bearer
+// token for the shared client.
+export const getToken = async (): Promise<string | null> => null;
 
-export const getToken = async (): Promise<string | null> => {
-  const supabase = createClient();
-  const { data } = await supabase.auth.getSession();
-  return data.session?.access_token ?? null;
-};
+const authClient = axios.create({
+  baseURL: API_URL,
+  withCredentials: true,
+  headers: { "Content-Type": "application/json" },
+});
 
 export const clearToken = async (): Promise<void> => {
-  const supabase = createClient();
-  await supabase.auth.signOut();
+  await authClient.post("/auth/logout", { client: "web" });
 };
 
 // ── Axios client ──────────────────────────────────────────────────────────────
 
 const apiClient = createApiClient({
   baseURL: API_URL,
-  getAuthToken: async () => {
-    const supabase = createClient();
-    const { data } = await supabase.auth.getSession();
-    return data.session?.access_token ?? null;
+  getAuthToken: getToken,
+  refreshAuthToken: async () => {
+    try {
+      await authClient.post("/auth/refresh", { client: "web" });
+      return true;
+    } catch {
+      return false;
+    }
   },
+  axiosConfig: { withCredentials: true },
   onUnauthorized: async () => {
     if (typeof window !== "undefined") {
-      const supabase = createClient();
-      await supabase.auth.signOut();
+      await clearToken().catch(() => undefined);
       window.location.href = "/login";
     }
   },
 });
 
-// ── Auth (all via Supabase — no backend auth routes) ─────────────────────────
+// ── Local email/password authentication ──────────────────────────────────────
 
-const FRONTEND_URL =
-  process.env.NEXT_PUBLIC_FRONTEND_URL || "http://localhost:3000";
-
-export const socialLoginUrl = (
-  provider: OAuthProvider,
-  _state: string
-): string => {
-  // Supabase OAuth redirects are initiated imperatively via signInWithOAuth.
-  // This helper now returns a dummy string; prefer calling socialLogin() directly.
-  return `#oauth-${provider}`;
-};
-
-/** Trigger Supabase OAuth sign-in for a given provider (redirect flow). */
-export const socialLogin = async (provider: OAuthProvider): Promise<void> => {
-  const supabase = createClient();
-  const providerMap: Record<OAuthProvider, "google" | "azure"> = {
-    google: "google",
-    microsoft: "azure",
-  };
-  const scopesMap: Record<OAuthProvider, string | undefined> = {
-    google: undefined,
-    microsoft: "openid email profile",
-  };
-  await supabase.auth.signInWithOAuth({
-    provider: providerMap[provider],
-    options: {
-      redirectTo: `${FRONTEND_URL}/auth/callback/${provider}`,
-      scopes: scopesMap[provider],
-    },
-  });
-};
-
-/** SSO lookup — Supabase handles SSO via OAuth providers natively. */
-export const ssoLookup = async (_email: string): Promise<SSOLookupResponse> => {
-  return { sso_enabled: false, redirect_url: null, organisation_name: null };
-};
+export interface LocalAuthResponse {
+  access_token: string | null;
+  refresh_token: string | null;
+  token_type: "bearer";
+  expires_in: number;
+  user: User;
+}
 
 export const loginWithRememberMe = async (
   email: string,
   password: string,
-  _rememberMe: boolean  // Supabase manages session persistence automatically
+  _rememberMe: boolean
 ): Promise<void> => {
-  const supabase = createClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) throw error;
+  await authClient.post<LocalAuthResponse>("/auth/login", {
+    email,
+    password,
+    client: "web",
+  });
 };
 
 export const register = async (
@@ -126,19 +104,16 @@ export const register = async (
   password: string,
   fullName: string
 ): Promise<void> => {
-  const supabase = createClient();
-  const { error } = await supabase.auth.signUp({
+  await authClient.post<LocalAuthResponse>("/auth/register", {
     email,
     password,
-    options: { data: { full_name: fullName } },
+    full_name: fullName,
+    client: "web",
   });
-  if (error) throw error;
 };
 
 export const login = async (email: string, password: string): Promise<void> => {
-  const supabase = createClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error) throw error;
+  await loginWithRememberMe(email, password, false);
 };
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -184,7 +159,8 @@ export const uploadMeeting = async (
   const { data: meeting } = await apiClient.post<Meeting>("/meetings/", {
     title,
     description,
-    file_key: presignedData.file_key
+    file_key: presignedData.file_key,
+    content_type: file.type || "audio/mpeg",
   });
 
   // 3. Upload directly to S3/MinIO
@@ -251,6 +227,16 @@ export const resummarizeMeeting = async (
   await apiClient.post(`/meetings/${meetingId}/summarize`, {
     template_id: templateId ?? null,
   });
+};
+
+/** Fetch visual segments without introducing a visual viewer into the meeting page. */
+export const getVisualSegments = async (
+  meetingId: number
+): Promise<VisualBreakdownResponse> => {
+  const res = await apiClient.get<VisualBreakdownResponse>(
+    `/meetings/${meetingId}/visual-segments`
+  );
+  return res.data;
 };
 
 // ── Templates ─────────────────────────────────────────────────────────────────

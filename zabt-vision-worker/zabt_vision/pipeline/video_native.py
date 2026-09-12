@@ -2,6 +2,7 @@
 # Copyright (C) 2025-2026 Afeef Janjua
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 from PIL import Image
@@ -9,6 +10,13 @@ from PIL import Image
 from zabt_vision.inference.base import VisionInference
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_error(error: object) -> str:
+    message = f"{type(error).__name__}: {error}"
+    message = re.sub(r"https?://\S+", "<redacted-url>", message)
+    message = re.sub(r"(?i)(token|secret|password|api[_-]?key)=\S+", r"\1=<redacted>", message)
+    return re.sub(r"\s+", " ", message).strip()[:160]
 
 
 @dataclass(frozen=True)
@@ -49,20 +57,33 @@ def detect_screen_changes_native(
     Each detection's timestamp is rebased into the global video timeline.
     """
     detections: list[NativeDetection] = []
-    for chunk_start, _chunk_end, frames in chunks:
+    for chunk_start, chunk_end, frames in chunks:
         try:
             raw = inference.generate(images=frames, prompt=_PROMPT)
             payload = json.loads(raw if isinstance(raw, str) else str(raw))
-            for d in payload.get("detections", []):
+            detections_payload = payload.get("detections", [])
+            if not isinstance(detections_payload, list):
+                raise ValueError("detections must be a list")
+            for d in detections_payload:
+                if not isinstance(d, dict):
+                    continue
                 ts_ms = int(d["timestamp_ms"])
+                relative_s = max(0.0, min(ts_ms / 1000.0, max(0.0, chunk_end - chunk_start)))
+                caption = str(d["caption"]).strip()
+                if not caption:
+                    continue
                 detections.append(
                     NativeDetection(
-                        timestamp_s=chunk_start + (ts_ms / 1000.0),
-                        caption=str(d["caption"]),
-                        reasoning=str(d.get("reasoning", "")),
+                        timestamp_s=chunk_start + relative_s,
+                        caption=caption[:500],
+                        reasoning=str(d.get("reasoning", ""))[:500],
                     )
                 )
-        except (json.JSONDecodeError, KeyError, ValueError, TypeError) as e:
-            logger.warning("video-native detection failed for chunk @ %ss: %s", chunk_start, e)
+        except Exception as error:
+            logger.warning(
+                "video-native detection failed for chunk @ %ss: %s",
+                chunk_start,
+                _safe_error(error),
+            )
             continue
     return detections

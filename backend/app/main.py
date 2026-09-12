@@ -28,9 +28,16 @@ app = FastAPI(
 
 # CORS — allow frontend-2 origin (http://localhost:3000 for development)
 from fastapi.middleware.cors import CORSMiddleware
+_cors_origins = {
+    origin.strip()
+    for origin in (
+        f"{settings.BACKEND_CORS_ORIGINS},{settings.AUTH_ALLOWED_ORIGINS}"
+    ).split(",")
+    if origin.strip()
+}
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[o.strip() for o in settings.BACKEND_CORS_ORIGINS.split(",") if o.strip()],
+    allow_origins=sorted(_cors_origins),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

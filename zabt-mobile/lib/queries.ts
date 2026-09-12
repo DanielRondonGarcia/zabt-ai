@@ -3,12 +3,13 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type { Meeting, MeetingList, User } from "@zabt/shared";
 import { api } from "./api";
+import { isActiveMeeting } from "./stage-utils";
 
 const POLL_MS = 5000;
 export const MEETINGS_PAGE_SIZE = 10;
 
 function isActive(m: Meeting): boolean {
-  return m.status === "queued" || m.status === "processing";
+  return isActiveMeeting(m);
 }
 
 function pageItems(data: MeetingList | Meeting[]): Meeting[] {

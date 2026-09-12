@@ -2,12 +2,11 @@
 # Copyright (C) 2025-2026 Afeef Janjua
 from typing import Generator
 from fastapi import Depends, HTTPException, status
-from sqlmodel import Session, select
+from sqlmodel import Session
 
 from app.core import security
 from app.db.engine import engine
 from app.models import User
-from app.services.notifications import notify
 
 
 def get_db() -> Generator:
@@ -16,33 +15,27 @@ def get_db() -> Generator:
 
 
 def get_current_user(
-    token_payload: dict = Depends(security.verify_supabase_jwt),
+    token_payload: dict = Depends(security.get_token_payload),
     db: Session = Depends(get_db),
 ) -> User:
-    """
-    Extract the Supabase user UUID from the verified JWT payload ('sub' claim)
-    and perform JIT (Just-In-Time) provisioning into the local User table.
-    The user_id is ALWAYS sourced from the token — never from the request body.
-    """
-    supabase_id = token_payload.get("sub")
-    if not supabase_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Could not validate credentials: missing sub claim",
-        )
+    """Resolve the local user identified by the validated access token."""
 
-    user = db.exec(select(User).where(User.supabase_id == supabase_id)).first()
+    try:
+        user_id = int(token_payload["sub"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from exc
+
+    user = db.get(User, user_id)
     if not user:
-        # JIT Provisioning: create local profile on first authenticated request
-        user = User(
-            email=token_payload.get("email", ""),
-            supabase_id=supabase_id,
-            is_active=True,
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
         )
-        db.add(user)
-        db.commit()
-        db.refresh(user)
-        notify("new_user", user.email or supabase_id)
     return user
 
 
@@ -50,5 +43,5 @@ def get_current_active_user(
     current_user: User = Depends(get_current_user),
 ) -> User:
     if not current_user.is_active:
-        raise HTTPException(status_code=400, detail="Inactive user")
+        raise HTTPException(status_code=403, detail="Inactive user")
     return current_user

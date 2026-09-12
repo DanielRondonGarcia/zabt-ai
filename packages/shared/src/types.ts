@@ -31,7 +31,8 @@ export interface Meeting {
   duration_seconds: number | null;
   created_at: string;
   status: MeetingStatus;
-  sub_status: string | null;
+  /** Known pipeline stages plus bounded backend error text for failed meetings. */
+  sub_status: MeetingSubStatus | (string & {}) | null;
   transcript_text: string | null;
   summary_text: string | null;
   original_summary_text: string | null;
@@ -56,6 +57,35 @@ export interface Meeting {
   layout_hint: LayoutHint;
   requested_language: string | null;
   transliterated_text: string | null;
+  /** Optional fields keep older clients compatible with the existing response. */
+  visual_breakdown_status?: VisualBreakdownStatus | null;
+  visual_breakdown_error?: string | null;
+  visual_breakdown_completed_at?: string | null;
+}
+
+export interface VisualTranscriptLine {
+  speaker: string | null;
+  text: string;
+  start: number;
+  end: number;
+}
+
+export interface VisualSegment {
+  id: number;
+  sequence: number;
+  start_time: number;
+  end_time: number;
+  screenshot_url: string;
+  caption: string;
+  confidence: number;
+  transcript_lines: VisualTranscriptLine[];
+}
+
+export interface VisualBreakdownResponse {
+  meeting_id: number;
+  visual_breakdown_status: VisualBreakdownStatus | null;
+  visual_breakdown_completed_at: string | null;
+  visual_segments: VisualSegment[];
 }
 
 export interface MeetingList {
@@ -101,8 +131,10 @@ export interface SummaryTemplateListItem {
 // User + Auth
 
 export interface User {
+  id: number;
   email: string;
   full_name: string | null;
+  picture?: string | null;
   tier: UserTier;
   is_active: boolean;
   minutes_used_this_month: number;
@@ -110,7 +142,10 @@ export interface User {
 
 export interface AuthToken {
   access_token: string;
+  refresh_token: string;
   token_type: "bearer";
+  expires_in: number;
+  user: User;
 }
 
 export interface SSOLookupRequest {
@@ -126,6 +161,7 @@ export interface SSOLookupResponse {
 // Forward references — string literal types defined in enums.ts
 import type {
   MeetingStatus,
+  MeetingSubStatus,
   TranscriptionType,
   MeetingSource,
   MeetingType,
@@ -134,4 +170,5 @@ import type {
   HighlightType,
   TemplateType,
   UserTier,
+  VisualBreakdownStatus,
 } from "./enums";

@@ -17,14 +17,50 @@ and notes which are required. Values marked **REQUIRED** must be set for a worki
 | `DATABASE_URL` | `postgresql+asyncpg://app:app@db:5432/zabt` | **REQUIRED.** Local default targets the bundled `db`. Use your managed Postgres URL otherwise. |
 | `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `app` / `app` / `zabt` | Credentials for the bundled Postgres (profile `local`). |
 
-## Auth (Supabase)
+## Local authentication
 
-| Variable | Notes |
-|----------|-------|
-| `SUPABASE_URL` | **REQUIRED.** Your Supabase project URL. |
-| `SUPABASE_JWT_SECRET` | **REQUIRED.** Project Settings → API → JWT. Verifies user tokens. |
-| `NEXT_PUBLIC_SUPABASE_URL` | **REQUIRED.** Same as `SUPABASE_URL` (browser-side). |
-| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | **REQUIRED.** Anon/publishable key. |
+Zabt uses local email/password authentication backed by the same PostgreSQL database as meetings.
+Supabase, Keycloak, Authentik, OAuth SaaS, and an email provider are not required.
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `AUTH_ENVIRONMENT` | `development` | Set to `production` for an explicit production deployment; production requires secure cookies. |
+| `AUTH_JWT_SECRET` | **no default** | **REQUIRED in every environment.** Use at least 32 random bytes; never commit it. Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
+| `AUTH_JWT_ISSUER` / `AUTH_JWT_AUDIENCE` | `zabt-api` / `zabt-client` | JWT validation boundaries. |
+| `AUTH_ACCESS_TOKEN_EXPIRE_MINUTES` | `15` | Short-lived access credential lifetime. |
+| `AUTH_REFRESH_SESSION_EXPIRE_DAYS` | `30` | Database-backed refresh-session lifetime. |
+| `AUTH_ACCESS_COOKIE_NAME` / `AUTH_REFRESH_COOKIE_NAME` | `zabt_access_token` / `zabt_refresh_token` | Web HttpOnly cookie names. |
+| `AUTH_COOKIE_SECURE` | `false` | Keep `false` for plain localhost; set `true` behind HTTPS. Production rejects `false`. |
+| `AUTH_COOKIE_SAMESITE` | `lax` | Cookie policy for the web client. `none` is rejected unless `AUTH_COOKIE_SECURE=true`. |
+| `AUTH_COOKIE_DOMAIN` | — | Optional production cookie domain. |
+| `AUTH_ALLOWED_ORIGINS` | `BACKEND_CORS_ORIGINS` | Exact origins allowed for cookie-authenticated state changes. |
+
+Web clients use API-owned HttpOnly cookies and never store auth secrets in browser storage. Mobile
+clients receive JSON access/refresh tokens and store them through Expo SecureStore (with the
+existing Expo Go fallback). Access tokens are accepted as Bearer credentials by protected routes.
+The first slice intentionally has no email verification or password reset because it has no email
+delivery dependency; the UI reports this limitation honestly.
+
+The API refuses to start when `AUTH_JWT_SECRET` is missing, a known placeholder, shorter than 32
+bytes, or too low in character diversity. The verifier pins HS256 and requires `exp`, `iat`, `iss`,
+`aud`, `sub`, and the local access-token `type`; issuer and audience are checked against the
+configured values. Keep the same secret, issuer, and audience across API, worker, and beat.
+
+WebSocket clients should use the access cookie or an `Authorization: Bearer ...` header. The
+legacy `?token=` query parameter remains compatible only when the request has an exact allowed
+`Origin`; query strings can still be captured by browser history, reverse-proxy/access logs, or
+other request metadata, so do not use it when a header or cookie is available. WebSocket auth also
+loads the local user, rejects inactive accounts, and enforces meeting ownership.
+
+### Remaining local-auth limitations
+
+This bounded hardening correction does not add refresh-request single-flight coordination or login
+rate limiting/lockout and timing equalization. Existing rows created only through the former
+Supabase integration still need an explicit migration/conversion path before local login can use
+them. Multipart upload URL/completion ownership remains a pre-existing gap outside this correction.
+Refresh cookies still use the existing API-wide path; review that scope separately before exposing
+the API through a shared parent domain. Email verification and password reset also remain
+intentionally unavailable without a configured delivery provider.
 
 ## URLs
 
@@ -39,8 +75,8 @@ and notes which are required. Values marked **REQUIRED** must be set for a worki
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `OPENAI_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint. |
-| `OPENAI_API_KEY` | — | **REQUIRED.** |
+| `OPENAI_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint, including Ollama Cloud. |
+| `OPENAI_API_KEY` | — | **REQUIRED for a remote endpoint.** Keep this separate from auth settings. |
 | `OPENAI_MODEL` | `google/gemini-3.1-flash-lite-preview` | Model id understood by your endpoint. |
 
 ## Object storage
@@ -72,13 +108,33 @@ and notes which are required. Values marked **REQUIRED** must be set for a worki
 
 ## Visual breakdown (optional; profile `vision`)
 
+Visual processing is disabled by default. Starting the `vision` Compose profile does not enable
+the stage by itself: set `VISION_ENABLED=true` only after confirming that the endpoint, model,
+and egress policy are appropriate for the deployment. A failed or unavailable visual stage falls
+back to a transcript-only summary; it never switches providers automatically.
+
 | Variable | Default | Notes |
 |----------|---------|-------|
+| `VISION_ENABLED` | `false` | Explicitly enables the optional visual stage. Keep disabled for transcript-only deployments. |
 | `VISION_BACKEND` | `local` | `local` or `runpod`. |
+| `VISION_INFERENCE_BACKEND` | `ollama` | Worker inference backend; keep local/private unless cloud use is explicitly approved. |
 | `VISION_LOCAL_URL` | `http://zabt-vision-worker:8003` | |
 | `VISION_JUDGE_MODEL` | `qwen3-vl:8b-thinking` | Served via Ollama. |
 | `OLLAMA_HOST` | `http://host.docker.internal:11434` | Ollama endpoint. |
+| `OLLAMA_NO_CLOUD` | `1` | Prevent Ollama from routing inference to a cloud provider. |
+| `VISION_REQUIRE_VISION` | `true` | Reject providers that do not advertise vision capability. |
+| `VISION_MAX_RETRIES` / `VISION_RETRY_BACKOFF_SECONDS` | `2` / `5` | Bounded visual-worker retries and exponential backoff. |
+| `VISION_CLOUD_ALLOWED` | `false` | Must be explicitly enabled before selecting a cloud vision backend. |
+| `VISION_EGRESS_POLICY` | `deny` | `deny`, `allowlist`, or explicit `allow`; no implicit provider switch. |
+| `VISION_ALLOWED_HOSTS` | — | Comma-separated hosts permitted when using `allowlist`. |
+| `VISION_SIGNED_URL_EXPIRATION` | `3600` | Lifetime in seconds for fresh media URLs sent to the worker. |
 | `VISION_RUNPOD_API_KEY` / `VISION_RUNPOD_ENDPOINT_ID` / `VISION_POLL_INTERVAL` / `VISION_TIMEOUT` | — | RunPod vision path. |
+| `SUMMARY_CHUNK_SECONDS` / `SUMMARY_MAX_INPUT_TOKENS` | `120` / `6000` | Bounded temporal chunks and request budget for summary context. |
+
+For a private allowlist, set `VISION_EGRESS_POLICY=allowlist` and list only the internal vision
+endpoint and inference host in `VISION_ALLOWED_HOSTS`. Do not put API keys or signed URLs in
+logs. On provider failure, inspect the bounded `visual_breakdown_error`, leave `VISION_ENABLED`
+false while recovering the endpoint, and retry the meeting after the worker is healthy.
 
 ## Integrations & notifications (optional)
 
@@ -102,8 +158,9 @@ and notes which are required. Values marked **REQUIRED** must be set for a worki
 
 ## Mobile app (optional)
 
-`EXPO_ACCESS_TOKEN`, `EXPO_PUBLIC_API_URL`, `EXPO_PUBLIC_SUPABASE_URL`,
-`EXPO_PUBLIC_SUPABASE_ANON_KEY` — only needed if you build the Expo mobile app.
+`EXPO_ACCESS_TOKEN`, `EXPO_PUBLIC_API_URL` — only needed if you build the Expo mobile app.
+Mobile local authentication uses the API's `client=mobile` contract and SecureStore; no Supabase
+variables are needed.
 
 > This table is kept in sync with `.env.example`. If you add a variable to the code, add it to
 > both.

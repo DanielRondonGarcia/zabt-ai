@@ -15,6 +15,14 @@ class Settings(BaseSettings):
 
     # Ollama
     ollama_host: str = "http://localhost:11434"
+    ollama_no_cloud: bool = True
+
+    # Provider capability and egress policy
+    vision_enabled: bool = False
+    vision_require_vision: bool = True
+    vision_cloud_allowed: bool = False
+    vision_egress_policy: Literal["deny", "allowlist", "allow"] = "deny"
+    vision_allowed_hosts: str = ""
 
     # LM Studio (OpenAI-compatible)
     lmstudio_base_url: str = "http://localhost:1234/v1"

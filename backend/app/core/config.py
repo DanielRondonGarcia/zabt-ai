@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Literal, Optional
 
 from dotenv import load_dotenv
-from pydantic import PostgresDsn
+from pydantic import PostgresDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 from app.models import TranscriptionBackend
@@ -14,6 +14,43 @@ from app.models import TranscriptionBackend
 # In Docker, /app/app/core/config.py resolves to /app, where there is no .env;
 # Docker provides config via the `environment:` block instead, which is fine.
 _REPO_ROOT_ENV = Path(__file__).resolve().parent.parent.parent.parent / ".env"
+
+AUTH_JWT_SECRET_MIN_LENGTH = 32
+_KNOWN_INSECURE_AUTH_JWT_SECRETS = frozenset(
+    {
+        "local-development-only-change-me",
+        "replace-me-with-a-strong-random-secret",
+        "change-me",
+        "change-me-in-production",
+        "your-jwt-secret",
+        "your-secret",
+        "your-secret-here",
+        "secret",
+        "password",
+        "test",
+        "ci-only-local-auth-secret",
+    }
+)
+
+
+def validate_auth_jwt_secret(value: str) -> str:
+    """Validate the local JWT signing secret without exposing its value."""
+
+    if not isinstance(value, str):
+        raise ValueError("AUTH_JWT_SECRET must be a string")
+
+    secret = value.strip()
+    if not secret or secret != value:
+        raise ValueError("AUTH_JWT_SECRET must be explicitly configured without surrounding whitespace")
+    if secret.casefold() in _KNOWN_INSECURE_AUTH_JWT_SECRETS:
+        raise ValueError("AUTH_JWT_SECRET is a known placeholder and must be replaced")
+    if len(secret.encode("utf-8")) < AUTH_JWT_SECRET_MIN_LENGTH:
+        raise ValueError(
+            f"AUTH_JWT_SECRET must contain at least {AUTH_JWT_SECRET_MIN_LENGTH} bytes"
+        )
+    if len(set(secret)) < 12:
+        raise ValueError("AUTH_JWT_SECRET does not contain enough character diversity")
+    return secret
 
 # Some legacy modules (worker.py, api/upload.py, services/styles.py) read
 # directly from os.environ instead of going through this Settings class.
@@ -73,6 +110,47 @@ class Settings(BaseSettings):
     VISION_JUDGE_MODEL: str = "qwen3-vl:8b-thinking"
     VISION_POLL_INTERVAL: float = 5.0  # seconds between RunPod status polls
     VISION_TIMEOUT: int = 1800  # 30 minutes (per spec)
+    VISION_ENABLED: bool = False
+    VISION_REQUIRE_VISION: bool = True
+    VISION_MAX_RETRIES: int = 2
+    VISION_RETRY_BACKOFF_SECONDS: float = 5.0
+    VISION_CLOUD_ALLOWED: bool = False
+    VISION_EGRESS_POLICY: Literal["deny", "allowlist", "allow"] = "deny"
+    VISION_ALLOWED_HOSTS: str = ""
+    VISION_SIGNED_URL_EXPIRATION: int = 3600
+
+    # Summary context budgets
+    SUMMARY_CHUNK_SECONDS: int = 120
+    SUMMARY_MAX_INPUT_TOKENS: int = 6000
+
+    # First-party local authentication. There is deliberately no default: every
+    # process that imports the backend must receive the same deployment secret.
+    AUTH_ENVIRONMENT: Literal["development", "test", "staging", "production"] = "development"
+    AUTH_JWT_SECRET: str
+    AUTH_JWT_ALGORITHM: Literal["HS256"] = "HS256"
+    AUTH_JWT_ISSUER: str = "zabt-api"
+    AUTH_JWT_AUDIENCE: str = "zabt-client"
+    AUTH_ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    AUTH_REFRESH_SESSION_EXPIRE_DAYS: int = 30
+    AUTH_ACCESS_COOKIE_NAME: str = "zabt_access_token"
+    AUTH_REFRESH_COOKIE_NAME: str = "zabt_refresh_token"
+    AUTH_COOKIE_SECURE: bool = False
+    AUTH_COOKIE_SAMESITE: Literal["lax", "strict", "none"] = "lax"
+    AUTH_COOKIE_DOMAIN: Optional[str] = None
+    AUTH_ALLOWED_ORIGINS: str = ""
+
+    @field_validator("AUTH_JWT_SECRET")
+    @classmethod
+    def _validate_auth_jwt_secret(cls, value: str) -> str:
+        return validate_auth_jwt_secret(value)
+
+    @model_validator(mode="after")
+    def _validate_auth_cookie_settings(self) -> "Settings":
+        if self.AUTH_COOKIE_SAMESITE == "none" and not self.AUTH_COOKIE_SECURE:
+            raise ValueError("AUTH_COOKIE_SECURE must be true when AUTH_COOKIE_SAMESITE=none")
+        if self.AUTH_ENVIRONMENT == "production" and not self.AUTH_COOKIE_SECURE:
+            raise ValueError("AUTH_COOKIE_SECURE must be true when AUTH_ENVIRONMENT=production")
+        return self
 
     # Diarization Settings (passed to GPU service via TranscriptionConfig)
     DIARIZATION_MIN_SPEAKERS: int = 1
@@ -104,11 +182,6 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = ""
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = ""
-
-    # Supabase Settings
-    SUPABASE_URL: str = "https://your-project-ref.supabase.co"
-    SUPABASE_JWT_SECRET: str = "change_me_in_env"
-    SUPABASE_ANON_KEY: str = ""
 
     # Notifications
     NOTIFICATION_PROVIDER: str = ""  # "telegram" or "" (disabled)

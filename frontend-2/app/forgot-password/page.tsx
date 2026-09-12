@@ -10,7 +10,9 @@ export default function ForgotPasswordPage() {
           Reset your password
         </h1>
         <p className="text-sm text-stone-500 mt-2">
-          Password reset is coming soon.
+          Password reset is not configured in this self-hosted first slice.
+          There is no email delivery dependency yet; contact an administrator
+          to manage the account directly in PostgreSQL.
         </p>
         <Link
           href="/login"

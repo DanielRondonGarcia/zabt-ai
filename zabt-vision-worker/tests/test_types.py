@@ -54,3 +54,31 @@ def test_job_result_includes_stage_metrics():
         stage_metrics={"extract_frames": {"duration_ms": 1000}},
     )
     assert result.stage_metrics["extract_frames"]["duration_ms"] == 1000
+
+
+def test_job_result_keeps_audio_fallback_compatible_and_bounded():
+    result = JobResult(
+        status="completed",
+        segments=[],
+        model="qwen3-vl:8b-thinking",
+        params={"skip_reason": "audio_only"},
+        stage_metrics={"skipped": {"reason": "audio_only"}},
+    )
+
+    assert result.status == "completed"
+    assert result.segments == []
+    assert result.params == {"skip_reason": "audio_only"}
+    assert result.error is None
+
+
+def test_visual_segment_provenance_fields_are_optional_for_legacy_payloads():
+    legacy = VisualSegment(
+        id="legacy",
+        sequence=0,
+        start_time=0.0,
+        end_time=1.0,
+        screenshot_s3_key="k",
+        caption="A dashboard",
+        confidence=0.9,
+    )
+    assert legacy.model_dump().get("provenance") is None

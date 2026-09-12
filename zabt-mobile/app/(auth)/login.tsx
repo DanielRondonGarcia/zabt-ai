@@ -2,25 +2,28 @@
 // Copyright (C) 2025-2026 Afeef Janjua
 import { useState } from "react";
 import { Alert, Text, View } from "react-native";
-import { SocialButton } from "@/components/social-button";
-import { signInWithProvider } from "@/lib/auth";
+import { Link, router } from "expo-router";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { signIn } from "@/lib/auth";
 
 export default function Login() {
-  const [loading, setLoading] = useState<"google" | "microsoft" | null>(null);
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
 
-  async function handleSignIn(provider: "google" | "microsoft") {
-    setLoading(provider);
+  async function handleSignIn() {
+    setLoading(true);
     try {
-      const supabaseProvider = provider === "google" ? "google" : "azure";
-      await signInWithProvider(supabaseProvider);
-      // Auth state listener in app/index.tsx will route to (tabs) automatically.
-    } catch (error) {
+      await signIn(email, password);
+      router.replace("/(tabs)");
+    } catch {
       Alert.alert(
         "Sign in failed",
-        error instanceof Error ? error.message : "Unknown error"
+        "The email or password is incorrect. Please try again."
       );
     } finally {
-      setLoading(null);
+      setLoading(false);
     }
   }
 
@@ -31,28 +34,51 @@ export default function Login() {
           Welcome to Zabt
         </Text>
         <Text className="text-sm text-muted-foreground">
-          Record meetings, get summaries, stay focused.
+          Sign in with your local Zabt account.
         </Text>
       </View>
 
-      <View className="gap-3">
-        <SocialButton
-          provider="google"
-          label={loading === "google" ? "Opening Google…" : "Continue with Google"}
-          onPress={() => handleSignIn("google")}
-          disabled={loading !== null}
-        />
-        <SocialButton
-          provider="microsoft"
-          label={
-            loading === "microsoft"
-              ? "Opening Microsoft…"
-              : "Continue with Microsoft"
-          }
-          onPress={() => handleSignIn("microsoft")}
-          disabled={loading !== null}
-        />
+      <View className="gap-4">
+        <View className="gap-2">
+          <Text className="text-sm font-medium text-foreground">Email</Text>
+          <Input
+            autoCapitalize="none"
+            autoComplete="email"
+            keyboardType="email-address"
+            value={email}
+            onChangeText={setEmail}
+            placeholder="name@company.com"
+          />
+        </View>
+        <View className="gap-2">
+          <Text className="text-sm font-medium text-foreground">Password</Text>
+          <Input
+            secureTextEntry
+            autoComplete="password"
+            value={password}
+            onChangeText={setPassword}
+            placeholder="Your password"
+          />
+        </View>
+        <Button
+          onPress={handleSignIn}
+          loading={loading}
+          disabled={!email.trim() || !password}
+          className="mt-2"
+        >
+          Sign in
+        </Button>
       </View>
+
+      <Text className="text-sm text-muted-foreground text-center mt-6">
+        New to Zabt?{" "}
+        <Link href="/(auth)/register" className="text-primary font-medium">
+          Create an account
+        </Link>
+      </Text>
+      <Text className="text-xs text-muted-foreground text-center mt-4">
+        Password reset and email verification are not configured yet.
+      </Text>
     </View>
   );
 }

@@ -5,14 +5,8 @@ import os
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from sqlmodel import Session
-from app.models import Meeting, MeetingRead
+from app.models import Meeting, MeetingRead, User
 from app.api import deps
-
-# Temporary mock for current user
-# In real app, this would use OAuth2
-async def get_current_user():
-    # Return a mock user ID for MVP
-    return 1
 
 router = APIRouter()
 
@@ -23,7 +17,7 @@ UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 async def upload_meeting(
     file: UploadFile = File(...),
     db: Session = Depends(deps.get_db),
-    # current_user: User = Depends(deps.get_current_user) # Uncomment when auth is ready
+    current_user: User = Depends(deps.get_current_active_user),
 ):
     try:
         # Create a unique filename
@@ -34,13 +28,10 @@ async def upload_meeting(
             shutil.copyfileobj(file.file, file_object)
 
         # Create DB entry
-        # owner_id = current_user.id
-        owner_id = 1 # Mock
-
         meeting = Meeting(
             title=file.filename,
             file_path=str(file_location),
-            owner_id=owner_id,
+            owner_id=current_user.id,
             status="queued"
         )
         db.add(meeting)

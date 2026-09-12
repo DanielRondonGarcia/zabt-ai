@@ -7,6 +7,8 @@ export interface ApiClientConfig {
   baseURL: string;
   /** Returns the current auth token, or null if unauthenticated */
   getAuthToken: () => Promise<string | null>;
+  /** Refreshes the platform's access credential once before giving up on 401. */
+  refreshAuthToken?: () => Promise<boolean>;
   /** Called when the backend returns 401. Platform-specific logout + redirect. */
   onUnauthorized: () => Promise<void> | void;
   /** Additional axios options */
@@ -32,6 +34,19 @@ export function createApiClient(config: ApiClientConfig): AxiosInstance {
     (response) => response,
     async (error) => {
       if (error.response?.status === 401) {
+        const request = error.config as (AxiosRequestConfig & {
+          _authRetry?: boolean;
+        }) | undefined;
+        if (request && config.refreshAuthToken && !request._authRetry) {
+          request._authRetry = true;
+          try {
+            if (await config.refreshAuthToken()) {
+              return client(request);
+            }
+          } catch {
+            // Fall through to the platform-specific unauthorized handler.
+          }
+        }
         await config.onUnauthorized();
       }
       return Promise.reject(error);

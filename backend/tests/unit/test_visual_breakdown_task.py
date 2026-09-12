@@ -9,7 +9,13 @@ from sqlmodel import Session
 from app.db.engine import engine
 from app.models import Meeting, User, VisualSegment
 from app.services.visual_breakdown.types import VisualSegmentResponse, VisionWorkerResult
-from app.worker import stage_visual_breakdown
+from app.worker import (
+    _acquire_visual_lease,
+    stage_extract_intelligence,
+    stage_optional_visual_breakdown,
+    stage_summarize,
+    stage_visual_breakdown,
+)
 
 
 @pytest.fixture
@@ -70,7 +76,7 @@ def test_happy_path_completes_meeting_and_persists_segments(meeting_with_file):
 
         out = stage_visual_breakdown(meeting_id)
 
-    assert out == {"status": "completed", "segment_count": 2}
+    assert out == meeting_id
 
     # Meeting fields updated
     with Session(engine) as session:
@@ -100,7 +106,7 @@ def test_happy_path_completes_meeting_and_persists_segments(meeting_with_file):
     assert mock_notify.call_args.args[0] == "visual_breakdown_completed"
 
 
-def test_worker_returns_failed_marks_meeting_failed(meeting_with_file):
+def test_worker_failure_falls_back_without_failing_meeting(meeting_with_file):
     meeting_id = meeting_with_file
     failed_result = VisionWorkerResult(
         status="failed", segments=[], model="qwen3-vl:8b-thinking", params={},
@@ -117,19 +123,19 @@ def test_worker_returns_failed_marks_meeting_failed(meeting_with_file):
 
         out = stage_visual_breakdown(meeting_id)
 
-    assert out == {"status": "failed", "failed_stage": "extract_frames"}
+    assert out == meeting_id
 
     with Session(engine) as session:
         m = session.get(Meeting, meeting_id)
-        assert m.visual_breakdown_status == "failed"
-        assert "ffmpeg" in (m.visual_breakdown_error or "")
+        assert m.visual_breakdown_status == "fallback"
+        assert m.visual_breakdown_error == "vision_worker_failed"
 
     event_names = [c.args[1] for c in mock_capture.call_args_list]
-    assert "visual_breakdown_failed" in event_names
+    assert "visual_breakdown_warning" in event_names
     assert "visual_breakdown_completed" not in event_names
 
 
-def test_client_exception_marks_failed_and_reraises(meeting_with_file):
+def test_client_exception_falls_back_without_reraising(meeting_with_file):
     meeting_id = meeting_with_file
 
     with (
@@ -140,15 +146,17 @@ def test_client_exception_marks_failed_and_reraises(meeting_with_file):
     ):
         mock_cls.return_value.submit_and_wait.side_effect = RuntimeError("connection refused")
 
-        with pytest.raises(RuntimeError, match="connection refused"):
-            stage_visual_breakdown(meeting_id)
+        out = stage_visual_breakdown(meeting_id)
+
+    assert out == meeting_id
 
     with Session(engine) as session:
         m = session.get(Meeting, meeting_id)
-        assert m.visual_breakdown_status == "failed"
+        assert m.visual_breakdown_status == "fallback"
+        assert m.visual_breakdown_error == "vision_worker_error"
 
 
-def test_missing_file_path_fails_fast(meeting_with_file, db: Session):
+def test_missing_file_path_skips_without_calling_worker(meeting_with_file, db: Session):
     meeting_id = meeting_with_file
     # Clear file_path before test
     m = db.get(Meeting, meeting_id)
@@ -164,11 +172,118 @@ def test_missing_file_path_fails_fast(meeting_with_file, db: Session):
     ):
         out = stage_visual_breakdown(meeting_id)
 
-    assert out == {"status": "failed", "reason": "no_video_file"}
+    assert out == meeting_id
     # Worker was never called
     mock_cls.assert_not_called()
 
     with Session(engine) as session:
         m = session.get(Meeting, meeting_id)
-        assert m.visual_breakdown_status == "failed"
+        assert m.visual_breakdown_status == "skipped"
         assert m.visual_breakdown_error == "no_video_file"
+
+
+def test_optional_stage_disabled_skips_with_stable_id(meeting_with_file):
+    with (
+        patch("app.worker.settings.VISION_ENABLED", False),
+        patch("app.services.visual_breakdown.vision_client.VisionClient") as mock_cls,
+    ):
+        out = stage_optional_visual_breakdown(meeting_with_file)
+
+    assert out == meeting_with_file
+    mock_cls.assert_not_called()
+    with Session(engine) as session:
+        meeting = session.get(Meeting, meeting_with_file)
+        assert meeting.visual_breakdown_status == "skipped"
+        assert meeting.visual_breakdown_error == "visual_disabled"
+
+
+def test_visual_lease_rejects_an_epoch_owned_by_another_worker():
+    client = MagicMock()
+    client.set.return_value = None
+    with patch("redis.from_url", return_value=client):
+        assert _acquire_visual_lease(42, "epoch") is False
+    client.set.assert_called_once()
+
+
+def test_duplicate_delivery_converges_to_one_run_and_stable_meeting_id(meeting_with_file):
+    """Duplicate/retry delivery converges on one logical visual run."""
+    worker_result = _completed_worker_result()
+    with (
+        patch("app.services.visual_breakdown.vision_client.VisionClient") as mock_cls,
+        patch("app.services.storage.storage.get_presigned_download_url", return_value="https://signed/"),
+        patch("app.services.analytics.capture") as mock_capture,
+        patch("app.worker.notify") as mock_notify,
+    ):
+        mock_cls.return_value.submit_and_wait.return_value = worker_result
+        first = stage_visual_breakdown(meeting_with_file)
+        second = stage_visual_breakdown(meeting_with_file)
+
+    assert first == second == meeting_with_file
+    assert mock_cls.return_value.submit_and_wait.call_count == 1
+    event_names = [call.args[1] for call in mock_capture.call_args_list]
+    assert event_names.count("visual_breakdown_completed") == 1
+    assert event_names.count("visual_breakdown_warning") == 0
+    assert event_names.count("visual_breakdown_stage_completed") == 2
+    mock_notify.assert_called_once()
+
+
+def test_missing_meeting_is_fatal():
+    """A missing meeting must not be converted into a successful skip."""
+    with pytest.raises(RuntimeError, match="Meeting"):
+        stage_visual_breakdown(-999999)
+
+
+def test_summary_preserves_legacy_transcript_when_segments_are_absent(meeting_with_file, db: Session):
+    meeting = db.get(Meeting, meeting_with_file)
+    meeting.transcript_text = "Legacy transcript text"
+    db.add(meeting)
+    db.commit()
+
+    with (
+        patch("app.worker.style_service.get_style_examples", return_value=[]),
+        patch("app.worker.template_service.get_active_default", return_value=None),
+        patch("app.worker.summarize_transcript", return_value="Generated summary") as summarize,
+        patch("app.services.ai_agent.infer_title", return_value=None),
+        patch("app.worker.analytics.capture"),
+        patch("app.worker.notify"),
+        patch("app.services.email.email_service.send_summary_email"),
+    ):
+        out = stage_summarize(meeting_with_file)
+
+    assert out == meeting_with_file
+    assert summarize.call_args.kwargs["context"] is None
+
+
+def test_summary_waits_for_transcript_intelligence_before_completion(meeting_with_file, db: Session):
+    meeting = db.get(Meeting, meeting_with_file)
+    meeting.transcript_text = "Transcript for intelligence extraction"
+    db.add(meeting)
+    db.commit()
+
+    with (
+        patch("app.worker.style_service.get_style_examples", return_value=[]),
+        patch("app.worker.template_service.get_active_default", return_value=None),
+        patch("app.worker.summarize_transcript", return_value="Generated summary"),
+        patch("app.services.ai_agent.infer_title", return_value=None),
+        patch("app.worker.analytics.capture"),
+        patch("app.worker.notify"),
+        patch("app.services.email.email_service.send_summary_email"),
+    ):
+        stage_summarize(meeting_with_file)
+
+    with Session(engine) as session:
+        summarized = session.get(Meeting, meeting_with_file)
+        assert summarized.status == "processing"
+        assert summarized.sub_status == "summarizing"
+
+    intelligence = MagicMock()
+    intelligence.extract_highlights.return_value = []
+    intelligence.extract_structured_output.return_value = {"topics": []}
+    with patch("app.services.meeting_intelligence.intelligence_service", intelligence):
+        stage_extract_intelligence(meeting_with_file)
+
+    with Session(engine) as session:
+        completed = session.get(Meeting, meeting_with_file)
+        assert completed.status == "completed"
+        assert completed.sub_status is None
+        assert completed.structured_output_status == "completed"

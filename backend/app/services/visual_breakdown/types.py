@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-"""Pydantic types for the vision worker's HTTP/RunPod response."""
-from typing import Any, Dict, List, Optional
+"""Typed contracts for the vision worker's HTTP/RunPod response."""
+from dataclasses import dataclass
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -25,3 +26,15 @@ class VisionWorkerResult(BaseModel):
     stage_metrics: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     error: Optional[str] = None
     failed_stage: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class VisualStageOutcome:
+    """Immutable outcome shared by successful, skipped, and fallback paths."""
+
+    status: Literal["completed", "skipped", "fallback"]
+    reason: str | None = None
+    warning_code: str | None = None
+    segment_count: int = 0
+    idempotency_key: str = ""
+    attempts: int = 0

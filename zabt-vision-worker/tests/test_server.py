@@ -5,6 +5,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
+from zabt_vision.pipeline.run import PipelineStageError
 from zabt_vision.server import app
 from zabt_vision.types import JobResult, VisualSegment
 
@@ -80,3 +81,58 @@ def test_run_returns_failed_status_on_exception(client):
     body = r.json()
     assert body["status"] == "failed"
     assert "ffmpeg" in body["error"]
+
+
+def test_invalid_input_uses_sanitized_fallback(client):
+    with (
+        patch(
+            "zabt_vision.server.run_pipeline",
+            side_effect=ValueError("invalid media token=secret"),
+        ),
+        patch("zabt_vision.server.make_inference", return_value=MagicMock()),
+        patch("zabt_vision.server.make_s3_client", return_value=MagicMock()),
+    ):
+        response = client.post(
+            "/run",
+            json={
+                "video_url": "https://signed.example/video.mp4?token=secret",
+                "owner_id": "u1",
+                "meeting_id": "m1",
+                "transcript": [],
+                "params": {"media_kind": "unknown"},
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert "secret" not in response.text
+
+
+def test_nonzero_ffprobe_failure_keeps_stage_and_hides_command_details(client):
+    with (
+        patch(
+            "zabt_vision.server.run_pipeline",
+            side_effect=PipelineStageError(
+                "extract_frames", RuntimeError("ffprobe stderr token=secret")
+            ),
+        ),
+        patch("zabt_vision.server.make_inference", return_value=MagicMock()),
+        patch("zabt_vision.server.make_s3_client", return_value=MagicMock()),
+    ):
+        response = client.post(
+            "/run",
+            json={
+                "video_url": "https://signed.example/video.mp4?token=secret",
+                "owner_id": "u1",
+                "meeting_id": "m1",
+                "transcript": [],
+                "params": {},
+            },
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "failed"
+    assert body["failed_stage"] == "extract_frames"
+    assert "secret" not in response.text

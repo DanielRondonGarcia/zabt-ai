@@ -25,6 +25,8 @@ class StorageProvider(Protocol):
 
     def get_public_presigned_download_url(self, object_key: str, expiration: int = 3600) -> str: ...
 
+    def get_fresh_presigned_download_url(self, object_key: str, expiration: int = 3600) -> str: ...
+
     def upload_file(self, file_data: bytes, object_key: str, content_type: str) -> None: ...
 
     def delete_file(self, object_key: str) -> None: ...
@@ -126,6 +128,10 @@ class MinioStorage:
 
     def get_public_presigned_download_url(self, object_key: str, expiration: int = 3600) -> str:
         """Presigned URL reachable from outside Docker (for RunPod, browser, etc.)."""
+        return self.get_fresh_presigned_download_url(object_key, expiration)
+
+    def get_fresh_presigned_download_url(self, object_key: str, expiration: int = 3600) -> str:
+        """Generate a new public URL on every call; never reuse a signed URL."""
         return self._public_client.generate_presigned_url(
             "get_object",
             Params={"Bucket": self.bucket, "Key": object_key},
@@ -278,6 +284,10 @@ class S3Storage:
 
     def get_public_presigned_download_url(self, object_key: str, expiration: int = 3600) -> str:
         """Presigned URL reachable from outside Docker (for RunPod, browser, etc.)."""
+        return self.get_fresh_presigned_download_url(object_key, expiration)
+
+    def get_fresh_presigned_download_url(self, object_key: str, expiration: int = 3600) -> str:
+        """Generate a new public URL on every call; never reuse a signed URL."""
         return self._public_client.generate_presigned_url(
             "get_object",
             Params={"Bucket": self.bucket, "Key": object_key},

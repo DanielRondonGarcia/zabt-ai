@@ -1,12 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 import logging
-import traceback
 
 from fastapi import FastAPI
 
 from zabt_vision.inference.factory import make_inference
-from zabt_vision.pipeline.run import PipelineStageError, run_pipeline
+from zabt_vision.pipeline.run import PipelineStageError, _safe_error, run_pipeline
 from zabt_vision.pipeline.upload import make_s3_client
 from zabt_vision.settings import get_settings
 from zabt_vision.types import JobInput, JobResult
@@ -30,21 +29,21 @@ def run(job: JobInput) -> JobResult:
         s3_client = make_s3_client(settings)
         return run_pipeline(job=job, settings=settings, inference=inference, s3_client=s3_client)
     except PipelineStageError as e:
-        logger.exception("pipeline failed in stage %s", e.stage)
+        logger.warning("pipeline failed in stage %s: %s", e.stage, _safe_error(e.original))
         return JobResult(
             status="failed",
             segments=[],
             model=settings.vision_judge_model,
             params=dict(job.params),
             failed_stage=e.stage,
-            error=f"{type(e.original).__name__}: {e.original}\n{traceback.format_exc()[:1000]}",
+            error=_safe_error(e.original),
         )
     except Exception as e:
-        logger.exception("pipeline failed")
+        logger.warning("pipeline failed: %s", _safe_error(e))
         return JobResult(
             status="failed",
             segments=[],
             model=settings.vision_judge_model,
             params=dict(job.params),
-            error=f"{type(e).__name__}: {e}\n{traceback.format_exc()[:1000]}",
+            error=_safe_error(e),
         )

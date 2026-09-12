@@ -14,7 +14,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
 import { TranscriptViewer } from "@/app/components/transcript-viewer";
 import { StickyMediaPlayer } from "@/app/components/sticky-media-player";
 import { PaywallModal } from "@/app/components/paywall-modal";
-import { getUserStage, STAGE_LABELS } from "@/app/lib/stage-utils";
+import { getUserStage, STAGE_LABELS, isActiveMeeting } from "@/app/lib/stage-utils";
 import { ProgressSteps } from "@/app/components/ui/progress-steps";
 import { TemplateSelector } from "@/app/components/template-selector";
 import { Spinner } from "@/app/components/ui/spinner";
@@ -37,8 +37,6 @@ import {
 } from "@/app/components/ui/dropdown-menu";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-
-const ACTIVE_STATUSES = new Set(["pending_upload", "queued", "processing"]);
 
 const ROMAN_SPEAKER_COLORS: Record<string, string> = {
   SPEAKER_00: "bg-stone-500 text-white",
@@ -154,7 +152,7 @@ export default function MeetingDetailPage({
 
         setMeeting(data);
         setLoading(false);
-        if (ACTIVE_STATUSES.has(data.status)) startPolling();
+        if (isActiveMeeting(data)) startPolling();
       } catch {
         // Fallback for UI testing
         setError("Meeting not found or you don't have access to it.");
@@ -173,13 +171,13 @@ export default function MeetingDetailPage({
       try {
         const data = await getMeeting(Number(id));
         setMeeting(data);
-        if (!ACTIVE_STATUSES.has(data.status)) stopPolling();
+        if (!isActiveMeeting(data)) stopPolling();
         else if (elapsedRef.current >= 30 && intervalRef.current) {
           clearInterval(intervalRef.current);
           intervalRef.current = setInterval(async () => {
             const refreshed = await getMeeting(Number(id));
             setMeeting(refreshed);
-            if (!ACTIVE_STATUSES.has(refreshed.status)) stopPolling();
+            if (!isActiveMeeting(refreshed)) stopPolling();
           }, 10000);
         }
       } catch {
@@ -270,7 +268,10 @@ export default function MeetingDetailPage({
     );
   }
 
-  const isActive = ACTIVE_STATUSES.has(meeting.status);
+  const isActive = isActiveMeeting(meeting);
+  const userStage = getUserStage(meeting);
+  const visualFallback = meeting.visual_breakdown_status === "fallback"
+    || meeting.visual_breakdown_status === "skipped";
   const formattedDate = new Date(meeting.created_at).toLocaleString('en-US', {
     weekday: 'short', month: 'short', day: 'numeric', hour: 'numeric', minute: 'numeric'
   });
@@ -329,8 +330,8 @@ export default function MeetingDetailPage({
               <div className="flex items-center gap-2 mb-1">
                 <Loader2 className="size-4 animate-spin text-amber-600" />
                 <p className="font-medium">
-                  {meeting.status === "processing" && meeting.sub_status
-                    ? STAGE_LABELS[getUserStage(meeting)]
+                   {meeting.status === "processing" && meeting.sub_status
+                     ? STAGE_LABELS[userStage]
                     : "Processing your meeting…"}
                 </p>
               </div>
@@ -339,7 +340,7 @@ export default function MeetingDetailPage({
                 minutes depending on file length.
               </p>
             </div>
-            <ProgressSteps currentStage={getUserStage(meeting)} />
+             <ProgressSteps currentStage={userStage} />
           </div>
         )}
 
@@ -502,6 +503,13 @@ export default function MeetingDetailPage({
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{meeting.action_items_text}</ReactMarkdown>
                   </div>
                 </section>
+              )}
+
+              {visualFallback && (
+                <div className="rounded-lg border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-600">
+                  Visual context was unavailable for this meeting. The summary uses transcript-only
+                  evidence and remains available.
+                </div>
               )}
 
               {meeting.highlights && meeting.highlights.length > 0 && (

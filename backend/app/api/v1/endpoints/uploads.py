@@ -7,7 +7,7 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_active_user
 from app.models import User
 from app.services.storage import storage
 
@@ -61,7 +61,7 @@ class CompleteResponse(BaseModel):
 @router.post("/initiate", response_model=InitiateResponse)
 def initiate(
     payload: InitiateRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_active_user),
 ) -> InitiateResponse:
     """Start a multipart upload. Returns presigned URLs for all expected parts."""
     upload_id, s3_key = storage.create_multipart_upload(
@@ -82,7 +82,7 @@ def initiate(
 @router.post("/part-url", response_model=PartUrlResponse)
 def get_part_url(
     payload: PartUrlRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_active_user),
 ) -> PartUrlResponse:
     """Re-issue a presigned URL for a specific part (used on retry or if chunk count grew)."""
     url = storage.generate_part_url(
@@ -96,7 +96,7 @@ def get_part_url(
 @router.post("/complete", response_model=CompleteResponse)
 def complete(
     payload: CompleteRequest,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_active_user),
 ) -> CompleteResponse:
     """Finalize a multipart upload. Parts must be in ascending part_number order."""
     if not payload.parts:

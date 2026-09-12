@@ -28,10 +28,20 @@ class VisualSegment(BaseModel):
         return self
 
 
+class MediaProbe(BaseModel):
+    """Sanitized media metadata used to decide whether video is eligible."""
+
+    duration_s: float = Field(ge=0.0)
+    mime_type: str | None = None
+    video_codec: str | None = None
+    has_video: bool = False
+
+
 class JobInput(BaseModel):
     video_url: str
     owner_id: str
     meeting_id: str
+    media_type: str | None = None
     transcript: list[TranscriptLine] = Field(default_factory=list)
     params: dict[str, Any] = Field(default_factory=dict)
 

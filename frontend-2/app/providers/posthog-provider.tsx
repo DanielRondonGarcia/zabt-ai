@@ -6,14 +6,20 @@ import posthog from 'posthog-js'
 import { PostHogProvider } from 'posthog-js/react'
 import { useEffect } from 'react'
 
+const posthogKey = process.env.NEXT_PUBLIC_POSTHOG_KEY
+
 export function PHProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
-    posthog.init(process.env.NEXT_PUBLIC_POSTHOG_KEY!, {
+    if (!posthogKey) return
+
+    posthog.init(posthogKey, {
       api_host: process.env.NEXT_PUBLIC_POSTHOG_HOST,
       capture_pageview: false, // Manual pageview tracking via PostHogPageView
       capture_pageleave: true,
     })
   }, [])
+
+  if (!posthogKey) return <>{children}</>
 
   return <PostHogProvider client={posthog}>{children}</PostHogProvider>
 }

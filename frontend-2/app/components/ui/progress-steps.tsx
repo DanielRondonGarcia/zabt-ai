@@ -13,7 +13,10 @@ export function ProgressSteps({ currentStage }: ProgressStepsProps) {
   const isFailed = currentStage === "failed";
 
   return (
-    <div className="flex items-center w-full gap-0">
+    <div
+      className="flex items-center w-full gap-0 overflow-x-auto"
+      aria-label="Meeting processing progress"
+    >
       {STAGE_ORDER.map((stage, idx) => {
         const isLast = idx === STAGE_ORDER.length - 1;
         const isCompleted = !isFailed && (currentIdx > idx || (isLast && currentIdx === idx));
@@ -31,6 +34,7 @@ export function ProgressSteps({ currentStage }: ProgressStepsProps) {
                   isActive && "ring-2 ring-primary bg-white text-primary",
                   isPending && "border border-stone-200 bg-white text-stone-400"
                 )}
+                aria-current={isActive ? "step" : undefined}
               >
                 {isCompleted ? (
                   <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>

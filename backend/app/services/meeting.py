@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 import logging
+import uuid
+from datetime import datetime
 from typing import List, Optional
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -11,6 +13,10 @@ from app.db.engine import engine
 from app.services.base import BaseService
 
 logger = logging.getLogger(__name__)
+
+
+VISUAL_BREAKDOWN_ACTIVE_STATUSES = {"queued", "processing"}
+VISUAL_BREAKDOWN_TERMINAL_STATUSES = {"completed", "skipped", "fallback"}
 
 class MeetingService(BaseService):
     def on_before_action(self, action: str, **kwargs):
@@ -59,6 +65,7 @@ class MeetingService(BaseService):
                 Meeting.youtube_thumbnail_url,
                 Meeting.youtube_channel,
                 Meeting.summary_edited,
+                Meeting.visual_breakdown_status,
                 func.left(Meeting.summary_text, 300).label("summary_text"),
             ]
             statement = (
@@ -142,6 +149,239 @@ class MeetingService(BaseService):
         if template_name is not None:
             meeting.template_name = template_name
         return self.save(meeting)
+
+    def save_summary(
+        self,
+        meeting_id: int,
+        summary_text: str | None,
+        *,
+        template_id: int | None = None,
+        template_name: str | None = None,
+    ) -> Optional[Meeting]:
+        """Persist a summary without completing the intelligence stage."""
+        meeting = self.get(Meeting, meeting_id)
+        if not meeting:
+            return None
+        meeting.status = "processing"
+        meeting.sub_status = "summarizing"
+        meeting.summary_text = summary_text
+        if template_id is not None:
+            meeting.template_id = template_id
+        if template_name is not None:
+            meeting.template_name = template_name
+        return self.save(meeting)
+
+    def queue_visual_breakdown(self, meeting_id: int) -> tuple[str, bool]:
+        """Create a new visual run epoch while holding the meeting row lock.
+
+        The epoch is kept in the existing JSONB parameters column instead of a
+        new migration.  A caller can safely retry the enqueue operation: an
+        already active run is returned unchanged and a completed run receives a
+        fresh epoch for an explicit re-run.
+        """
+        with Session(engine) as session:
+            statement = (
+                select(Meeting)
+                .where(Meeting.id == meeting_id)
+                .with_for_update()
+            )
+            meeting = session.exec(statement).first()
+            if meeting is None:
+                raise RuntimeError(f"Meeting {meeting_id} not found")
+
+            params = dict(meeting.visual_breakdown_params or {})
+            current_epoch = params.get("run_epoch")
+            if meeting.visual_breakdown_status in VISUAL_BREAKDOWN_ACTIVE_STATUSES and current_epoch:
+                return str(current_epoch), False
+
+            run_epoch = uuid.uuid4().hex
+            params.update(
+                {
+                    "run_epoch": run_epoch,
+                    "idempotency_key": f"visual-breakdown:{meeting_id}:{run_epoch}",
+                    "outcome": None,
+                    "warning_code": None,
+                    "attempts": 0,
+                    "side_effects": {},
+                }
+            )
+            meeting.visual_breakdown_status = "queued"
+            meeting.visual_breakdown_error = None
+            meeting.visual_breakdown_completed_at = None
+            meeting.visual_breakdown_params = params
+            session.add(meeting)
+            session.commit()
+            return run_epoch, True
+
+    def begin_visual_breakdown(self, meeting_id: int) -> tuple[str, bool]:
+        """Return the current epoch or atomically start the first automatic run."""
+        with Session(engine) as session:
+            statement = (
+                select(Meeting)
+                .where(Meeting.id == meeting_id)
+                .with_for_update()
+            )
+            meeting = session.exec(statement).first()
+            if meeting is None:
+                raise RuntimeError(f"Meeting {meeting_id} not found")
+
+            params = dict(meeting.visual_breakdown_params or {})
+            current_epoch = params.get("run_epoch")
+            if current_epoch and meeting.visual_breakdown_status in VISUAL_BREAKDOWN_TERMINAL_STATUSES:
+                return str(current_epoch), False
+
+            if current_epoch and meeting.visual_breakdown_status == "processing":
+                return str(current_epoch), False
+
+            if current_epoch and meeting.visual_breakdown_status == "queued":
+                meeting.visual_breakdown_status = "processing"
+                meeting.visual_breakdown_error = None
+                session.add(meeting)
+                session.commit()
+                return str(current_epoch), True
+
+            run_epoch = uuid.uuid4().hex
+            params.update(
+                {
+                    "run_epoch": run_epoch,
+                    "idempotency_key": f"visual-breakdown:{meeting_id}:{run_epoch}",
+                    "outcome": None,
+                    "warning_code": None,
+                    "attempts": 0,
+                    "side_effects": {},
+                }
+            )
+            meeting.visual_breakdown_status = "processing"
+            meeting.visual_breakdown_error = None
+            meeting.visual_breakdown_completed_at = None
+            meeting.visual_breakdown_params = params
+            session.add(meeting)
+            session.commit()
+            return run_epoch, True
+
+    def increment_visual_breakdown_attempt(self, meeting_id: int, run_epoch: str) -> int:
+        """Increment the attempt counter for the active epoch under a row lock."""
+        with Session(engine) as session:
+            statement = (
+                select(Meeting)
+                .where(Meeting.id == meeting_id)
+                .with_for_update()
+            )
+            meeting = session.exec(statement).first()
+            if meeting is None:
+                raise RuntimeError(f"Meeting {meeting_id} not found")
+            params = dict(meeting.visual_breakdown_params or {})
+            if params.get("run_epoch") != run_epoch:
+                return int(params.get("attempts") or 0)
+            attempts = int(params.get("attempts") or 0) + 1
+            params["attempts"] = attempts
+            meeting.visual_breakdown_params = params
+            session.add(meeting)
+            session.commit()
+            return attempts
+
+    def finalize_visual_breakdown(
+        self,
+        meeting_id: int,
+        run_epoch: str,
+        *,
+        outcome: str,
+        reason: str | None = None,
+        warning_code: str | None = None,
+        result_params: dict | None = None,
+        raw_output_s3_key: str | None = None,
+        model: str | None = None,
+        segments: list | None = None,
+        run_count: bool = True,
+    ) -> dict:
+        """Atomically converge a visual outcome and its segment replacement.
+
+        The returned side-effect flags are claimed in the same transaction. A
+        duplicate delivery therefore cannot emit a second telemetry event or
+        notification after the first terminal commit.
+        """
+        from app.services.visual_segments import VisualSegmentService
+
+        if outcome not in VISUAL_BREAKDOWN_TERMINAL_STATUSES:
+            raise ValueError(f"Unsupported visual outcome: {outcome}")
+
+        with Session(engine) as session:
+            statement = (
+                select(Meeting)
+                .where(Meeting.id == meeting_id)
+                .with_for_update()
+            )
+            meeting = session.exec(statement).first()
+            if meeting is None:
+                raise RuntimeError(f"Meeting {meeting_id} not found")
+
+            params = dict(meeting.visual_breakdown_params or {})
+            if params.get("run_epoch") != run_epoch:
+                return {"applied": False, "meeting_id": meeting_id}
+
+            side_effects = dict(params.get("side_effects") or {})
+            if params.get("outcome") in VISUAL_BREAKDOWN_TERMINAL_STATUSES:
+                return {"applied": False, "meeting_id": meeting_id}
+
+            segment_list = list(segments or [])
+            VisualSegmentService.replace_for_meeting_in_session(
+                session, meeting_id, segment_list
+            )
+
+            merged_params = dict(params)
+            merged_params.update(result_params or {})
+            merged_params.update(
+                {
+                    "run_epoch": run_epoch,
+                    "idempotency_key": f"visual-breakdown:{meeting_id}:{run_epoch}",
+                    "outcome": outcome,
+                    "warning_code": warning_code,
+                    "reason": reason,
+                    "attempts": int(params.get("attempts") or 0),
+                }
+            )
+            completion_event = outcome == "completed" and not side_effects.get(
+                "completion_event"
+            )
+            warning_event = (
+                outcome in {"skipped", "fallback"}
+                and bool(warning_code)
+                and not side_effects.get("warning_event")
+            )
+            notification_event = completion_event
+            if completion_event:
+                side_effects["completion_event"] = True
+            if warning_event:
+                side_effects["warning_event"] = True
+            if notification_event:
+                side_effects["notification_event"] = True
+            merged_params["side_effects"] = side_effects
+
+            meeting.visual_breakdown_status = outcome
+            meeting.visual_breakdown_error = warning_code or reason
+            meeting.visual_breakdown_completed_at = datetime.utcnow()
+            if outcome == "completed":
+                meeting.visual_raw_output_s3_key = raw_output_s3_key
+                meeting.visual_breakdown_model = model
+            meeting.visual_breakdown_params = merged_params
+            if run_count:
+                meeting.visual_breakdown_run_count = (meeting.visual_breakdown_run_count or 0) + 1
+            session.add(meeting)
+            session.commit()
+
+            return {
+                "applied": True,
+                "meeting_id": meeting_id,
+                "owner_id": meeting.owner_id,
+                "title": meeting.title,
+                "status": outcome,
+                "warning_code": warning_code,
+                "segment_count": len(segment_list),
+                "completion_event": completion_event,
+                "warning_event": warning_event,
+                "notification_event": notification_event,
+                "attempts": int(merged_params.get("attempts") or 0),
+            }
 
     def mark_failed(self, meeting_id: int, error_message: str) -> Optional[Meeting]:
         """Mark a meeting as failed with an error message in summary_text."""

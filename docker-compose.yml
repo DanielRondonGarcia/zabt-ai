@@ -43,10 +43,20 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-google/gemini-3.1-flash-lite-preview}
-      # Auth (Supabase)
-      SUPABASE_URL: ${SUPABASE_URL}
-      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
-      SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY:-}
+      # First-party local auth. There is no Compose fallback: every backend
+      # process must receive the same strong deployment secret.
+      AUTH_ENVIRONMENT: ${AUTH_ENVIRONMENT:-development}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET must be set to a strong random value}
+      AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-zabt-api}
+      AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-zabt-client}
+      AUTH_ACCESS_TOKEN_EXPIRE_MINUTES: ${AUTH_ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+      AUTH_REFRESH_SESSION_EXPIRE_DAYS: ${AUTH_REFRESH_SESSION_EXPIRE_DAYS:-30}
+      AUTH_ACCESS_COOKIE_NAME: ${AUTH_ACCESS_COOKIE_NAME:-zabt_access_token}
+      AUTH_REFRESH_COOKIE_NAME: ${AUTH_REFRESH_COOKIE_NAME:-zabt_refresh_token}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+      AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
+      AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:-http://localhost:3000}
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3000}
       APP_URL: ${APP_URL:-http://localhost:3000}
       # Storage
@@ -63,6 +73,24 @@ services:
       S3_BUCKET_NAME: ${S3_BUCKET_NAME:-zabt-ai-bucket}
       S3_PUBLIC_URL: ${S3_PUBLIC_URL:-}
       S3_REGION: ${S3_REGION:-auto}
+      # Optional visual processing is disabled unless explicitly enabled.
+      VISION_ENABLED: ${VISION_ENABLED:-false}
+      VISION_BACKEND: ${VISION_BACKEND:-local}
+      VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://zabt-vision-worker:8003}
+      VISION_JUDGE_MODEL: ${VISION_JUDGE_MODEL:-qwen3-vl:8b-thinking}
+      VISION_REQUIRE_VISION: ${VISION_REQUIRE_VISION:-true}
+      VISION_MAX_RETRIES: ${VISION_MAX_RETRIES:-2}
+      VISION_RETRY_BACKOFF_SECONDS: ${VISION_RETRY_BACKOFF_SECONDS:-5}
+      VISION_CLOUD_ALLOWED: ${VISION_CLOUD_ALLOWED:-false}
+      VISION_EGRESS_POLICY: ${VISION_EGRESS_POLICY:-deny}
+      VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:-}
+      VISION_SIGNED_URL_EXPIRATION: ${VISION_SIGNED_URL_EXPIRATION:-3600}
+      VISION_RUNPOD_API_KEY: ${VISION_RUNPOD_API_KEY:-}
+      VISION_RUNPOD_ENDPOINT_ID: ${VISION_RUNPOD_ENDPOINT_ID:-}
+      VISION_POLL_INTERVAL: ${VISION_POLL_INTERVAL:-5}
+      VISION_TIMEOUT: ${VISION_TIMEOUT:-1800}
+      SUMMARY_CHUNK_SECONDS: ${SUMMARY_CHUNK_SECONDS:-120}
+      SUMMARY_MAX_INPUT_TOKENS: ${SUMMARY_MAX_INPUT_TOKENS:-6000}
       # Integrations / notifications (all optional)
       MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
       MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
@@ -100,10 +128,15 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
+      AUTH_ENVIRONMENT: ${AUTH_ENVIRONMENT:-development}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET must be set to a strong random value}
+      AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-zabt-api}
+      AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-zabt-client}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-google/gemini-3.1-flash-lite-preview}
-      SUPABASE_JWT_SECRET: ${SUPABASE_JWT_SECRET}
       APP_URL: ${APP_URL:-http://localhost:3000}
       STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
@@ -124,10 +157,23 @@ services:
       RUNPOD_POLL_INTERVAL: ${RUNPOD_POLL_INTERVAL:-5}
       RUNPOD_TIMEOUT: ${RUNPOD_TIMEOUT:-1800}
       # Vision (visual breakdown) backend: "local" or "runpod"
+      VISION_ENABLED: ${VISION_ENABLED:-false}
       VISION_BACKEND: ${VISION_BACKEND:-local}
       VISION_LOCAL_URL: ${VISION_LOCAL_URL:-http://zabt-vision-worker:8003}
+      VISION_JUDGE_MODEL: ${VISION_JUDGE_MODEL:-qwen3-vl:8b-thinking}
+      VISION_REQUIRE_VISION: ${VISION_REQUIRE_VISION:-true}
+      VISION_MAX_RETRIES: ${VISION_MAX_RETRIES:-2}
+      VISION_RETRY_BACKOFF_SECONDS: ${VISION_RETRY_BACKOFF_SECONDS:-5}
+      VISION_CLOUD_ALLOWED: ${VISION_CLOUD_ALLOWED:-false}
+      VISION_EGRESS_POLICY: ${VISION_EGRESS_POLICY:-deny}
+      VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:-}
+      VISION_SIGNED_URL_EXPIRATION: ${VISION_SIGNED_URL_EXPIRATION:-3600}
       VISION_RUNPOD_API_KEY: ${VISION_RUNPOD_API_KEY:-}
       VISION_RUNPOD_ENDPOINT_ID: ${VISION_RUNPOD_ENDPOINT_ID:-}
+      VISION_POLL_INTERVAL: ${VISION_POLL_INTERVAL:-5}
+      VISION_TIMEOUT: ${VISION_TIMEOUT:-1800}
+      SUMMARY_CHUNK_SECONDS: ${SUMMARY_CHUNK_SECONDS:-120}
+      SUMMARY_MAX_INPUT_TOKENS: ${SUMMARY_MAX_INPUT_TOKENS:-6000}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-no-reply@zabt.ai}
       NOTIFICATION_PROVIDER: ${NOTIFICATION_PROVIDER:-}
@@ -161,6 +207,17 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
+      AUTH_ENVIRONMENT: ${AUTH_ENVIRONMENT:-development}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET must be set to a strong random value}
+      AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-zabt-api}
+      AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-zabt-client}
+      AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
+      AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+      # The beat process imports the summary task module at startup, so it must
+      # receive the same OpenAI-compatible provider settings as api and worker.
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
       APP_URL: ${APP_URL:-http://localhost:3000}
       STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
@@ -236,7 +293,8 @@ services:
     build:
       context: ./zabt-gpu-worker
     ports:
-      - "8001:8001"
+      # The host port is configurable because other local stacks may already use 8001.
+      - "${ZABT_WORKER_HOST_PORT:-8001}:8001"
     environment:
       MODE: local
       PORT: 8001
@@ -264,15 +322,13 @@ services:
     restart: unless-stopped
     profiles: [local]
     build:
-      context: ./frontend-2
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: frontend-2/Dockerfile
     ports:
       - "3000:3000"
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
       NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:-http://localhost:3000}
-      NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
-      NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
       NEXT_PUBLIC_POSTHOG_KEY: ${NEXT_PUBLIC_POSTHOG_KEY:-}
       NEXT_PUBLIC_POSTHOG_HOST: ${NEXT_PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}
       NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
@@ -312,7 +368,7 @@ services:
       - redis
 
   # Visual breakdown worker (needs an Ollama host for the vision model).
-  # Enable by adding "vision" to COMPOSE_PROFILES.
+  # Enable the profile and VISION_ENABLED explicitly; the default remains disabled.
   zabt-vision-worker:
     image: zabt-vision-worker:latest
     restart: unless-stopped
@@ -324,7 +380,14 @@ services:
       - "8003:8003"
     environment:
       VISION_JUDGE_MODEL: ${VISION_JUDGE_MODEL:-qwen3-vl:8b-thinking}
+      VISION_ENABLED: ${VISION_ENABLED:-false}
+      VISION_REQUIRE_VISION: ${VISION_REQUIRE_VISION:-true}
+      VISION_CLOUD_ALLOWED: ${VISION_CLOUD_ALLOWED:-false}
+      VISION_EGRESS_POLICY: ${VISION_EGRESS_POLICY:-deny}
+      VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:-}
+      VISION_INFERENCE_BACKEND: ${VISION_INFERENCE_BACKEND:-ollama}
       OLLAMA_HOST: ${OLLAMA_HOST:-http://host.docker.internal:11434}
+      OLLAMA_NO_CLOUD: ${OLLAMA_NO_CLOUD:-1}
       S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
       S3_REGION: ${S3_REGION:-auto}
       AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}

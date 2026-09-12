@@ -6,40 +6,24 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Eye, EyeOff } from "lucide-react";
-import {
-  socialLogin,
-  ssoLookup,
-  loginWithRememberMe,
-  type OAuthProvider,
-} from "@/app/lib/api";
+import { login } from "@/app/lib/api";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
-import { SocialButton } from "@/app/components/ui/social-button";
 
 export default function LoginPage() {
   const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
-  const [rememberMe, setRememberMe] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-
-  const handleSocialLogin = async (provider: OAuthProvider) => {
-    await socialLogin(provider);
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     setLoading(true);
     try {
-      const ssoResult = await ssoLookup(email);
-      if (ssoResult.sso_enabled && ssoResult.redirect_url) {
-        window.location.href = ssoResult.redirect_url;
-        return;
-      }
-      await loginWithRememberMe(email, password, rememberMe);
+      await login(email, password);
       router.push("/");
     } catch {
       setError("Incorrect email or password. Please try again.");
@@ -60,27 +44,6 @@ export default function LoginPage() {
           <p className="text-sm text-stone-500">
             Please enter your details to sign in.
           </p>
-        </div>
-
-        {/* Social login buttons */}
-        <div className="space-y-3 mb-6">
-          <SocialButton
-            provider="google"
-            label="Sign in with Google"
-            onClick={() => handleSocialLogin("google")}
-          />
-          <SocialButton
-            provider="microsoft"
-            label="Sign in with Microsoft"
-            onClick={() => handleSocialLogin("microsoft")}
-          />
-        </div>
-
-        {/* Separator */}
-        <div className="flex items-center gap-3 mb-6">
-          <hr className="flex-1 border-stone-200" />
-          <span className="text-xs text-stone-400">or sign in with email</span>
-          <hr className="flex-1 border-stone-200" />
         </div>
 
         {/* Email / password form */}
@@ -126,17 +89,8 @@ export default function LoginPage() {
             </div>
           </div>
 
-          {/* Remember me + Forgot password */}
-          <div className="flex items-center justify-between">
-            <label className="flex items-center gap-2 text-sm text-stone-700 cursor-pointer">
-              <input
-                type="checkbox"
-                checked={rememberMe}
-                onChange={(e) => setRememberMe(e.target.checked)}
-                className="rounded border-stone-300 text-primary focus:ring-primary"
-              />
-              Remember me
-            </label>
+          {/* Password reset is intentionally not enabled in this local-only slice. */}
+          <div className="flex justify-end">
             <Link
               href="/forgot-password"
               className="text-sm text-primary hover:underline"

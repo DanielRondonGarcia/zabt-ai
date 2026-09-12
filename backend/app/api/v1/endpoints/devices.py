@@ -5,7 +5,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlmodel import Session
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_active_user, get_db
 from app.models import DeviceCreate, DeviceRead, User
 from app.services.device import DeviceService
 
@@ -17,7 +17,7 @@ ALLOWED_PLATFORMS = {"ios", "android"}
 @router.post("", response_model=DeviceRead)
 def register_device(
     payload: DeviceCreate,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ) -> DeviceRead:
     """Register or refresh an Expo push token for the authenticated user.
@@ -42,7 +42,7 @@ def register_device(
 @router.delete("/{device_id}", status_code=204, response_class=Response)
 def unregister_device(
     device_id: int,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
 ) -> Response:
     """Delete a device owned by the current user. Used on signout from mobile."""

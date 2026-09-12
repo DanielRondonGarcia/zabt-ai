@@ -4,7 +4,10 @@ React Native + Expo mobile app. See [design spec](../docs/superpowers/specs/2026
 
 ## Local development
 
-Requires the root `.env` to define `EXPO_PUBLIC_API_URL`, `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_ANON_KEY` (and optionally `EXPO_PUBLIC_SENTRY_DSN`, `EXPO_PUBLIC_POSTHOG_KEY`). Load them into your shell however you prefer — the project doesn't auto-inject.
+Requires the root `.env` to define `EXPO_PUBLIC_API_URL` (and optionally
+`EXPO_PUBLIC_SENTRY_DSN`, `EXPO_PUBLIC_POSTHOG_KEY`). The mobile app uses the API's local
+email/password authentication; no Supabase variables are needed. Load values into your shell
+however you prefer — the project does not auto-inject them.
 
 ```bash
 # From the repo root
@@ -53,8 +56,6 @@ EAS reads `EXPO_PUBLIC_*` vars from its own env, not from your local `.env`. Set
 ```bash
 # From zabt-mobile/
 npx eas-cli env:create --name EXPO_PUBLIC_API_URL --value "https://api.zabt.ai/api/v1" --environment production
-npx eas-cli env:create --name EXPO_PUBLIC_SUPABASE_URL --value "<supabase url>" --environment production
-npx eas-cli env:create --name EXPO_PUBLIC_SUPABASE_ANON_KEY --value "<anon key>" --environment production
 npx eas-cli env:create --name EXPO_PUBLIC_SENTRY_DSN --value "<sentry dsn>" --environment production
 # repeat with --environment preview and --environment development for the other profiles
 ```
@@ -103,9 +104,15 @@ Update `frontend-2/public/.well-known/assetlinks.json` — replace `REPLACE_AFTE
 
 Retrieve the Apple Team ID (visible in the EAS build output or at developer.apple.com → Membership). Update `frontend-2/public/.well-known/apple-app-site-association` — replace `TEAMID` with the real team ID. Commit and deploy frontend-2.
 
-## Known issues
+## Authentication limitations
 
-- **OAuth redirects to `app.zabt.ai`** instead of back to the app (Expo Go only). Expected to resolve in a dev client because `zabt://` scheme registers with the OS at install time. Revisit after first EAS dev client build.
+- Local email/password login and registration are supported.
+- Access and refresh tokens are stored through `expo-secure-store`; the existing AsyncStorage
+  fallback is used when SecureStore is unavailable in Expo Go.
+- Password reset and email verification are not configured because this first slice has no email
+  provider dependency.
+- Google/Microsoft sign-in and OAuth callbacks are intentionally not part of this first-party
+  authentication slice.
 
 ## Architecture
 

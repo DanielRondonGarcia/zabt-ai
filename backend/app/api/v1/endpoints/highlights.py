@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 from fastapi import APIRouter, Depends, HTTPException
-from app.api.deps import get_current_user
+from app.api.deps import get_current_active_user
 from app.models.base import Meeting, User
 from app.models.meeting_intelligence import MeetingHighlightRead
 from app.services.meeting import meeting_service
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/meetings", tags=["highlights"])
 def get_meeting_highlights(
     meeting_id: int,
     highlight_type: str | None = None,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_active_user),
 ):
     meeting = meeting_service.get(Meeting, meeting_id)
     if not meeting or meeting.owner_id != user.id:
@@ -27,7 +27,7 @@ def get_meeting_highlights(
 def update_meeting_type(
     meeting_id: int,
     body: dict,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_active_user),
 ):
     """Update meeting type and trigger re-extraction."""
     meeting = meeting_service.get(Meeting, meeting_id)
@@ -47,7 +47,7 @@ def update_meeting_type(
 @router.post("/{meeting_id}/re-extract", status_code=202)
 def re_extract_intelligence(
     meeting_id: int,
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_active_user),
 ):
     """Re-run intelligence extraction for a meeting."""
     meeting = meeting_service.get(Meeting, meeting_id)

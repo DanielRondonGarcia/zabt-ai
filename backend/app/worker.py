@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 import os
+import re
 import urllib.request
 from math import ceil
 
@@ -18,7 +19,14 @@ if settings.LOGFIRE_TOKEN:
     import logfire
     logfire.instrument_celery()
 from app.db.engine import engine
-from app.models import Meeting, TranscriptSegment, TranscriptionBackend, TranscriptionType, User
+from app.models import (
+    Meeting,
+    TranscriptSegment,
+    TranscriptionBackend,
+    TranscriptionType,
+    User,
+    VisualSegment,
+)
 from app.services.meeting import meeting_service
 from app.services.storage import storage
 from app.services.transcription import get_provider, build_config
@@ -447,14 +455,63 @@ def stage_transliterate(meeting_id: int) -> int:
 
 @celery_app.task(name="stage_summarize")
 def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
-    """Run AI agent for summary + action items, then mark meeting as completed."""
+    """Build ephemeral evidence context and generate the meeting summary.
+
+    Completion is deliberately deferred to ``stage_extract_intelligence`` so a
+    meeting cannot appear completed while the transcript-only intelligence pass
+    is still running.
+    """
     logger.info("stage_summarize started meeting_id=%s template_id=%s", meeting_id, template_id)
 
-    meeting_service.update_sub_status(meeting_id, "summarizing")
+    meeting_service.update_sub_status(meeting_id, "building_context")
 
     meeting = meeting_service.get(Meeting, meeting_id)
     if not meeting:
         raise ValueError(f"Meeting {meeting_id} not found.")
+
+    from app.services.multimodal_context import build_context
+
+    with Session(engine) as session:
+        transcript_segments = list(
+            session.exec(
+                select(TranscriptSegment)
+                .where(TranscriptSegment.meeting_id == meeting_id)
+                .order_by(TranscriptSegment.start_time)
+            )
+        )
+        visual_segments = list(
+            session.exec(
+                select(VisualSegment)
+                .where(VisualSegment.meeting_id == meeting_id)
+                .order_by(VisualSegment.sequence)
+            )
+        )
+
+    context_result = None
+    if transcript_segments or visual_segments:
+        if not transcript_segments and meeting.transcript_text:
+            transcript_segments = [
+                {
+                    "id": 0,
+                    "start_time": 0.0,
+                    "end_time": max(float(meeting.duration_seconds or 0), 1.0),
+                    "text": meeting.transcript_text,
+                }
+            ]
+        context_result = build_context(
+            transcript_segments,
+            visual_segments,
+            chunk_seconds=settings.SUMMARY_CHUNK_SECONDS,
+            max_input_tokens=settings.SUMMARY_MAX_INPUT_TOKENS,
+        )
+    if context_result and context_result.warning_codes:
+        logger.warning(
+            "summary context completed with bounded warnings meeting_id=%s warnings=%s",
+            meeting_id,
+            ",".join(context_result.warning_codes),
+        )
+
+    meeting_service.update_sub_status(meeting_id, "summarizing")
 
     summary_text = None
     active_template = None
@@ -482,6 +539,7 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             template_body=template_body,
             template_id=str(active_template.id) if active_template else None,
             upload_date=meeting.created_at.strftime("%B %d, %Y") if meeting.created_at else None,
+            context=context_result,
         )
 
     # Infer a meaningful title from the summary via LLM
@@ -490,10 +548,9 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
         from app.services.ai_agent import infer_title
         inferred_title = infer_title(summary_text)
 
-    meeting_service.mark_completed(
+    meeting_service.save_summary(
         meeting_id,
         summary_text,
-        None,
         template_id=active_template.id if active_template else None,
         template_name=active_template.name if active_template else None,
     )
@@ -540,12 +597,14 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
 
 @celery_app.task(name="stage_extract_intelligence")
 def stage_extract_intelligence(meeting_id: int) -> int:
-    """Extract highlights and structured output from the meeting transcript."""
+    """Extract transcript-only intelligence and finalize the meeting."""
     logger.info("stage_extract_intelligence started meeting_id=%s", meeting_id)
 
     meeting = meeting_service.get(Meeting, meeting_id)
     if not meeting or not meeting.transcript_text:
         logger.warning("stage_extract_intelligence: no transcript for meeting_id=%s", meeting_id)
+        if meeting:
+            meeting_service.mark_completed(meeting_id)
         return meeting_id
 
     from app.services.meeting_intelligence import intelligence_service
@@ -589,6 +648,11 @@ def stage_extract_intelligence(meeting_id: int) -> int:
                 db_meeting.structured_output_status = "failed"
                 session.add(db_meeting)
                 session.commit()
+
+    # Intelligence may have failed, but the extraction attempt is complete and
+    # the summary remains usable.  Do not finalize from stage_summarize: this is
+    # the only stage that owns the completed transition.
+    meeting_service.mark_completed(meeting_id)
 
     return meeting_id
 
@@ -725,173 +789,296 @@ def cleanup_abandoned_uploads() -> None:
         logger.warning("cleanup_abandoned_uploads failed", exc_info=True)
 
 
-# ── Stage 5: Visual Breakdown ────────────────────────────────────────────────
+# ── Stage 5: Optional Visual Breakdown ───────────────────────────────────────
 
-@celery_app.task(name="stage_visual_breakdown")
-def stage_visual_breakdown(meeting_id: int) -> dict:
-    """Run the visual-breakdown pipeline via zabt-vision-worker. User-triggered
-    per-meeting. Overwrites any prior breakdown."""
-    from datetime import datetime
 
-    from app.models import TranscriptSegment, VisualSegment
+def _sanitize_visual_error(error: object) -> str:
+    """Keep provider failures bounded and free of URLs, tokens, and payloads."""
+    if isinstance(error, BaseException):
+        message = f"{type(error).__name__}: {error}"
+    else:
+        message = str(error)
+    message = re.sub(r"https?://\S+", "<redacted-url>", message)
+    message = re.sub(
+        r"(?i)(token|secret|password|api[_-]?key)=\S+",
+        r"\1=<redacted>",
+        message,
+    )
+    message = re.sub(r"\s+", " ", message).strip()
+    return message[:200] or "visual processing failed"
+
+
+def _acquire_visual_lease(meeting_id: int, run_epoch: str) -> bool:
+    """Acquire a Redis lease; a Redis outage falls back to the DB row lock."""
+    key = f"visual-breakdown:{meeting_id}:{run_epoch}"
+    ttl = max(int(getattr(settings, "VISION_TIMEOUT", 1800)) + 300, 300)
+    try:
+        import redis
+
+        client = redis.from_url(settings.REDIS_URL)
+        acquired = client.set(key, run_epoch, nx=True, ex=ttl)
+        try:
+            client.close()
+        except Exception:
+            pass
+        # redis-py returns None when SET NX loses the lease; only a truthy
+        # acknowledgement means this worker owns the epoch.
+        return bool(acquired)
+    except Exception:
+        logger.warning("visual lease unavailable; relying on database convergence", exc_info=True)
+        return True
+
+
+def _fresh_visual_url(file_path: str) -> str:
+    """Generate a new signed URL for each attempt, with a compatibility fallback."""
+    expiration = int(getattr(settings, "VISION_SIGNED_URL_EXPIRATION", 3600))
+    fresh = getattr(storage, "get_fresh_presigned_download_url", None)
+    if fresh is not None:
+        try:
+            return fresh(file_path, expiration=expiration)
+        except Exception:
+            logger.warning("fresh visual URL generation failed; using legacy URL method")
+    return storage.get_presigned_download_url(file_path, expiration=expiration)
+
+
+def _safe_visual_params(result) -> dict:
+    """Persist only bounded configuration/metric values returned by the worker."""
+    allowed = {
+        "fps",
+        "phash_threshold",
+        "ocr_diff_threshold",
+        "ensemble_min_signals",
+        "confidence_threshold",
+        "skip_reason",
+        "warning_code",
+    }
+    params = getattr(result, "params", {}) or {}
+    return {
+        key: value
+        for key, value in params.items()
+        if key in allowed and isinstance(value, (str, int, float, bool, type(None)))
+    }
+
+
+def _emit_visual_side_effects(finalization: dict, result=None) -> None:
+    """Emit only the side effects claimed by the atomic finalization."""
+    if not finalization.get("applied") or finalization.get("owner_id") is None:
+        return
+
+    owner_id = finalization["owner_id"]
+    meeting_id = finalization["meeting_id"]
+    status = finalization.get("status")
+    if finalization.get("completion_event"):
+        metrics = getattr(result, "stage_metrics", {}) if result is not None else {}
+        total_duration_ms = sum(
+            value.get("duration_ms", 0)
+            for value in metrics.values()
+            if isinstance(value, dict)
+        )
+        analytics.capture(
+            owner_id,
+            "visual_breakdown_completed",
+            {
+                "meeting_id": meeting_id,
+                "segment_count": finalization.get("segment_count", 0),
+                "model": getattr(result, "model", None),
+                "total_duration_ms": total_duration_ms,
+            },
+        )
+        for stage_name, stage_metrics in metrics.items():
+            if isinstance(stage_metrics, dict):
+                analytics.capture(
+                    owner_id,
+                    "visual_breakdown_stage_completed",
+                    {"meeting_id": meeting_id, "stage": stage_name, **stage_metrics},
+                )
+
+        try:
+            with Session(engine) as session:
+                user_obj = session.get(User, owner_id)
+            notify(
+                "visual_breakdown_completed",
+                (user_obj.email if user_obj else None) or str(owner_id),
+                finalization.get("title"),
+                meeting_id=meeting_id,
+                extra={"segment_count": str(finalization.get("segment_count", 0))},
+            )
+        except Exception:
+            logger.warning("visual breakdown notification failed", exc_info=True)
+    elif finalization.get("warning_event"):
+        analytics.capture(
+            owner_id,
+            "visual_breakdown_warning",
+            {
+                "meeting_id": meeting_id,
+                "status": status,
+                "warning_code": finalization.get("warning_code"),
+            },
+        )
+
+
+def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
     from app.services.visual_breakdown.vision_client import VisionClient
-    from app.services.visual_segments import VisualSegmentService
 
-    logger.info("stage_visual_breakdown started meeting_id=%s", meeting_id)
+    logger.info(
+        "%s started meeting_id=%s",
+        "stage_optional_visual_breakdown" if optional else "stage_visual_breakdown",
+        meeting_id,
+    )
+    run_epoch, should_process = meeting_service.begin_visual_breakdown(meeting_id)
+    if not should_process or not _acquire_visual_lease(meeting_id, run_epoch):
+        return meeting_id
 
-    # Step 1: mark processing and capture the data we need for the worker call
     with Session(engine) as session:
         meeting = session.get(Meeting, meeting_id)
         if meeting is None:
-            logger.warning("stage_visual_breakdown: meeting %s not found", meeting_id)
-            return {"status": "skipped", "reason": "meeting_not_found"}
-        if not meeting.file_path:
-            meeting.visual_breakdown_status = "failed"
-            meeting.visual_breakdown_error = "no_video_file"
-            session.add(meeting)
-            session.commit()
-            logger.warning("stage_visual_breakdown: meeting %s has no file_path", meeting_id)
-            return {"status": "failed", "reason": "no_video_file"}
-
-        meeting.visual_breakdown_status = "processing"
-        meeting.visual_breakdown_error = None
-        session.add(meeting)
-        session.commit()
+            raise RuntimeError(f"Meeting {meeting_id} not found")
         owner_id = meeting.owner_id
         file_path = meeting.file_path
-        meeting_title = meeting.title
-
+        source_type = meeting.source_type
+        stored_visual_params = dict(meeting.visual_breakdown_params or {})
         transcript = session.exec(
             select(TranscriptSegment)
             .where(TranscriptSegment.meeting_id == meeting_id)
             .order_by(TranscriptSegment.start_time)
         ).all()
         transcript_payload = [
-            {"speaker": t.speaker or "SPEAKER_00", "text": t.text,
-             "start": t.start_time, "end": t.end_time}
-            for t in transcript
+            {
+                "speaker": item.speaker or "SPEAKER_00",
+                "text": item.text,
+                "start": item.start_time,
+                "end": item.end_time,
+            }
+            for item in transcript
         ]
 
-    # Step 2: call the worker
-    try:
-        video_url = storage.get_presigned_download_url(file_path, expiration=3600)
-        client = VisionClient()
-        result = client.submit_and_wait({
-            "video_url": video_url,
-            "owner_id": str(owner_id) if owner_id is not None else "unknown",
-            "meeting_id": str(meeting_id),
-            "transcript": transcript_payload,
-            "params": {},
-        })
-    except Exception as e:
-        logger.exception("stage_visual_breakdown: worker call failed")
-        _finalize_visual_breakdown_failure(meeting_id, f"{type(e).__name__}: {e}", None, owner_id)
-        raise
-
-    # Step 3: worker reported failure in the result body
-    if result.status == "failed":
-        _finalize_visual_breakdown_failure(
-            meeting_id, result.error or "unknown_worker_error", result.failed_stage, owner_id,
+    if optional and not settings.VISION_ENABLED:
+        finalization = meeting_service.finalize_visual_breakdown(
+            meeting_id,
+            run_epoch,
+            outcome="skipped",
+            reason="vision_disabled",
+            warning_code="visual_disabled",
         )
-        return {"status": "failed", "failed_stage": result.failed_stage}
+        _emit_visual_side_effects(finalization)
+        return meeting_id
 
-    # Step 4: persist segments
+    if not file_path:
+        finalization = meeting_service.finalize_visual_breakdown(
+            meeting_id,
+            run_epoch,
+            outcome="skipped",
+            reason="no_media_file",
+            warning_code="no_video_file",
+        )
+        _emit_visual_side_effects(finalization)
+        return meeting_id
+
+    if source_type == "youtube":
+        finalization = meeting_service.finalize_visual_breakdown(
+            meeting_id,
+            run_epoch,
+            outcome="skipped",
+            reason="youtube_audio_only",
+            warning_code="youtube_audio_only",
+        )
+        _emit_visual_side_effects(finalization)
+        return meeting_id
+
+    meeting_service.update_sub_status(meeting_id, "analyzing_video")
+    meeting_service.increment_visual_breakdown_attempt(meeting_id, run_epoch)
+    try:
+        video_url = _fresh_visual_url(file_path)
+        result = VisionClient().submit_and_wait(
+            {
+                "video_url": video_url,
+                "owner_id": str(owner_id) if owner_id is not None else "unknown",
+                "meeting_id": str(meeting_id),
+                "transcript": transcript_payload,
+                "params": {
+                    key: stored_visual_params[key]
+                    for key in ("media_type", "mime_type", "content_type", "media_kind")
+                    if key in stored_visual_params
+                },
+            }
+        )
+    except Exception as error:
+        logger.warning("visual worker failed meeting_id=%s error=%s", meeting_id, _sanitize_visual_error(error))
+        finalization = meeting_service.finalize_visual_breakdown(
+            meeting_id,
+            run_epoch,
+            outcome="fallback",
+            reason="vision_worker_error",
+            warning_code="vision_worker_error",
+            result_params={"warning_code": "vision_worker_error"},
+        )
+        _emit_visual_side_effects(finalization)
+        return meeting_id
+
+    if result.status != "completed":
+        finalization = meeting_service.finalize_visual_breakdown(
+            meeting_id,
+            run_epoch,
+            outcome="fallback",
+            reason="vision_worker_failed",
+            warning_code="vision_worker_failed",
+            result_params={"warning_code": "vision_worker_failed"},
+        )
+        _emit_visual_side_effects(finalization, result)
+        return meeting_id
+
+    if not result.segments:
+        finalization = meeting_service.finalize_visual_breakdown(
+            meeting_id,
+            run_epoch,
+            outcome="skipped",
+            reason="no_relevant_visual",
+            warning_code="no_relevant_visual",
+            result_params={"skip_reason": "no_relevant_visual"},
+        )
+        _emit_visual_side_effects(finalization, result)
+        return meeting_id
+
     worker_segments = [
         VisualSegment(
             meeting_id=meeting_id,
-            sequence=s.sequence,
-            start_time=s.start_time,
-            end_time=s.end_time,
-            screenshot_s3_key=s.screenshot_s3_key,
-            caption=s.caption,
-            confidence=s.confidence,
+            sequence=segment.sequence,
+            start_time=segment.start_time,
+            end_time=segment.end_time,
+            screenshot_s3_key=segment.screenshot_s3_key,
+            caption=segment.caption,
+            confidence=segment.confidence,
         )
-        for s in result.segments
+        for segment in result.segments
     ]
-    VisualSegmentService().replace_for_meeting(meeting_id, worker_segments)
-
-    # Step 5: finalize meeting fields
-    total_duration_ms = sum(m.get("duration_ms", 0) for m in result.stage_metrics.values())
-    with Session(engine) as session:
-        meeting = session.get(Meeting, meeting_id)
-        if meeting is None:
-            logger.warning("stage_visual_breakdown: meeting %s deleted mid-run", meeting_id)
-            return {"status": "skipped", "reason": "meeting_deleted_mid_run"}
-        meeting.visual_breakdown_status = "completed"
-        meeting.visual_breakdown_completed_at = datetime.utcnow()
-        meeting.visual_raw_output_s3_key = result.raw_output_s3_key
-        meeting.visual_breakdown_model = result.model
-        meeting.visual_breakdown_params = result.params
-        meeting.visual_breakdown_run_count = (meeting.visual_breakdown_run_count or 0) + 1
-        session.add(meeting)
-        session.commit()
-
-    # Step 6: PostHog — high-level event + per-stage events
-    if owner_id is not None:
-        analytics.capture(
-            owner_id,
-            "visual_breakdown_completed",
-            {
-                "meeting_id": meeting_id,
-                "segment_count": len(result.segments),
-                "model": result.model,
-                "total_duration_ms": total_duration_ms,
-            },
-        )
-        for stage_name, metrics in result.stage_metrics.items():
-            analytics.capture(
-                owner_id,
-                "visual_breakdown_stage_completed",
-                {"meeting_id": meeting_id, "stage": stage_name, **metrics},
-            )
-
-    # Step 7: Telegram (via existing notify dispatcher — event kind registered in Task 10)
-    try:
-        user_obj = None
-        with Session(engine) as session:
-            if owner_id is not None:
-                user_obj = session.get(User, owner_id)
-        notify(
-            "visual_breakdown_completed",
-            (user_obj.email if user_obj else None) or str(owner_id or ""),
-            meeting_title,
-            meeting_id=meeting_id,
-            extra={"segment_count": str(len(result.segments))},
-        )
-    except Exception:
-        logger.warning("stage_visual_breakdown: notify failed", exc_info=True)
-
-    logger.info(
-        "stage_visual_breakdown done meeting_id=%s segments=%s",
-        meeting_id, len(result.segments),
+    finalization = meeting_service.finalize_visual_breakdown(
+        meeting_id,
+        run_epoch,
+        outcome="completed",
+        result_params=_safe_visual_params(result),
+        raw_output_s3_key=result.raw_output_s3_key,
+        model=result.model,
+        segments=worker_segments,
     )
-    return {"status": "completed", "segment_count": len(result.segments)}
+    _emit_visual_side_effects(finalization, result)
+    logger.info(
+        "visual breakdown done meeting_id=%s segments=%s",
+        meeting_id,
+        len(result.segments),
+    )
+    return meeting_id
 
 
-def _finalize_visual_breakdown_failure(
-    meeting_id: int,
-    error: str,
-    failed_stage: str | None,
-    owner_id: int | None,
-) -> None:
-    with Session(engine) as session:
-        meeting = session.get(Meeting, meeting_id)
-        if meeting is not None:
-            meeting.visual_breakdown_status = "failed"
-            meeting.visual_breakdown_error = (error or "")[:500]
-            session.add(meeting)
-            session.commit()
+@celery_app.task(name="stage_optional_visual_breakdown")
+def stage_optional_visual_breakdown(meeting_id: int) -> int:
+    """Run optional visual processing and always return the stable meeting ID."""
+    return _run_visual_breakdown(meeting_id, optional=True)
 
-    if owner_id is not None:
-        analytics.capture(
-            owner_id,
-            "visual_breakdown_failed",
-            {
-                "meeting_id": meeting_id,
-                "error_reason": (error or "")[:100],
-                "failed_stage": failed_stage,
-            },
-        )
+
+@celery_app.task(name="stage_visual_breakdown")
+def stage_visual_breakdown(meeting_id: int) -> int:
+    """Run an explicit visual breakdown and return only the stable meeting ID."""
+    return _run_visual_breakdown(meeting_id, optional=False)
 
 
 celery_app.conf.beat_schedule = {
@@ -919,6 +1106,7 @@ def dispatch_pipeline(meeting_id: int):
         stage_download.s(meeting_id).set(link_error=[on_stage_failure.s()]),
         stage_transcribe.s().set(link_error=[on_stage_failure.s()]),
         stage_transliterate.s().set(link_error=[on_stage_failure.s()]),
+        stage_optional_visual_breakdown.s().set(link_error=[on_stage_failure.s()]),
         stage_summarize.s().set(link_error=[on_stage_failure.s()]),
         stage_extract_intelligence.s().set(link_error=[on_stage_failure.s()]),
     )
@@ -1025,13 +1213,15 @@ def stage_youtube_download(meeting_id: int) -> int:
 def dispatch_youtube_pipeline(meeting_id: int):
     """Build and dispatch the Celery chain for YouTube ingestion.
 
-    Uses stage_youtube_download instead of stage_download, then feeds
-    into the existing stage_transcribe → stage_transliterate → stage_summarize → stage_extract_intelligence chain.
+    Uses stage_youtube_download instead of stage_download, then feeds into the
+    same optional-visual → summary → transcript-intelligence chain.  The
+    optional stage short-circuits YouTube audio without downloading media twice.
     """
     pipeline = chain(
         stage_youtube_download.s(meeting_id).set(link_error=[on_stage_failure.s()]),
         stage_transcribe.s().set(link_error=[on_stage_failure.s()]),
         stage_transliterate.s().set(link_error=[on_stage_failure.s()]),
+        stage_optional_visual_breakdown.s().set(link_error=[on_stage_failure.s()]),
         stage_summarize.s().set(link_error=[on_stage_failure.s()]),
         stage_extract_intelligence.s().set(link_error=[on_stage_failure.s()]),
     )

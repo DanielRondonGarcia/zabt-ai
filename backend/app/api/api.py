@@ -1,9 +1,26 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 from fastapi import APIRouter
-from app.api.v1.endpoints import meetings, transcriptions, styles, billing, webhooks, health, templates, integrations, highlights, devices, uploads, languages
+from app.api.v1.endpoints import (
+    auth,
+    devices,
+    health,
+    highlights,
+    integrations,
+    languages,
+    meetings,
+    styles,
+    templates,
+    transcriptions,
+    uploads,
+    users,
+    webhooks,
+    billing,
+)
 
 api_router = APIRouter()
+api_router.include_router(auth.router, prefix="/auth", tags=["auth"])
+api_router.include_router(users.router, prefix="/users", tags=["users"])
 api_router.include_router(meetings.router, prefix="/meetings", tags=["meetings"])
 api_router.include_router(transcriptions.router, prefix="/transcriptions", tags=["transcriptions"])
 api_router.include_router(styles.router, prefix="/styles", tags=["styles"])

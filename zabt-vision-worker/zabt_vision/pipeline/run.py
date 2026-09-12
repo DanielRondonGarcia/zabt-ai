@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+import json
 import logging
+import re
 import shutil
 import subprocess
 import time
 import uuid
+from itertools import pairwise
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from PIL import Image
 
@@ -21,7 +25,7 @@ from zabt_vision.pipeline.signals.transcript_hints import compute_transcript_hin
 from zabt_vision.pipeline.upload import upload_keyframe_jpg, upload_raw_output_json
 from zabt_vision.pipeline.video_native import detect_screen_changes_native
 from zabt_vision.settings import Settings
-from zabt_vision.types import JobInput, JobResult, VisualSegment
+from zabt_vision.types import JobInput, JobResult, MediaProbe, VisualSegment
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +52,7 @@ def download_video(url: str, dest: Path) -> Path:
 
 
 def video_duration_seconds(path: Path) -> float:
-    out = subprocess.check_output(
+    completed = subprocess.run(
         [
             "ffprobe",
             "-v",
@@ -58,9 +62,136 @@ def video_duration_seconds(path: Path) -> float:
             "-of",
             "default=noprint_wrappers=1:nokey=1",
             str(path),
-        ]
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
     )
-    return float(out.decode().strip())
+    if completed.returncode != 0:
+        raise RuntimeError("ffprobe returned a non-zero status")
+    try:
+        return float((completed.stdout or "").strip())
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("ffprobe returned invalid duration") from error
+
+
+def probe_media(path: Path) -> MediaProbe:
+    """Probe media with a fixed argv-only ffprobe command.
+
+    The command never uses a shell and failures intentionally discard stderr so
+    signed URLs, local paths, and provider payloads cannot reach API responses.
+    """
+    completed = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_streams",
+            "-show_format",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise RuntimeError("ffprobe returned a non-zero status")
+    try:
+        payload = json.loads(completed.stdout or "")
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("ffprobe returned invalid metadata") from error
+
+    streams = payload.get("streams") or []
+    video_stream = next(
+        (stream for stream in streams if stream.get("codec_type") == "video"),
+        None,
+    )
+    format_data = payload.get("format") or {}
+    try:
+        duration = float(format_data.get("duration") or 0.0)
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("ffprobe returned an invalid duration") from error
+    return MediaProbe(
+        duration_s=max(0.0, duration),
+        mime_type=(format_data.get("format_name") or None),
+        video_codec=(video_stream or {}).get("codec_name"),
+        has_video=video_stream is not None,
+    )
+
+
+def _safe_error(error: object) -> str:
+    if isinstance(error, BaseException):
+        message = f"{type(error).__name__}: {error}"
+    else:
+        message = str(error)
+    message = re.sub(r"https?://\S+", "<redacted-url>", message)
+    message = re.sub(
+        r"(?i)(token|secret|password|api[_-]?key)=\S+",
+        r"\1=<redacted>",
+        message,
+    )
+    return re.sub(r"\s+", " ", message).strip()[:200]
+
+
+def _is_youtube_url(url: str) -> bool:
+    host = (urlsplit(url).hostname or "").lower().rstrip(".")
+    return host in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+
+
+def _media_kind(job: JobInput) -> str | None:
+    values = [
+        job.media_type,
+        job.params.get("media_type"),
+        job.params.get("mime_type"),
+        job.params.get("content_type"),
+        job.params.get("media_kind"),
+        job.params.get("source_type"),
+    ]
+    for value in values:
+        if not value:
+            continue
+        normalized = str(value).strip().lower()
+        if normalized == "youtube" or _is_youtube_url(job.video_url):
+            return "youtube"
+        if normalized == "audio" or normalized.startswith("audio/"):
+            return "audio"
+        if normalized == "video" or normalized.startswith("video/"):
+            return "video"
+    if _is_youtube_url(job.video_url):
+        return "youtube"
+    return None
+
+
+def _skip_result(job: JobInput, settings: Settings, reason: str) -> JobResult:
+    return JobResult(
+        status="completed",
+        segments=[],
+        model=settings.vision_judge_model,
+        params={"skip_reason": reason},
+        stage_metrics={"skipped": {"reason": reason}},
+    )
+
+
+def _select_candidate_frames(frame_records, images, candidates):
+    """Return one sampled frame per signal candidate for VLM analysis."""
+    if not candidates or not frame_records:
+        return [], []
+    selected: list[tuple[float, int]] = []
+    seen: set[int] = set()
+    for candidate in candidates:
+        index = min(
+            range(len(frame_records)),
+            key=lambda i: abs(frame_records[i].timestamp_s - candidate.timestamp_s),
+        )
+        if index not in seen:
+            seen.add(index)
+            selected.append((frame_records[index].timestamp_s, index))
+    selected.sort()
+    return [frame_records[index] for _timestamp, index in selected], [
+        images[index] for _timestamp, index in selected
+    ]
 
 
 def _load_frames_as_images(frame_records) -> list[Image.Image]:
@@ -75,14 +206,22 @@ def _make_chunks(
     chunks: list[tuple[float, float, list[Image.Image]]] = []
     if not frame_records:
         return chunks
+    spacing = next(
+        (
+            later.timestamp_s - earlier.timestamp_s
+            for earlier, later in pairwise(frame_records)
+            if later.timestamp_s > earlier.timestamp_s
+        ),
+        1.0,
+    )
     start_idx = 0
     chunk_start_t = frame_records[0].timestamp_s
     for i, fr in enumerate(frame_records):
         if fr.timestamp_s - chunk_start_t >= chunk_seconds:
-            chunks.append((chunk_start_t, frame_records[i - 1].timestamp_s, images[start_idx:i]))
+            chunks.append((chunk_start_t, fr.timestamp_s, images[start_idx:i]))
             start_idx = i
             chunk_start_t = fr.timestamp_s
-    chunks.append((chunk_start_t, frame_records[-1].timestamp_s, images[start_idx:]))
+    chunks.append((chunk_start_t, frame_records[-1].timestamp_s + spacing, images[start_idx:]))
     return chunks
 
 
@@ -126,7 +265,7 @@ def _run_stage(name: str, fn, *args, **kwargs):
         raise PipelineStageError(stage=name, original=e) from e
 
 
-def run_pipeline(
+def _run_pipeline(
     job: JobInput,
     settings: Settings,
     inference: VisionInference,
@@ -141,10 +280,24 @@ def run_pipeline(
     work_dir.mkdir(parents=True, exist_ok=True)
     stage_metrics: dict[str, dict] = {}
 
+    kind = _media_kind(job)
+    if kind in {"audio", "youtube"}:
+        reason = "audio_only" if kind == "audio" else "youtube_audio_only"
+        return _skip_result(job, settings, reason)
+
     # Stage 1: extract frames
     t0 = time.perf_counter()
     video_path = _run_stage("extract_frames", download_video, job.video_url, work_dir / "video.mp4")
-    duration = _run_stage("extract_frames", video_duration_seconds, video_path)
+    if video_path.exists():
+        probe = _run_stage("extract_frames", probe_media, video_path)
+        if not probe.has_video:
+            return _skip_result(job, settings, "audio_only")
+        duration = probe.duration_s
+    else:
+        # Unit callers may provide a mocked downloader and duration without a
+        # real file.  Production downloads always exist and use the probe above.
+        duration = _run_stage("extract_frames", video_duration_seconds, video_path)
+        probe = MediaProbe(duration_s=duration, has_video=True)
     fps = job.params.get("fps", settings.fps)
     frame_records = _run_stage(
         "extract_frames", extract_frames, video_path, work_dir / "frames", fps=fps
@@ -155,6 +308,8 @@ def run_pipeline(
         "frame_count": len(frame_records),
         "fps": fps,
         "video_duration_s": duration,
+        "media_codec": probe.video_codec,
+        "media_format": probe.mime_type,
     }
 
     # Stage 2: signals + candidates
@@ -191,13 +346,17 @@ def run_pipeline(
 
     # Stage 3: video-native detection
     t0 = time.perf_counter()
-    chunks = _make_chunks(frame_records, images, settings.chunk_seconds)
+    sampled_records, sampled_images = _select_candidate_frames(
+        frame_records, images, candidates
+    )
+    chunks = _make_chunks(sampled_records, sampled_images, settings.chunk_seconds)
     natives = _run_stage(
         "video_native_detection", detect_screen_changes_native, chunks=chunks, inference=inference
     )
     stage_metrics["video_native_detection"] = {
         "duration_ms": int((time.perf_counter() - t0) * 1000),
         "chunks_processed": len(chunks),
+        "sampled_frame_count": len(sampled_records),
         "detections_count": len(natives),
     }
 
@@ -328,3 +487,36 @@ def run_pipeline(
         },
         stage_metrics=stage_metrics,
     )
+
+
+def run_pipeline(
+    job: JobInput,
+    settings: Settings,
+    inference: VisionInference,
+    s3_client,
+) -> JobResult:
+    """Run the pipeline and return a sanitized bounded outcome."""
+    try:
+        return _run_pipeline(
+            job=job,
+            settings=settings,
+            inference=inference,
+            s3_client=s3_client,
+        )
+    except PipelineStageError as error:
+        return JobResult(
+            status="failed",
+            segments=[],
+            model=settings.vision_judge_model,
+            params={},
+            failed_stage=error.stage,
+            error=_safe_error(error.original),
+        )
+    except Exception as error:
+        return JobResult(
+            status="failed",
+            segments=[],
+            model=settings.vision_judge_model,
+            params={},
+            error=_safe_error(error),
+        )

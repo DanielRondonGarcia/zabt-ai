@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_active_user, get_db
 from app.models.base import LanguageEntryRead, User
 from app.services import analytics
 from app.services.languages import catalog, preferences
@@ -39,7 +39,7 @@ class LanguagePreferencesUpdate(BaseModel):
 )
 def get_user_language_preferences(
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_active_user),
 ) -> LanguagePreferencesRead:
     return LanguagePreferencesRead(codes=preferences.get_preferences(db, user.id))
 
@@ -50,7 +50,7 @@ def get_user_language_preferences(
 def update_user_language_preferences(
     payload: LanguagePreferencesUpdate,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user),
+    user: User = Depends(get_current_active_user),
 ) -> LanguagePreferencesRead:
     try:
         codes = preferences.set_preferences(db, user.id, payload.codes)

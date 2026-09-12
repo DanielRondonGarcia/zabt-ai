@@ -6,7 +6,6 @@ from fastapi.responses import Response
 from sqlmodel import Session
 
 from app.api import deps
-from app.db.engine import engine
 from app.models import (
     Meeting, MeetingCreate, MeetingRead, MeetingSummaryUpdate, User,
     TranscriptSegmentRead, TranscriptWordRead, SpeakerBreakdown,
@@ -31,6 +30,30 @@ def dispatch_transcription_job(meeting_id: int) -> None:
     """Kick off the full transcription pipeline for an existing meeting."""
     from app.worker import dispatch_pipeline
     dispatch_pipeline(meeting_id)
+
+
+def _signed_download_url(
+    object_key: str, *, public: bool = False, expiration: int | None = None
+) -> str:
+    """Keep existing signed-URL behavior while tolerating provider fallbacks."""
+    methods = (
+        ("get_public_presigned_download_url", "get_fresh_presigned_download_url", "get_presigned_download_url")
+        if public
+        else ("get_presigned_download_url", "get_fresh_presigned_download_url")
+    )
+    last_error: Exception | None = None
+    for method_name in methods:
+        method = getattr(storage, method_name, None)
+        if method is None:
+            continue
+        try:
+            kwargs = {"expiration": expiration} if expiration is not None else {}
+            return method(object_key, **kwargs)
+        except Exception as error:
+            last_error = error
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("Storage provider cannot generate a signed URL")
 
 
 def _build_meeting_response(meeting: Meeting) -> MeetingRead:
@@ -73,7 +96,13 @@ def _build_meeting_response(meeting: Meeting) -> MeetingRead:
 
     audio_url = None
     if meeting.file_path:
-        audio_url = storage.get_public_presigned_download_url(meeting.file_path)
+        try:
+            audio_url = _signed_download_url(meeting.file_path, public=True)
+        except Exception:
+            # Preserve the response contract even when the public endpoint is
+            # unavailable; the internal signed URL remains usable by callers
+            # that proxy media through the API.
+            audio_url = None
 
     return MeetingRead(
         id=meeting.id,
@@ -109,10 +138,14 @@ def _build_meeting_response(meeting: Meeting) -> MeetingRead:
         highlights=[h.model_dump() for h in highlights_list],
         layout_hint=layout_hint,
         audio_url=audio_url,
+        visual_breakdown_status=meeting.visual_breakdown_status,
+        visual_breakdown_error=meeting.visual_breakdown_error,
+        visual_breakdown_completed_at=meeting.visual_breakdown_completed_at,
     )
 
 class MeetingCreateWithKey(MeetingCreate):
     file_key: str
+    content_type: str | None = None
     transcription_type: TranscriptionType = TranscriptionType.GENERAL
     meeting_type: str = "generic"
     language: str | None = None
@@ -151,6 +184,13 @@ def create_meeting(
     if requested_language is not None:
         meeting_service.update_field(meeting.id, "requested_language", requested_language)
         meeting.requested_language = requested_language
+    if meeting_in.content_type:
+        meeting_service.update_field(
+            meeting.id,
+            "visual_breakdown_params",
+            {"content_type": meeting_in.content_type},
+        )
+        meeting.visual_breakdown_params = {"content_type": meeting_in.content_type}
     # Build response directly — new meetings have no segments yet,
     # and the meeting object is detached from the session.
     return MeetingRead(
@@ -463,7 +503,8 @@ def resummarize_meeting(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """Trigger re-summarization of a meeting using a specified (or default) template."""
-    from app.worker import stage_summarize
+    from celery import chain
+    from app.worker import stage_extract_intelligence, stage_summarize
     meeting = meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
@@ -475,7 +516,10 @@ def resummarize_meeting(
             detail="Meeting is currently being processed. Try again when processing is complete.",
         )
     meeting_service.update_sub_status(meeting_id, "summarizing")
-    stage_summarize.apply_async(args=[meeting_id], kwargs={"template_id": body.template_id})
+    chain(
+        stage_summarize.s(template_id=body.template_id),
+        stage_extract_intelligence.s(),
+    ).apply_async(args=[meeting_id])
     return {
         "meeting_id": meeting_id,
         "status": "processing",
@@ -699,14 +743,9 @@ def request_visual_breakdown(
             detail="Visual breakdown is already running for this meeting",
         )
 
-    # Mark queued and enqueue the task. The Celery task transitions to "processing"
-    # once it actually picks up the job.
-    with Session(engine) as session:
-        m = session.get(Meeting, meeting_id)
-        m.visual_breakdown_status = "queued"
-        m.visual_breakdown_error = None
-        session.add(m)
-        session.commit()
+    # Mark queued and persist a new run epoch in the same locked transaction.
+    # The Celery task transitions to "processing" once it picks up the job.
+    meeting_service.queue_visual_breakdown(meeting_id)
 
     stage_visual_breakdown.apply_async(args=[meeting_id])
     return {
@@ -750,7 +789,6 @@ def get_visual_segments(
 ) -> VisualBreakdownResponse:
     """Return visual segments for a meeting with transcript lines aligned by timestamp.
     Returns empty `visual_segments` and null status when no breakdown has been run."""
-    from app.services.storage import storage
     from app.services.visual_segments import VisualSegmentService
 
     meeting = meeting_service.get_meeting(meeting_id)
@@ -770,7 +808,7 @@ def get_visual_segments(
                 sequence=seg.sequence,
                 start_time=seg.start_time,
                 end_time=seg.end_time,
-                screenshot_url=storage.get_presigned_download_url(seg.screenshot_s3_key, expiration=3600),
+                screenshot_url=_signed_download_url(seg.screenshot_s3_key, expiration=3600),
                 caption=seg.caption,
                 confidence=seg.confidence,
                 transcript_lines=[

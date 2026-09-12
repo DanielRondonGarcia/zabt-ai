@@ -44,7 +44,8 @@ flowchart LR
 ```
 
 The GPU worker runs locally by default; in the cloud topology it is a RunPod serverless
-endpoint. Authentication is delegated to Supabase (a free project works).
+endpoint. Authentication is first-party: local email/password accounts and revocable sessions
+are stored in PostgreSQL. No Supabase or external identity service is required.
 
 ## Quick start (single machine)
 
@@ -56,9 +57,9 @@ No GPU? See [CPU-only](#cpu-only) below.
 git clone https://github.com/afeef/zabt-ai.git
 cd zabt-ai
 cp .env.example .env
-#   Edit .env and set the 4 REQUIRED values:
-#     SUPABASE_URL / SUPABASE_JWT_SECRET / NEXT_PUBLIC_SUPABASE_* (one free Supabase project)
-#     OPENAI_API_KEY   (any OpenAI-compatible LLM key)
+#   Edit .env and set the required values:
+#     AUTH_JWT_SECRET  (required; generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"`)
+#     OPENAI_API_KEY   (any OpenAI-compatible LLM key, including Ollama Cloud)
 #     HF_TOKEN         (Hugging Face token — accept the pyannote gate, see below)
 docker compose up -d
 ```
@@ -134,7 +135,7 @@ See [docs/self-hosting.md](docs/self-hosting.md) and
 ## Tech stack
 
 Python 3.11 · FastAPI · Celery · SQLModel · faster-whisper (WhisperX) · pyannote-audio ·
-Next.js 16 / React 19 · Tailwind CSS 4 · Postgres 16 · Redis 7 · MinIO/S3 · Supabase (auth).
+Next.js 16 / React 19 · Tailwind CSS 4 · Postgres 16 · Redis 7 · MinIO/S3 · local PostgreSQL auth.
 
 ## License & contributing
 

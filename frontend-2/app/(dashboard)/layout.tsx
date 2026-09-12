@@ -5,7 +5,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { usePostHog } from "posthog-js/react";
-import { createClient } from "@/app/lib/supabase/client";
+import { fetchCurrentUser } from "@/app/lib/api";
 import { AppShell } from "@/app/components/app-shell";
 import { TooltipProvider } from "@/app/components/ui/tooltip";
 import { Spinner } from "@/app/components/ui/spinner";
@@ -20,40 +20,26 @@ export default function DashboardLayout({
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        const supabase = createClient();
-
-        // Check initial session
-        supabase.auth.getSession().then(({ data }) => {
-            if (!data.session) {
-                router.replace("/login");
-            } else {
-                const user = data.session.user;
-                posthog?.identify(user.id, { email: user.email });
-                // Fire user_signed_up once per user (tracked via localStorage flag)
-                const signupKey = `ph_signup_tracked_${user.id}`;
-                if (!localStorage.getItem(signupKey)) {
-                    posthog?.capture('user_signed_up', { signup_date: user.created_at });
-                    localStorage.setItem(signupKey, '1');
-                }
+        let mounted = true;
+        fetchCurrentUser()
+            .then((user) => {
+                if (!mounted) return;
+                posthog?.identify(user.email, {
+                    email: user.email,
+                    full_name: user.full_name,
+                });
                 setLoading(false);
-            }
-        });
-
-        // Listen for auth changes
-        const { data: listener } = supabase.auth.onAuthStateChange(
-            (_event, session) => {
-                if (!session) {
+            })
+            .catch(() => {
+                if (mounted) {
                     router.replace("/login");
-                } else {
-                    const user = session.user;
-                    posthog?.identify(user.id, { email: user.email });
-                    setLoading(false);
                 }
-            }
-        );
+            });
 
-        return () => listener.subscription.unsubscribe();
-    }, [router]);
+        return () => {
+            mounted = false;
+        };
+    }, [posthog, router]);
 
     if (loading) {
         return (

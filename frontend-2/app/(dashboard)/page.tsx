@@ -3,7 +3,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { createClient } from "@/app/lib/supabase/client";
+import { fetchCurrentUser } from "@/app/lib/api";
 import { AiQueryBar } from "@/app/components/ai-query-bar";
 import { MeetingFeed } from "@/app/components/meeting-feed";
 import { UploadModal } from "@/app/components/upload-modal";
@@ -25,13 +25,11 @@ export default function HomePage() {
     const [isYoutubeDialogOpen, setYoutubeDialogOpen] = useState(false);
 
     useEffect(() => {
-        const supabase = createClient();
-        supabase.auth.getUser().then(({ data }) => {
-            if (data.user) {
-                const full = data.user.user_metadata?.full_name as string | undefined;
-                const name = full?.split(" ")[0] ?? data.user.email?.split("@")[0] ?? "there";
-                setFirstName(name);
-            }
+        fetchCurrentUser().then((user) => {
+            const name = user.full_name?.split(" ")[0] ?? user.email.split("@")[0] ?? "there";
+            setFirstName(name);
+        }).catch(() => {
+            // The dashboard layout handles unauthenticated redirects.
         });
 
         const handleOpenModal = () => setUploadModalOpen(true);

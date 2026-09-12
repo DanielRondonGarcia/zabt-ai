@@ -4,11 +4,17 @@ from zabt_vision.settings import Settings
 
 
 def test_settings_loads_defaults(monkeypatch):
+    monkeypatch.delenv("VISION_ENABLED", raising=False)
     monkeypatch.delenv("VISION_INFERENCE_BACKEND", raising=False)
     monkeypatch.delenv("VISION_JUDGE_MODEL", raising=False)
+    monkeypatch.delenv("VISION_EGRESS_POLICY", raising=False)
     s = Settings()
+    assert s.vision_enabled is False
     assert s.vision_inference_backend == "ollama"
     assert s.vision_judge_model == "qwen3-vl:8b-thinking"
+    assert s.vision_cloud_allowed is False
+    assert s.vision_egress_policy == "deny"
+    assert s.ollama_no_cloud is True
     assert s.fps == 2
     assert s.phash_threshold == 8
     assert s.confidence_threshold == 0.7
@@ -16,8 +22,14 @@ def test_settings_loads_defaults(monkeypatch):
 
 
 def test_settings_overrides_from_env(monkeypatch):
+    monkeypatch.setenv("VISION_ENABLED", "true")
     monkeypatch.setenv("VISION_INFERENCE_BACKEND", "transformers")
     monkeypatch.setenv("VISION_JUDGE_MODEL", "qwen3-vl-32b-thinking")
+    monkeypatch.setenv("VISION_EGRESS_POLICY", "allowlist")
+    monkeypatch.setenv("VISION_ALLOWED_HOSTS", "vision.internal,localhost")
     s = Settings()
+    assert s.vision_enabled is True
     assert s.vision_inference_backend == "transformers"
     assert s.vision_judge_model == "qwen3-vl-32b-thinking"
+    assert s.vision_egress_policy == "allowlist"
+    assert s.vision_allowed_hosts == "vision.internal,localhost"

@@ -3,6 +3,7 @@
 import { Text, View } from "react-native";
 import Markdown from "react-native-markdown-display";
 import type { Meeting } from "@zabt/shared";
+import { VISUAL_OUTCOME_COPY, getVisualOutcome } from "@/lib/stage-utils";
 
 interface Props {
   meeting: Meeting;
@@ -26,9 +27,21 @@ const markdownStyles = {
 };
 
 export function SummaryTab({ meeting }: Props) {
+  const visualOutcome = getVisualOutcome(meeting);
+  const visualCopy =
+    visualOutcome === "skipped" || visualOutcome === "fallback"
+      ? VISUAL_OUTCOME_COPY[visualOutcome]
+      : null;
+
   if (!meeting.summary_text) {
     return (
       <View className="py-8 items-center">
+        {visualCopy && (
+          <View className="mb-4 w-full rounded-lg border border-stone-200 bg-stone-50 px-4 py-3">
+            <Text className="text-sm font-semibold text-stone-700">{visualCopy.title}</Text>
+            <Text className="text-xs text-stone-600 mt-1">{visualCopy.description}</Text>
+          </View>
+        )}
         <Text className="text-sm text-muted-foreground text-center">
           {meeting.status === "processing"
             ? "Summary is being generated…"
@@ -40,5 +53,15 @@ export function SummaryTab({ meeting }: Props) {
     );
   }
 
-  return <Markdown style={markdownStyles}>{meeting.summary_text}</Markdown>;
+  return (
+    <>
+      {visualCopy && (
+        <View className="mb-4 w-full rounded-lg border border-stone-200 bg-stone-50 px-4 py-3">
+          <Text className="text-sm font-semibold text-stone-700">{visualCopy.title}</Text>
+          <Text className="text-xs text-stone-600 mt-1">{visualCopy.description}</Text>
+        </View>
+      )}
+      <Markdown style={markdownStyles}>{meeting.summary_text}</Markdown>
+    </>
+  );
 }

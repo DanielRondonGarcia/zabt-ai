@@ -6,10 +6,9 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Eye, EyeOff } from "lucide-react";
-import { register, socialLogin, type OAuthProvider } from "@/app/lib/api";
+import { register } from "@/app/lib/api";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
-import { SocialButton } from "@/app/components/ui/social-button";
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -19,10 +18,6 @@ export default function RegisterPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-
-  const handleSocialSignUp = async (provider: OAuthProvider) => {
-    await socialLogin(provider);
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -61,29 +56,8 @@ export default function RegisterPage() {
             Create your account
           </h1>
           <p className="text-sm text-stone-500">
-            Please enter your details to sign in.
+            Create a local Zabt account with your email and password.
           </p>
-        </div>
-
-        {/* Social sign-up buttons */}
-        <div className="space-y-3 mb-6">
-          <SocialButton
-            provider="google"
-            label="Sign up with Google"
-            onClick={() => handleSocialSignUp("google")}
-          />
-          <SocialButton
-            provider="microsoft"
-            label="Sign up with Microsoft"
-            onClick={() => handleSocialSignUp("microsoft")}
-          />
-        </div>
-
-        {/* Separator */}
-        <div className="flex items-center gap-3 mb-6">
-          <hr className="flex-1 border-stone-200" />
-          <span className="text-xs text-stone-400">or sign up with email</span>
-          <hr className="flex-1 border-stone-200" />
         </div>
 
         {/* Registration form */}

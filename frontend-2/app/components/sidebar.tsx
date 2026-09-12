@@ -5,7 +5,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { createClient } from "@/app/lib/supabase/client";
+import { fetchCurrentUser } from "@/app/lib/api";
 import { ProfileMenu } from "@/app/components/profile-menu";
 import clsx from "clsx";
 
@@ -69,13 +69,11 @@ export function Sidebar({ onNavClick }: SidebarProps) {
     const [foldersOpen, setFoldersOpen] = useState(false);
 
     useEffect(() => {
-        const supabase = createClient();
-        supabase.auth.getUser().then(({ data }) => {
-            if (data.user) {
-                const full = data.user.user_metadata?.full_name as string | undefined;
-                setUserName(full ?? data.user.email?.split("@")[0] ?? "User");
-                setUserEmail(data.user.email ?? "");
-            }
+        fetchCurrentUser().then((user) => {
+            setUserName(user.full_name ?? user.email.split("@")[0] ?? "User");
+            setUserEmail(user.email);
+        }).catch(() => {
+            // The dashboard guard owns redirecting unauthenticated users.
         });
     }, []);
 

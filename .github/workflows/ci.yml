@@ -45,8 +45,8 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://app:app@localhost:5432/zabt_test
       REDIS_URL: redis://localhost:6379/0
-      SUPABASE_URL: https://example.supabase.co
-      SUPABASE_JWT_SECRET: test-secret
+      AUTH_JWT_SECRET: ci-only-local-auth-secret-0123456789abcdef
+      AUTH_ALLOWED_ORIGINS: http://localhost:3000
       OPENAI_API_KEY: test-key
       OPENAI_BASE_URL: https://example.invalid/v1
       STORAGE_PROVIDER: minio

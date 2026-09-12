@@ -4,7 +4,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useTranscriptStore } from "@/app/lib/use-transcript-store";
-import { Meeting } from "@/app/lib/api";
+import type { Meeting } from "@/app/lib/api";
 import { Play, Pause, RotateCcw } from "lucide-react";
 
 export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
@@ -14,6 +14,9 @@ export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
 
     const [playbackRate, setPlaybackRate] = useState(1);
     const [duration, setDuration] = useState(meeting.duration_seconds || 0);
+    const progressPercent = duration > 0
+        ? Math.min(100, Math.max(0, (currentTime / duration) * 100))
+        : 0;
 
     // Sync seek requests from the UI (Transcript words clicking) to the native player
     useEffect(() => {
@@ -69,7 +72,7 @@ export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
         return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
     };
 
-    const audioSrc = meeting.audio_url || meeting.file_path;
+    const audioSrc = meeting.audio_url || meeting.file_path || undefined;
 
     return (
         <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 z-50 px-6 py-4 pb-safe">
@@ -87,7 +90,7 @@ export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
                     }}
                 >
                     {/* Base mapped segments */}
-                    {meeting.segments?.map((seg, i) => {
+                    {duration > 0 && meeting.segments?.map((seg, i) => {
                         const left = (seg.start / duration) * 100;
                         const width = ((seg.end - seg.start) / duration) * 100;
                         return (
@@ -102,7 +105,7 @@ export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
                     {/* Active progress fill */}
                     <div
                         className="absolute top-0 bottom-0 left-0 bg-primary transition-all duration-75"
-                        style={{ width: `${(currentTime / duration) * 100}%` }}
+                        style={{ width: `${progressPercent}%` }}
                     />
                 </div>
 
@@ -116,11 +119,11 @@ export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
                         </span>
 
                         <div className="flex items-center gap-4">
-                            <button onClick={handleRewind} className="hover:text-stone-900 text-stone-500 transition">
+                            <button type="button" aria-label="Rewind 10 seconds" onClick={handleRewind} className="hover:text-stone-900 text-stone-500 transition">
                                 <RotateCcw className="w-5 h-5" />
                             </button>
 
-                            <button onClick={togglePlay} className="w-8 h-8 flex items-center justify-center rounded-full bg-stone-900 text-white hover:bg-stone-800 transition-colors">
+                            <button type="button" aria-label={audioRef.current?.paused === false ? "Pause" : "Play"} onClick={togglePlay} className="w-8 h-8 flex items-center justify-center rounded-full bg-stone-900 text-white hover:bg-stone-800 transition-colors">
                                 {audioRef.current?.paused === false ? (
                                     <Pause className="w-4 h-4 fill-current" />
                                 ) : (
@@ -129,6 +132,8 @@ export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
                             </button>
 
                             <button
+                                type="button"
+                                aria-label={`Playback speed ${playbackRate}x`}
                                 onClick={toggleSpeed}
                                 className="hover:text-stone-900 text-stone-500 font-medium text-sm w-6 text-center transition"
                             >

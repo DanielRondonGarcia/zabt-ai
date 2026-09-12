@@ -5,13 +5,12 @@ FROM nvidia/cuda:12.8.1-runtime-ubuntu24.04
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
-# System dependencies + Python + FFmpeg 6 (Ubuntu 24.04 default)
+# System dependencies + Python + FFmpeg 6 (Ubuntu 24.04 default).
+# Keep the image independent of third-party PPAs so Docker builds work in
+# environments where Launchpad is unavailable or restricted.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-venv \
-    software-properties-common \
-    && add-apt-repository ppa:ubuntuhandbook1/ffmpeg7 -y \
-    && apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     libavcodec-dev \
     libavformat-dev \
@@ -32,10 +31,10 @@ WORKDIR /app
 # Copy dependency files (cached layer — rebuilds only when deps change)
 COPY pyproject.toml uv.lock ./
 
-# Install all dependencies with cache mount for faster retries
+# Install dependencies with the explicit GPU extra and cache mount for faster retries
 ENV UV_HTTP_TIMEOUT=1200
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --no-install-project --extra gpu
 
 # Activate venv via PATH
 ENV PATH="/app/.venv/bin:$PATH"

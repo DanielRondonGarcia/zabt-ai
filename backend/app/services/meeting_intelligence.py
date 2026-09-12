@@ -109,6 +109,8 @@ class OneOnOneOutput(BaseModel):
 HIGHLIGHT_EXTRACTION_PROMPT = """\
 You are a meeting analyst. Given a meeting transcript with speaker labels and timestamps, extract structured highlights.
 
+The input is transcript-only. Do not infer or request visual evidence, and do not expose hidden reasoning.
+
 Return a JSON object with these arrays:
 
 {
@@ -216,11 +218,15 @@ class MeetingIntelligenceService:
         """Call 2: Extract meeting-type-specific structured output."""
         type_config = MEETING_TYPE_PROMPTS.get(meeting_type, MEETING_TYPE_PROMPTS["generic"])
         pydantic_model = type_config["model"]
+        transcript_only_prompt = (
+            "The input is transcript-only. Use only explicitly supported spoken evidence; "
+            "do not infer visual facts or expose hidden reasoning.\n\n"
+        )
 
         response = _client.beta.chat.completions.parse(
             model=settings.OPENAI_MODEL,
             messages=[
-                {"role": "system", "content": type_config["prompt"]},
+                {"role": "system", "content": transcript_only_prompt + type_config["prompt"]},
                 {"role": "user", "content": transcript_text},
             ],
             temperature=0.2,

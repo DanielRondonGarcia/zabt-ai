@@ -1,0 +1,24 @@
+# Dependency and build output caches
+**/node_modules
+**/.next
+**/dist
+**/coverage
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.venv
+**/tsconfig.tsbuildinfo
+
+# Repository metadata and local tooling
+.git
+.codegraph
+openspec
+frontend-2/.agent
+frontend-2/.specify
+
+# Local configuration and secrets
+.env
+.env.*
+
+# Keep the root workspace manifests and the frontend/shared sources available.

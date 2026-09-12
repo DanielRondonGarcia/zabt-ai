@@ -5,6 +5,7 @@ import type { Meeting } from "@zabt/shared";
 import {
   STAGE_LABELS,
   STAGE_ORDER,
+  VISUAL_OUTCOME_COPY,
   getUserStage,
   isActiveMeeting,
 } from "@/lib/stage-utils";
@@ -16,6 +17,17 @@ interface Props {
 export function StatusBanner({ meeting }: Props) {
   const stage = getUserStage(meeting);
   const active = isActiveMeeting(meeting);
+
+  if (stage === "visual_skipped" || stage === "visual_fallback") {
+    const copy =
+      VISUAL_OUTCOME_COPY[stage === "visual_skipped" ? "skipped" : "fallback"];
+    return (
+      <View className="mx-4 mt-4 mb-2 px-4 py-3 rounded-lg bg-stone-50 border border-stone-200">
+        <Text className="text-sm font-semibold text-stone-700">{copy.title}</Text>
+        <Text className="text-xs text-stone-600 mt-1">{copy.description}</Text>
+      </View>
+    );
+  }
 
   if (stage === "done") return null;
 

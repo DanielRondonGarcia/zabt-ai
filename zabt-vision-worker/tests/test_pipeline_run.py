@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from PIL import Image
 
 from zabt_vision.pipeline.candidates import Candidate
 from zabt_vision.pipeline.cross_validate import JudgedKeyframe
-from zabt_vision.pipeline.run import run_pipeline
+from zabt_vision.pipeline.run import probe_media, run_pipeline
 from zabt_vision.pipeline.video_native import NativeDetection
 from zabt_vision.settings import Settings
 from zabt_vision.types import JobInput, TranscriptLine
@@ -157,3 +158,114 @@ def test_run_pipeline_no_opening_segment_when_first_boundary_at_zero(tmp_path: P
     # No keyframes kept → no segments at all
     assert result.status == "completed"
     assert result.segments == []
+
+
+def test_audio_only_input_skips_without_downloading_video(tmp_path: Path):
+    job = JobInput(
+        video_url="https://signed.example/audio-only.mp4",
+        owner_id="u1",
+        meeting_id="m1",
+        transcript=[],
+        params={"media_kind": "audio"},
+    )
+    settings = Settings(work_dir=str(tmp_path))
+
+    with patch("zabt_vision.pipeline.run.download_video") as download:
+        result = run_pipeline(
+            job=job,
+            settings=settings,
+            inference=MagicMock(),
+            s3_client=MagicMock(),
+        )
+
+    assert result.status == "completed"
+    assert result.segments == []
+    assert result.params["skip_reason"] == "audio_only"
+    download.assert_not_called()
+
+
+def test_youtube_input_skips_without_downloading_video(tmp_path: Path):
+    job = JobInput(
+        video_url="https://www.youtube.com/watch?v=abc123",
+        owner_id="u1",
+        meeting_id="m1",
+        transcript=[],
+        params={},
+    )
+    settings = Settings(work_dir=str(tmp_path))
+
+    with patch("zabt_vision.pipeline.run.download_video") as download:
+        result = run_pipeline(
+            job=job,
+            settings=settings,
+            inference=MagicMock(),
+            s3_client=MagicMock(),
+        )
+
+    assert result.status == "completed"
+    assert result.params["skip_reason"] == "youtube_audio_only"
+    download.assert_not_called()
+
+
+def test_nonzero_ffprobe_is_reported_without_secret_media_details(tmp_path: Path):
+    job = JobInput(
+        video_url="https://signed.example/video.mp4?token=secret",
+        owner_id="u1",
+        meeting_id="m1",
+        transcript=[],
+        params={},
+    )
+    settings = Settings(work_dir=str(tmp_path))
+
+    with (
+        patch("zabt_vision.pipeline.run.download_video", return_value=tmp_path / "video.mp4"),
+        patch(
+            "zabt_vision.pipeline.run.video_duration_seconds",
+            side_effect=RuntimeError("ffprobe failed for token=secret"),
+        ),
+    ):
+        result = run_pipeline(
+            job=job,
+            settings=settings,
+            inference=MagicMock(),
+            s3_client=MagicMock(),
+        )
+
+    assert result.status == "failed"
+    assert result.failed_stage == "extract_frames"
+    assert "secret" not in (result.error or "")
+
+
+def test_probe_media_uses_argv_only_and_hides_ffprobe_stderr(tmp_path: Path):
+    with patch(
+        "zabt_vision.pipeline.run.subprocess.run",
+        return_value=SimpleNamespace(
+            returncode=1,
+            stdout="",
+            stderr="signed-url token=secret",
+        ),
+    ) as run:
+        try:
+            probe_media(tmp_path / "video.mp4")
+        except RuntimeError as error:
+            assert str(error) == "ffprobe returned a non-zero status"
+        else:
+            raise AssertionError("probe_media should reject a nonzero ffprobe result")
+
+    argv = run.call_args.args[0]
+    assert argv[:2] == ["ffprobe", "-v"]
+    assert run.call_args.kwargs["check"] is False
+    assert "shell" not in run.call_args.kwargs
+
+
+def test_probe_media_rejects_invalid_metadata(tmp_path: Path):
+    with patch(
+        "zabt_vision.pipeline.run.subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout="not-json", stderr=""),
+    ):
+        try:
+            probe_media(tmp_path / "video.mp4")
+        except RuntimeError as error:
+            assert str(error) == "ffprobe returned invalid metadata"
+        else:
+            raise AssertionError("probe_media should reject invalid metadata")
