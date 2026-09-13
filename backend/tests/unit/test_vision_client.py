@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 """Tests for VisionClient — HTTP local mode (mocked httpx)."""
+import threading
 import sys
+import time
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -68,6 +70,93 @@ def test_submit_and_wait_local_returns_parsed_result():
     args, kwargs = post_method.call_args
     assert args[0] == "http://worker:8003/run"
     assert kwargs["timeout"] == 1800
+
+
+def test_local_request_refreshes_heartbeat_while_blocked_and_stops_afterward():
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "status": "completed",
+        "segments": [],
+        "model": "qwen3-vl:8b-thinking",
+        "params": {},
+        "stage_metrics": {},
+    }
+    heartbeat_started = threading.Event()
+
+    def heartbeat():
+        heartbeat_started.set()
+
+    http_client = MagicMock()
+
+    def post(*args, **kwargs):
+        assert heartbeat_started.wait(timeout=1)
+        return response
+
+    http_client.post.side_effect = post
+    cm = MagicMock()
+    cm.__enter__.return_value = http_client
+    cm.__exit__.return_value = False
+
+    with (
+        patch("app.services.visual_breakdown.vision_client.httpx.Client", return_value=cm),
+        patch("app.services.visual_breakdown.vision_client._HEARTBEAT_INTERVAL_SECONDS", 0.001),
+    ):
+        client = VisionClient(backend="local", local_url="http://worker:8003")
+        result = client.submit_and_wait(
+            {"video_url": "x", "owner_id": "u", "meeting_id": "m"},
+            on_heartbeat=heartbeat,
+        )
+
+    assert result.status == "completed"
+    assert http_client.post.call_count == 1
+    heartbeat_count_after_request = heartbeat_started.is_set()
+    time.sleep(0.02)
+    assert heartbeat_count_after_request is True
+    assert not any(
+        thread.name == "vision-client-heartbeat" and thread.is_alive()
+        for thread in threading.enumerate()
+    )
+
+
+def test_local_heartbeat_error_is_logged_without_failing_request(caplog):
+    response = MagicMock(status_code=200)
+    response.json.return_value = {
+        "status": "completed",
+        "segments": [],
+        "model": "qwen3-vl:8b-thinking",
+        "params": {},
+        "stage_metrics": {},
+    }
+    heartbeat_started = threading.Event()
+
+    def heartbeat():
+        heartbeat_started.set()
+        raise RuntimeError("database unavailable")
+
+    http_client = MagicMock()
+
+    def post(*args, **kwargs):
+        assert heartbeat_started.wait(timeout=1)
+        return response
+
+    http_client.post.side_effect = post
+    cm = MagicMock()
+    cm.__enter__.return_value = http_client
+    cm.__exit__.return_value = False
+
+    with (
+        patch("app.services.visual_breakdown.vision_client.httpx.Client", return_value=cm),
+        patch("app.services.visual_breakdown.vision_client._HEARTBEAT_INTERVAL_SECONDS", 0.001),
+        caplog.at_level("WARNING"),
+    ):
+        client = VisionClient(backend="local", local_url="http://worker:8003")
+        result = client.submit_and_wait(
+            {"video_url": "x", "owner_id": "u", "meeting_id": "m"},
+            on_heartbeat=heartbeat,
+        )
+
+    assert result.status == "completed"
+    assert "heartbeat refresh failed" in caplog.text
 
 
 def test_submit_and_wait_local_raises_on_timeout():
@@ -193,3 +282,34 @@ def test_local_failure_never_switches_to_runpod():
             client.submit_and_wait({"video_url": "x", "owner_id": "u", "meeting_id": "m"})
 
     runpod.assert_not_called()
+
+
+def test_runpod_polling_refreshes_heartbeat_and_swallows_errors():
+    client = VisionClient.__new__(VisionClient)
+    client._backend = "runpod"
+    client._poll_interval = 0
+    client._timeout = 10
+    job = MagicMock()
+    job.status.side_effect = ["IN_PROGRESS", "COMPLETED"]
+    job.output.return_value = {
+        "status": "completed",
+        "segments": [],
+        "model": "qwen3-vl:8b-thinking",
+        "params": {},
+        "stage_metrics": {},
+    }
+    client._endpoint = MagicMock()
+    client._endpoint.run.return_value = job
+    heartbeat = MagicMock(side_effect=RuntimeError("database unavailable"))
+
+    with (
+        patch("app.services.visual_breakdown.vision_client._HEARTBEAT_INTERVAL_SECONDS", 0),
+        patch("app.services.visual_breakdown.vision_client.time.sleep"),
+    ):
+        result = client.submit_and_wait(
+            {"video_url": "x", "owner_id": "u", "meeting_id": "m"},
+            on_heartbeat=heartbeat,
+        )
+
+    assert result.status == "completed"
+    heartbeat.assert_called()

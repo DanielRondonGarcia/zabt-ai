@@ -142,6 +142,7 @@ class Meeting(MeetingBase, table=True):
     created_at: datetime = Field(default_factory=datetime.utcnow)
     status: str = Field(default="pending_upload") # pending_upload, queued, processing, completed, failed
     sub_status: Optional[str] = None
+    processing_heartbeat_at: Optional[datetime] = None
     transcript_text: Optional[str] = None
     summary_text: Optional[str] = None
     original_summary_text: Optional[str] = None

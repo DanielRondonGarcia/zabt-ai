@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+from datetime import datetime
 from typing import List, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
@@ -553,6 +554,7 @@ def re_transcribe_meeting(
     meeting.requested_language = payload.language
     meeting.status = "queued"
     meeting.sub_status = None
+    meeting.processing_heartbeat_at = datetime.utcnow()
     meeting.transliterated_text = None
 
     # Delete old segments so the UI doesn't show stale transcript

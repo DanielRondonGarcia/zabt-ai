@@ -97,6 +97,9 @@ class Settings(BaseSettings):
     GPU_SERVICE_URL: str = "http://gpu-worker:8001"
     GPU_LOCAL_TIMEOUT: int = 7200
 
+    # Active long-running jobs refresh this timestamp every 30 seconds.
+    MEETING_RECOVERY_GRACE_SECONDS: int = 900
+
     # RunPod Serverless (used when TRANSCRIPTION_BACKEND=runpod)
     RUNPOD_API_KEY: str = ""
     RUNPOD_ENDPOINT_ID: str = ""

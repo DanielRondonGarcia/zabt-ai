@@ -4,10 +4,16 @@ import logging
 import uuid
 from datetime import datetime
 from typing import List, Optional
-from sqlalchemy import func
+from sqlalchemy import delete, func
 from sqlmodel import Session, select
 from sqlalchemy.orm import selectinload
-from app.models import Meeting, MeetingCreate, TranscriptSegment, TranscriptionType
+from app.models import (
+    Meeting,
+    MeetingCreate,
+    TranscriptSegment,
+    TranscriptionType,
+    VisualSegment,
+)
 from app.core.config import settings
 from app.db.engine import engine
 from app.services.base import BaseService
@@ -82,6 +88,8 @@ class MeetingService(BaseService):
         if not meeting:
             return None
         meeting.status = status
+        if status in {"queued", "processing"}:
+            meeting.processing_heartbeat_at = datetime.utcnow()
         return self.save(meeting)
 
     def update_transcription_type(self, meeting_id: int, transcription_type: TranscriptionType) -> Optional[Meeting]:
@@ -115,6 +123,9 @@ class MeetingService(BaseService):
         meeting.sub_status = sub_status
         meeting = self.save(meeting)
 
+        if status == "processing":
+            self.touch_processing_heartbeat(meeting_id)
+
         # Fire-and-forget Redis Pub/Sub (non-blocking, best-effort)
         try:
             import redis
@@ -125,6 +136,32 @@ class MeetingService(BaseService):
             logger.warning("Failed to publish to Redis for meeting %s: %s", meeting_id, e)
 
         return meeting
+
+    def touch_processing_heartbeat(
+        self, meeting_id: int, *, heartbeat_at: datetime | None = None
+    ) -> bool:
+        """Best-effort heartbeat update for an active meeting stage.
+
+        Heartbeats are liveness metadata, not pipeline output. A database or
+        telemetry failure while refreshing one must never turn a successful
+        stage into a failed meeting.
+        """
+        try:
+            with Session(engine) as session:
+                meeting = session.get(Meeting, meeting_id)
+                if meeting is None or meeting.status not in {"queued", "processing"}:
+                    return False
+                meeting.processing_heartbeat_at = heartbeat_at or datetime.utcnow()
+                session.add(meeting)
+                session.commit()
+            return True
+        except Exception:
+            logger.warning(
+                "Failed to refresh processing heartbeat meeting_id=%s",
+                meeting_id,
+                exc_info=True,
+            )
+            return False
 
     def mark_completed(
         self,
@@ -211,6 +248,7 @@ class MeetingService(BaseService):
             meeting.visual_breakdown_params = params
             session.add(meeting)
             session.commit()
+            self.touch_processing_heartbeat(meeting_id)
             return run_epoch, True
 
     def begin_visual_breakdown(self, meeting_id: int) -> tuple[str, bool]:
@@ -238,6 +276,7 @@ class MeetingService(BaseService):
                 meeting.visual_breakdown_error = None
                 session.add(meeting)
                 session.commit()
+                self.touch_processing_heartbeat(meeting_id)
                 return str(current_epoch), True
 
             run_epoch = uuid.uuid4().hex
@@ -257,7 +296,44 @@ class MeetingService(BaseService):
             meeting.visual_breakdown_params = params
             session.add(meeting)
             session.commit()
+            self.touch_processing_heartbeat(meeting_id)
             return run_epoch, True
+
+    def reset_stale_visual_breakdown_in_session(
+        self, session: Session, meeting: Meeting
+    ) -> str | None:
+        """Fence a stale visual epoch and queue a fresh one under a row lock.
+
+        Recovery calls this while the meeting row is already locked with
+        ``FOR UPDATE SKIP LOCKED``. Replacing ``run_epoch`` makes late results
+        from the orphaned worker harmless: ``finalize_visual_breakdown`` will
+        reject them atomically.
+        """
+        if meeting.visual_breakdown_status != "processing":
+            return None
+
+        run_epoch = uuid.uuid4().hex
+        params = dict(meeting.visual_breakdown_params or {})
+        params.update(
+            {
+                "run_epoch": run_epoch,
+                "idempotency_key": f"visual-breakdown:{meeting.id}:{run_epoch}",
+                "outcome": None,
+                "warning_code": None,
+                "attempts": 0,
+                "side_effects": {},
+            }
+        )
+        meeting.visual_breakdown_status = "queued"
+        meeting.visual_breakdown_error = None
+        meeting.visual_breakdown_completed_at = None
+        meeting.visual_breakdown_params = params
+        meeting.processing_heartbeat_at = datetime.utcnow()
+        session.exec(
+            delete(VisualSegment).where(VisualSegment.meeting_id == meeting.id)
+        )
+        session.add(meeting)
+        return run_epoch
 
     def increment_visual_breakdown_attempt(self, meeting_id: int, run_epoch: str) -> int:
         """Increment the attempt counter for the active epoch under a row lock."""
@@ -369,6 +445,8 @@ class MeetingService(BaseService):
             session.add(meeting)
             session.commit()
 
+            self.touch_processing_heartbeat(meeting_id)
+
             return {
                 "applied": True,
                 "meeting_id": meeting_id,
@@ -420,6 +498,7 @@ class MeetingService(BaseService):
             return None
 
         meeting.status = "queued"
+        meeting.processing_heartbeat_at = datetime.utcnow()
         meeting = self.save(meeting)
 
         from app.worker import dispatch_pipeline
@@ -460,6 +539,7 @@ class MeetingService(BaseService):
             source_url=url,
             status="queued",
             owner_id=owner_id,
+            processing_heartbeat_at=datetime.utcnow(),
         )
         return self.save(meeting)
 

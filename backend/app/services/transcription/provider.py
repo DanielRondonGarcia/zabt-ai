@@ -17,6 +17,7 @@ class TranscriptionProvider(Protocol):
         audio_path: str,
         config: TranscriptionConfig | None = None,
         on_status_change: callable | None = None,
+        on_heartbeat: callable | None = None,
     ) -> TranscriptionResult:
         """Transcribe a local audio file and return a normalised result."""
         ...

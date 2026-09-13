@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import logging
 import ipaddress
+import threading
 import time
-from typing import Any, Dict, Optional
+from contextlib import contextmanager
+from typing import Any, Callable, Dict, Iterator, Optional
 from urllib.parse import urlsplit
 
 import httpx
@@ -15,6 +17,11 @@ from app.core.config import settings
 from app.services.visual_breakdown.types import VisionWorkerResult
 
 logger = logging.getLogger(__name__)
+
+
+_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_HEARTBEAT_JOIN_TIMEOUT_SECONDS = 1.0
+HeartbeatCallback = Callable[[], None]
 
 
 class VisionClientError(RuntimeError):
@@ -100,21 +107,34 @@ class VisionClient:
         else:
             raise ValueError(f"Unknown VISION_BACKEND: {self._backend}")
 
-    def submit_and_wait(self, payload: Dict[str, Any]) -> VisionWorkerResult:
+    def submit_and_wait(
+        self,
+        payload: Dict[str, Any],
+        on_heartbeat: HeartbeatCallback | None = None,
+    ) -> VisionWorkerResult:
         if self._backend == "local":
-            return self._run_local(payload)
-        return self._run_runpod(payload)
+            return self._run_local(payload, on_heartbeat=on_heartbeat)
+        return self._run_runpod(payload, on_heartbeat=on_heartbeat)
 
-    def _run_local(self, payload: Dict[str, Any]) -> VisionWorkerResult:
+    def _run_local(
+        self,
+        payload: Dict[str, Any],
+        *,
+        on_heartbeat: HeartbeatCallback | None = None,
+    ) -> VisionWorkerResult:
         logger.info("vision-worker /run local meeting_id=%s", payload.get("meeting_id"))
         with httpx.Client() as client:
             for attempt in range(self._max_retries + 1):
                 try:
-                    resp = client.post(
-                        f"{self._local_url}/run",
-                        json=payload,
-                        timeout=self._timeout,
-                    )
+                    with self._heartbeat_loop(
+                        on_heartbeat,
+                        operation="local vision request",
+                    ):
+                        resp = client.post(
+                            f"{self._local_url}/run",
+                            json=payload,
+                            timeout=self._timeout,
+                        )
                     status_code = getattr(resp, "status_code", None)
                     if isinstance(status_code, int) and status_code >= 500:
                         if attempt < self._max_retries:
@@ -154,6 +174,67 @@ class VisionClient:
                         continue
                     raise VisionClientError("vision-worker request failed") from exc
 
+    @staticmethod
+    def _call_heartbeat(callback: HeartbeatCallback, *, operation: str) -> None:
+        try:
+            callback()
+        except Exception:
+            logger.warning(
+                "Vision heartbeat refresh failed operation=%s",
+                operation,
+                exc_info=True,
+            )
+
+    def _heartbeat_worker(
+        self,
+        stop_event: threading.Event,
+        callback: HeartbeatCallback,
+        operation: str,
+    ) -> None:
+        while not stop_event.wait(_HEARTBEAT_INTERVAL_SECONDS):
+            self._call_heartbeat(callback, operation=operation)
+
+    @contextmanager
+    def _heartbeat_loop(
+        self,
+        callback: HeartbeatCallback | None,
+        *,
+        operation: str,
+    ) -> Iterator[None]:
+        """Refresh liveness during a blocking provider request, best-effort."""
+        if callback is None:
+            yield
+            return
+
+        stop_event = threading.Event()
+        try:
+            thread = threading.Thread(
+                target=self._heartbeat_worker,
+                args=(stop_event, callback, operation),
+                name="vision-client-heartbeat",
+                daemon=True,
+            )
+            thread.start()
+        except Exception:
+            logger.warning(
+                "Could not start vision heartbeat loop operation=%s",
+                operation,
+                exc_info=True,
+            )
+            yield
+            return
+
+        try:
+            yield
+        finally:
+            stop_event.set()
+            thread.join(timeout=_HEARTBEAT_JOIN_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                logger.warning(
+                    "Vision heartbeat loop did not stop before timeout operation=%s",
+                    operation,
+                )
+
     def _sleep_before_retry(self, attempt: int) -> None:
         delay = self._retry_backoff_seconds * (2**attempt)
         time.sleep(delay)
@@ -175,12 +256,23 @@ class VisionClient:
             return
         raise VisionClientError("vision endpoint is not permitted by egress policy")
 
-    def _run_runpod(self, payload: Dict[str, Any]) -> VisionWorkerResult:
+    def _run_runpod(
+        self,
+        payload: Dict[str, Any],
+        *,
+        on_heartbeat: HeartbeatCallback | None = None,
+    ) -> VisionWorkerResult:
         logger.info("vision-worker /run runpod meeting_id=%s", payload.get("meeting_id"))
         job = self._endpoint.run({"input": payload})
         deadline = time.time() + self._timeout
+        last_heartbeat = time.monotonic() if on_heartbeat else None
         while time.time() < deadline:
             status = job.status()
+            if on_heartbeat and last_heartbeat is not None:
+                now = time.monotonic()
+                if now - last_heartbeat >= _HEARTBEAT_INTERVAL_SECONDS:
+                    self._call_heartbeat(on_heartbeat, operation="RunPod vision job")
+                    last_heartbeat = now
             if status == "COMPLETED":
                 try:
                     return VisionWorkerResult.model_validate(job.output())

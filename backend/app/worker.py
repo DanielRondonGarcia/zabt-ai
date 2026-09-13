@@ -3,6 +3,7 @@
 import os
 import re
 import urllib.request
+from datetime import datetime, timedelta
 from math import ceil
 
 from celery import Celery, chain
@@ -35,7 +36,13 @@ from app.services.ai_agent import summarize_transcript
 from app.services.template import template_service
 from app.services import analytics
 from app.services.notifications import notify
+from app.services.meeting_recovery import (
+    MeetingRecoveryPlan,
+    claim_recovery_plan,
+    dispatch_recovery_plan,
+)
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 
@@ -220,6 +227,10 @@ def stage_transcribe(meeting_id: int) -> int:
         sub = stage.split(" (")[0]
         meeting_service.update_sub_status(meeting_id, sub)
 
+    def on_transcription_heartbeat() -> None:
+        """Refresh liveness without allowing metadata failures to abort work."""
+        meeting_service.touch_processing_heartbeat(meeting_id)
+
     try:
         with Session(engine) as session:
             meeting = session.get(Meeting, meeting_id)
@@ -253,6 +264,7 @@ def stage_transcribe(meeting_id: int) -> int:
             temp_audio_path,
             config=config,
             on_status_change=on_transcribe_progress,
+            on_heartbeat=on_transcription_heartbeat,
         )
 
         # Write segments to DB
@@ -603,6 +615,7 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
 def stage_extract_intelligence(meeting_id: int) -> int:
     """Extract transcript-only intelligence and finalize the meeting."""
     logger.info("stage_extract_intelligence started meeting_id=%s", meeting_id)
+    meeting_service.touch_processing_heartbeat(meeting_id)
 
     meeting = meeting_service.get(Meeting, meeting_id)
     if not meeting or not meeting.transcript_text:
@@ -622,6 +635,7 @@ def stage_extract_intelligence(meeting_id: int) -> int:
             db_meeting.structured_output_status = "processing"
             session.add(db_meeting)
             session.commit()
+            meeting_service.touch_processing_heartbeat(meeting_id)
 
     try:
         # Call 1: Extract highlights (action items, key questions, chapters)
@@ -1020,7 +1034,8 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
                     for key in ("media_type", "mime_type", "content_type", "media_kind")
                     if key in stored_visual_params
                 },
-            }
+            },
+            on_heartbeat=lambda: meeting_service.touch_processing_heartbeat(meeting_id),
         )
     except Exception as error:
         logger.warning("visual worker failed meeting_id=%s error=%s", meeting_id, _sanitize_visual_error(error))
@@ -1101,6 +1116,146 @@ def stage_visual_breakdown(meeting_id: int) -> int:
     return _run_visual_breakdown(meeting_id, optional=False)
 
 
+@celery_app.task(name="finalize_recovered_meeting")
+def finalize_recovered_meeting(meeting_id: int) -> int:
+    """Finalize a meeting whose durable intelligence already completed."""
+    meeting = meeting_service.get(Meeting, meeting_id)
+    if not meeting:
+        raise RuntimeError(f"Meeting {meeting_id} not found")
+    if (
+        meeting.structured_output_status == "completed"
+        and meeting.structured_output is not None
+    ):
+        meeting_service.mark_completed(meeting_id)
+    return meeting_id
+
+
+_RECOVERY_CLAIM_TTL_SECONDS = 120
+
+
+def _acquire_meeting_recovery_claim(meeting_id: int) -> bool:
+    """Acquire a short Redis claim; DB row locking remains the source of truth."""
+    key = f"meeting-recovery:{meeting_id}"
+    try:
+        import redis
+
+        client = redis.from_url(settings.REDIS_URL)
+        acquired = client.set(
+            key,
+            "1",
+            nx=True,
+            ex=_RECOVERY_CLAIM_TTL_SECONDS,
+        )
+        try:
+            client.close()
+        except Exception:
+            pass
+        return bool(acquired)
+    except Exception:
+        logger.warning(
+            "meeting recovery claim unavailable; relying on database row lock",
+            exc_info=True,
+        )
+        return True
+
+
+def _dispatch_recovery_stages(meeting_id: int, stages: list) -> None:
+    """Dispatch a linked chain whose first stage owns the meeting ID."""
+    if not stages:
+        return
+
+    signatures = []
+    for index, stage in enumerate(stages):
+        signature = stage.s(meeting_id) if index == 0 else stage.s()
+        signatures.append(signature.set(link_error=[on_stage_failure.s()]))
+    chain(*signatures).apply_async()
+
+
+def _dispatch_recovery_plan(meeting_id: int, plan: MeetingRecoveryPlan) -> None:
+    """Apply one durable-output recovery plan after its row claim commits."""
+    stage_by_name = {
+        "stage_transliterate": stage_transliterate,
+        "stage_optional_visual_breakdown": stage_optional_visual_breakdown,
+        "stage_summarize": stage_summarize,
+        "stage_extract_intelligence": stage_extract_intelligence,
+        "finalize_recovered_meeting": finalize_recovered_meeting,
+    }
+
+    def dispatch_stages(mid: int, stage_names: tuple[str, ...]) -> None:
+        _dispatch_recovery_stages(mid, [stage_by_name[name] for name in stage_names])
+
+    dispatch_recovery_plan(
+        meeting_id,
+        plan,
+        dispatch_full_pipeline=dispatch_pipeline,
+        dispatch_youtube_pipeline=dispatch_youtube_pipeline,
+        dispatch_stages=dispatch_stages,
+        finalize=meeting_service.mark_completed,
+    )
+
+
+@celery_app.task(name="recover_stale_meetings", ignore_result=True)
+def recover_stale_meetings() -> int:
+    """Recover queued/processing meetings orphaned by a host or worker restart."""
+    now = datetime.utcnow()
+    cutoff = now - timedelta(seconds=settings.MEETING_RECOVERY_GRACE_SECONDS)
+    claimed: list[tuple[int, MeetingRecoveryPlan]] = []
+
+    with Session(engine) as session:
+        statement = (
+            select(Meeting)
+            .where(Meeting.status.in_(["queued", "processing"]))
+            .where(
+                func.coalesce(
+                    Meeting.processing_heartbeat_at,
+                    Meeting.created_at,
+                )
+                < cutoff
+            )
+            .order_by(Meeting.id)
+            .limit(100)
+            .with_for_update(skip_locked=True)
+        )
+
+        for meeting in session.exec(statement).all():
+            if meeting.id is None:
+                continue
+            # Keep the helper defensive for mocked sessions and for databases
+            # whose snapshot was taken just before the cutoff moved.
+            plan = claim_recovery_plan(
+                meeting,
+                now=now,
+                grace_seconds=settings.MEETING_RECOVERY_GRACE_SECONDS,
+                acquire_claim=lambda: _acquire_meeting_recovery_claim(meeting.id),
+            )
+            if plan is None:
+                continue
+            if plan.reset_visual_epoch:
+                meeting_service.reset_stale_visual_breakdown_in_session(session, meeting)
+
+            # This committed refresh is the DB-side atomic claim. A second
+            # Beat instance skips the locked row and later sees it as fresh.
+            meeting.processing_heartbeat_at = now
+            session.add(meeting)
+            claimed.append((meeting.id, plan))
+
+        if claimed:
+            session.commit()
+
+    recovered = 0
+    for meeting_id, plan in claimed:
+        try:
+            _dispatch_recovery_plan(meeting_id, plan)
+            recovered += 1
+        except Exception:
+            logger.exception(
+                "Failed to dispatch recovery plan meeting_id=%s action=%s",
+                meeting_id,
+                plan.action,
+            )
+    return recovered
+
+
 celery_app.conf.beat_schedule = {
     "sync-calendars-every-5-min": {
         "task": "sync_calendars",
@@ -1108,6 +1263,10 @@ celery_app.conf.beat_schedule = {
     },
     "dispatch-bots-every-minute": {
         "task": "dispatch_meeting_bots",
+        "schedule": 60.0,
+    },
+    "recover-stale-meetings-every-minute": {
+        "task": "recover_stale_meetings",
         "schedule": 60.0,
     },
     "cleanup-abandoned-uploads-daily": {

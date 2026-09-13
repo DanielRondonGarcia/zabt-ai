@@ -62,6 +62,7 @@ class GpuTranscriptionClient:
         audio_path: str,
         config: TranscriptionConfig | None = None,
         on_status_change: Callable[[str], None] | None = None,
+        on_heartbeat: Callable[[], None] | None = None,
     ) -> TranscriptionResult:
         """Submit transcription job and poll until complete."""
         from app.services.storage import storage
@@ -104,9 +105,20 @@ class GpuTranscriptionClient:
         # Poll for completion
         deadline = time.time() + self._timeout
         last_status = None
+        last_heartbeat = time.time() if on_heartbeat else None
+        heartbeat_interval = 30.0
 
         while time.time() < deadline:
             status, output, error = self._poll(job_id)
+
+            if on_heartbeat:
+                now = time.time()
+                if last_heartbeat is not None and now - last_heartbeat >= heartbeat_interval:
+                    try:
+                        on_heartbeat()
+                    except Exception:
+                        logger.warning("GPU transcription heartbeat refresh failed", exc_info=True)
+                    last_heartbeat = now
 
             if status != last_status:
                 logger.info("Job %s status: %s", job_id, status)

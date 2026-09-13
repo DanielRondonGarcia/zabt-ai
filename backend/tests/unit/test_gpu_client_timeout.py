@@ -172,3 +172,40 @@ def test_local_long_job_times_out_with_local_setting_and_preserves_polling():
     assert client._poll.call_count == 1
     client._cancel.assert_called_once_with("job-1")
     assert status_changes == ["transcribing", "diarizing"]
+
+
+def test_long_running_polling_refreshes_the_processing_heartbeat():
+    client = GpuTranscriptionClient.__new__(GpuTranscriptionClient)
+    client._backend = TranscriptionBackend.GPU_LOCAL
+    client._poll_interval = 0
+    client._timeout = 60
+    client._submit = MagicMock(return_value="job-1")
+    client._poll = MagicMock(
+        side_effect=[
+            ("IN_PROGRESS", None, None),
+            ("IN_PROGRESS", None, None),
+            ("COMPLETED", {"text": "ok", "segments": []}, None),
+        ]
+    )
+    heartbeat = MagicMock()
+    storage = MagicMock()
+    storage.get_presigned_download_url.return_value = "http://gpu-worker/audio"
+
+    with (
+        patch.dict(
+            sys.modules,
+            {"app.services.storage": SimpleNamespace(storage=storage)},
+        ),
+        patch(
+            "app.services.transcription.gpu_client.time.time",
+            side_effect=[0, 0, 1, 1, 31, 31, 32, 32],
+        ),
+        patch("app.services.transcription.gpu_client.time.sleep"),
+    ):
+        client.process_audio(
+            "/tmp/audio.mp4",
+            config=_transcription_config("media/audio.mp4"),
+            on_heartbeat=heartbeat,
+        )
+
+    heartbeat.assert_called_once_with()
