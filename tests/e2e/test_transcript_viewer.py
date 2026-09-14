@@ -126,13 +126,21 @@ class _MediaFixtureHandler(BaseHTTPRequestHandler):
 def media_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _MediaFixtureHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    started = False
     try:
+        thread.start()
+        started = True
         yield f"http://127.0.0.1:{server.server_port}"
     finally:
-        server.shutdown()
-        thread.join(timeout=2)
-        server.server_close()
+        try:
+            if started:
+                server.shutdown()
+        finally:
+            try:
+                if started:
+                    thread.join(timeout=2)
+            finally:
+                server.server_close()
         assert not thread.is_alive(), "media fixture server did not shut down"
 
 
@@ -182,11 +190,24 @@ def _configure_meeting_routes(page: Page, meetings: dict[int, dict]) -> None:
 
 def _open_transcript(page: Page, meeting_id: int = 999) -> None:
     page.goto(f"{BASE_URL}/meetings/{meeting_id}")
-    transcript_tab = page.get_by_role("tab", name="Transcript")
-    if transcript_tab.count() == 0:
-        transcript_tab = page.get_by_role("button", name="Transcript")
+    transcript_tab = page.get_by_role("tab", name="Transcript", exact=True)
+    expect(transcript_tab).to_be_visible()
     transcript_tab.click()
     expect(page.get_by_text("specific", exact=True).first).to_be_visible()
+
+
+def _wait_for_media_metadata(page: Page, selector: str) -> None:
+    page.wait_for_function(
+        """selector => {
+            const media = document.querySelector(selector);
+            return media instanceof HTMLMediaElement &&
+                media.readyState >= 1 &&
+                Number.isFinite(media.duration) &&
+                media.duration > 0;
+        }""",
+        arg=selector,
+        timeout=5_000,
+    )
 
 
 def test_short_video_fixture_serves_browser_storage_contract(page: Page, media_server: str) -> None:
@@ -215,43 +236,40 @@ def test_video_transcript_viewer_syncs_controls_and_preserves_layout(
 
     video = page.locator("video")
     expect(video).to_be_visible()
-    page.wait_for_function(
-        """() => {
-            const media = document.querySelector('video');
-            return media && media.readyState >= 1 && Number.isFinite(media.duration) && media.duration > 0;
-        }"""
-    )
+    _wait_for_media_metadata(page, "video")
     duration = video.evaluate("media => media.duration")
     assert duration > 0
 
     player = page.locator("div.fixed").filter(has=video)
     expect(player).to_be_visible()
-    expect(player.get_by_role("button", name="Play")).to_be_visible()
+    play_button = player.get_by_role("button", name="Play", exact=True)
+    pause_button = player.get_by_role("button", name="Pause", exact=True)
+    expect(play_button).to_be_visible()
     expect(player.get_by_text(re.compile(r"^\d{2}:\d{2}$"))).to_have_count(2)
 
-    player.get_by_role("button", name="Play").click()
-    expect(player.get_by_role("button", name="Pause")).to_be_visible(timeout=2_000)
-    player.get_by_role("button", name="Pause").click()
-    expect(player.get_by_role("button", name="Play")).to_be_visible()
+    play_button.click()
+    expect(pause_button).to_be_visible(timeout=2_000)
+    pause_button.click()
+    expect(play_button).to_be_visible()
 
-    player.get_by_role("button", name="Playback speed 1x").click()
-    expect(player.get_by_role("button", name="Playback speed 1.5x")).to_be_visible()
-    player.get_by_role("button", name="Playback speed 1.5x").click()
-    expect(player.get_by_role("button", name="Playback speed 2x")).to_be_visible()
+    player.get_by_role("button", name="Playback speed 1x", exact=True).click()
+    expect(player.get_by_role("button", name="Playback speed 1.5x", exact=True)).to_be_visible()
+    player.get_by_role("button", name="Playback speed 1.5x", exact=True).click()
+    expect(player.get_by_role("button", name="Playback speed 2x", exact=True)).to_be_visible()
 
     timeline = player.locator("div.h-1.cursor-pointer")
     timeline_box = timeline.bounding_box()
     assert timeline_box is not None and timeline_box["width"] > 0
     timeline.click(position={"x": timeline_box["width"] / 2, "y": 1})
-    page.wait_for_function("() => document.querySelector('video').currentTime > 0")
+    page.wait_for_function("() => document.querySelector('video').currentTime > 0", timeout=5_000)
 
     word = page.get_by_text("specific", exact=True).first
     word.click()
-    page.wait_for_function("() => document.querySelector('video').currentTime >= 1")
+    page.wait_for_function("() => document.querySelector('video').currentTime >= 1", timeout=5_000)
     expect(word).to_have_class(re.compile(r"\bbg-primary\b"))
 
     page.get_by_role("button", name="Seek to 0:00").click()
-    page.wait_for_function("() => document.querySelector('video').currentTime < 0.2")
+    page.wait_for_function("() => document.querySelector('video').currentTime < 0.2", timeout=5_000)
 
     page.set_viewport_size({"width": 375, "height": 800})
     player_box = player.bounding_box()
@@ -275,17 +293,20 @@ def test_audio_transcript_regression_keeps_shared_controls_and_seeking(
     expect(audio).to_be_attached()
     expect(audio).to_have_attribute("aria-hidden", "true")
     expect(page.locator("video")).to_have_count(0)
+    _wait_for_media_metadata(page, "audio")
 
     player = page.locator("div.fixed").filter(has=audio)
-    player.get_by_role("button", name="Play").click()
-    expect(player.get_by_role("button", name="Pause")).to_be_visible(timeout=2_000)
-    player.get_by_role("button", name="Pause").click()
-    player.get_by_role("button", name="Playback speed 1x").click()
-    expect(player.get_by_role("button", name="Playback speed 1.5x")).to_be_visible()
+    play_button = player.get_by_role("button", name="Play", exact=True)
+    pause_button = player.get_by_role("button", name="Pause", exact=True)
+    play_button.click()
+    expect(pause_button).to_be_visible(timeout=2_000)
+    pause_button.click()
+    player.get_by_role("button", name="Playback speed 1x", exact=True).click()
+    expect(player.get_by_role("button", name="Playback speed 1.5x", exact=True)).to_be_visible()
 
     word = page.get_by_text("specific", exact=True).first
     word.click()
-    page.wait_for_function("() => document.querySelector('audio').currentTime >= 1")
+    page.wait_for_function("() => document.querySelector('audio').currentTime >= 1", timeout=5_000)
     expect(word).to_have_class(re.compile(r"\bbg-primary\b"))
     expect(page.get_by_text("What are specific AI tools", exact=False)).to_be_visible()
 
@@ -312,12 +333,16 @@ def test_media_identity_cleanup_stops_old_media_and_clears_state(
         },
     )
     _open_transcript(page, 999)
+    _wait_for_media_metadata(page, "video")
     page.locator("video").evaluate("media => { media.muted = true; media.currentTime = 1.5; media.play(); }")
 
     page.goto(f"{BASE_URL}/meetings/1000")
-    expect(page.get_by_text("Transcript", exact=True)).to_be_visible()
-    page.get_by_role("tab", name="Transcript").click()
-    expect(page.locator("audio")).to_be_attached()
+    transcript_tab = page.get_by_role("tab", name="Transcript", exact=True)
+    expect(transcript_tab).to_be_visible()
+    transcript_tab.click()
+    audio = page.locator("audio")
+    expect(audio).to_be_attached()
+    _wait_for_media_metadata(page, "audio")
     expect(page.locator("video")).to_have_count(0)
     expect(page.locator("div.fixed").get_by_text("00:00", exact=True).first).to_be_visible()
     pause_calls = page.evaluate("JSON.parse(sessionStorage.getItem('e2e-media-pauses') || '[]')")
@@ -332,6 +357,7 @@ def test_media_failures_are_accessible_without_blocking_transcript(
     _open_transcript(page)
 
     status = page.get_by_role("status")
+    expect(status).to_be_visible(timeout=5_000)
     expect(status).to_contain_text("This media could not be loaded", timeout=5_000)
     word = page.get_by_text("specific", exact=True).first
     expect(word).to_be_visible()
