@@ -7,11 +7,13 @@ or a real account. The direct PUT remains a browser request and is captured to
 prove that the presigned-upload contract is unchanged.
 """
 
+import base64
 import json
 import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+import pytest
 from playwright.sync_api import Page, expect
 
 
@@ -21,6 +23,17 @@ FIXTURE_PATH = Path(__file__).parent / "fixtures" / "short-video.mp4"
 
 def _json_body(route) -> dict:
     return json.loads(route.request.post_data or "{}")
+
+
+@pytest.fixture(autouse=True)
+def _close_page_after_test(page: Page):
+    """Close the Playwright page on both passing and failing test paths."""
+    try:
+        yield
+    finally:
+        if not page.is_closed():
+            page.close()
+        assert page.is_closed(), "upload test page did not close"
 
 
 def _mock_authenticated_dashboard(page: Page) -> tuple[dict, dict]:
@@ -84,13 +97,43 @@ def _mock_authenticated_dashboard(page: Page) -> tuple[dict, dict]:
     page.route("https://storage.example.test/presigned-upload", handle_put)
     page.route("**/api/v1/languages", lambda route: route.fulfill(json=[]))
     page.goto(f"{BASE_URL}/")
-    expect(page.get_by_role("button", name="Upload a meeting").first).to_be_visible()
+    expect(page.get_by_role("button", name="Import a meeting", exact=True)).to_be_visible()
     return requests, put_headers
 
 
 def _open_upload_modal(page: Page) -> None:
-    page.get_by_role("button", name="Upload a meeting").first.click()
+    page.get_by_role("button", name="Import a meeting", exact=True).click()
     expect(page.get_by_text("Transcribe audio and video")).to_be_visible()
+
+
+def _inject_empty_mime_file(page: Page, name: str) -> None:
+    """Dispatch a browser File whose MIME type remains genuinely empty."""
+    file_input = page.locator('input[type="file"]')
+    expect(file_input).to_have_count(1)
+    encoded_fixture = base64.b64encode(FIXTURE_PATH.read_bytes()).decode("ascii")
+
+    file_input.evaluate(
+        """(input, {encodedFixture, name}) => {
+            const binary = atob(encodedFixture);
+            const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+            const file = new File([bytes], name, {type: ""});
+
+            if (file.type !== "") {
+                throw new Error(`Expected an empty MIME type, got ${file.type}`);
+            }
+
+            const transfer = new DataTransfer();
+            transfer.items.add(file);
+            input.files = transfer.files;
+
+            if (!input.files[0] || input.files[0].type !== "") {
+                throw new Error("DataTransfer did not preserve the empty MIME type");
+            }
+
+            input.dispatchEvent(new Event("change", {bubbles: true}));
+        }""",
+        {"encodedFixture": encoded_fixture, "name": name},
+    )
 
 
 def test_upload_modal_opens(page: Page) -> None:
@@ -134,15 +177,7 @@ def test_empty_browser_mime_uses_conservative_fallback(page: Page) -> None:
     requests, put_headers = _mock_authenticated_dashboard(page)
     _open_upload_modal(page)
 
-    with page.expect_file_chooser() as chooser_info:
-        page.get_by_role("button", name="Browse files").click()
-    chooser_info.value.set_files(
-        {
-            "name": "legacy-video.mp4",
-            "mimeType": "",
-            "buffer": FIXTURE_PATH.read_bytes(),
-        }
-    )
+    _inject_empty_mime_file(page, "legacy-video.mp4")
 
     expect(page.get_by_text("legacy-video.mp4")).to_be_visible()
     expect(page.locator(".bg-emerald-500")).to_be_visible(timeout=5_000)
