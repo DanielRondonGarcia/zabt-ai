@@ -5,6 +5,7 @@
 import { memo } from "react";
 import type { TranscriptSegment, TranscriptWord } from "@/app/lib/api";
 import { useTranscriptStore } from "@/app/lib/use-transcript-store";
+import { UserRound } from "lucide-react";
 
 const formatTime = (seconds: number) => {
     if (isNaN(seconds) || seconds < 0) return "0:00";
@@ -15,9 +16,9 @@ const formatTime = (seconds: number) => {
 
 const SPEAKER_COLORS: Record<string, string> = {
     SPEAKER_00: "bg-stone-500 text-white",
-    SPEAKER_01: "bg-amber-500 text-white",
-    SPEAKER_02: "bg-teal-500 text-white",
-    SPEAKER_03: "bg-emerald-500 text-white",
+    SPEAKER_01: "bg-stone-600 text-white",
+    SPEAKER_02: "bg-stone-700 text-white",
+    SPEAKER_03: "bg-stone-400 text-stone-950",
 };
 
 const getSpeakerColor = (speaker: string) =>
@@ -36,14 +37,16 @@ const WordSpan = memo(({ word }: { word: TranscriptWord }) => {
     const { setSeekRequest } = useTranscriptStore();
 
     return (
-        <span
-            className={`cursor-pointer rounded px-0.5 -mx-0.5 transition-colors duration-75 ${
-                isHighlighted ? "bg-primary text-primary-foreground" : "hover:bg-stone-100"
+        <button
+            type="button"
+            aria-label={`Seek to ${formatTime(word.start)}`}
+            className={`mr-0.5 inline rounded px-0.5 text-left transition-colors duration-75 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
+                isHighlighted ? "bg-primary text-primary-foreground" : "hover:bg-accent"
             }`}
             onClick={() => setSeekRequest(word.start)}
         >
-            {word.word}{" "}
-        </span>
+            {word.word}
+        </button>
     );
 });
 
@@ -57,27 +60,31 @@ function SegmentRow({
     isPaywalled: boolean;
 }) {
     const { setSeekRequest } = useTranscriptStore();
+    const currentTime = useTranscriptStore((state) => state.currentTime);
     const words = Array.isArray(segment.words) ? segment.words : [];
     const isUnknown = segment.speaker === "SPEAKER_UNKNOWN";
+    const speakerLabel = getSpeakerLabel(segment.speaker);
+    const isActive = currentTime >= segment.start && currentTime < segment.end;
 
     return (
-        <div
-            className={`flex gap-4 py-4 border-b border-stone-100 last:border-none group ${
-                isPaywalled ? "blur-sm opacity-50 select-none pointer-events-none" : ""
+        <article
+            aria-current={isActive ? "true" : undefined}
+            data-active={isActive ? "true" : "false"}
+            className={`flex gap-3 border-b border-border py-4 last:border-none ${
+                isActive ? "rounded-lg border-l-2 border-l-primary bg-primary/5 pl-3" : ""
+            } ${
+                isPaywalled ? "pointer-events-none select-none opacity-50 blur-sm" : ""
             }`}
         >
             {/* Avatar */}
             <div className="flex-shrink-0 pt-0.5">
                 <div
-                    className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold ${getSpeakerColor(segment.speaker)}`}
+                    className={`flex size-8 items-center justify-center rounded-full text-sm font-semibold ${getSpeakerColor(segment.speaker)}`}
                 >
                     {isUnknown ? (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                            <circle cx="12" cy="7" r="4" />
-                        </svg>
+                        <UserRound className="size-3.5" aria-hidden="true" />
                     ) : (
-                        getSpeakerLabel(segment.speaker).charAt(getSpeakerLabel(segment.speaker).indexOf(" ") + 1)
+                        speakerLabel.charAt(speakerLabel.indexOf(" ") + 1)
                     )}
                 </div>
             </div>
@@ -85,19 +92,19 @@ function SegmentRow({
             {/* Content */}
             <div className="flex-1 min-w-0">
                 <div className="flex items-baseline gap-2 mb-1">
-                    <span className="text-sm font-medium text-stone-900">
-                        {getSpeakerLabel(segment.speaker)}
+                    <span className="text-sm font-medium text-foreground">
+                        {speakerLabel}
                     </span>
                     <button
                         type="button"
                         aria-label={`Seek to ${formatTime(segment.start)}`}
-                        className="text-xs text-stone-400 hover:text-primary transition-colors tabular-nums cursor-pointer"
+                        className="touch-manipulation cursor-pointer text-xs tabular-nums text-muted-foreground transition-colors motion-reduce:transition-none hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
                         onClick={() => setSeekRequest(segment.start)}
                     >
                         {formatTime(segment.start)}
                     </button>
                 </div>
-                <p className="text-sm leading-relaxed text-stone-700">
+                <p className="text-sm leading-relaxed text-foreground">
                     {words.length > 0 ? (
                         words.map((w, i) => <WordSpan key={i} word={w} />)
                     ) : (
@@ -105,7 +112,7 @@ function SegmentRow({
                     )}
                 </p>
             </div>
-        </div>
+        </article>
     );
 }
 
@@ -117,11 +124,11 @@ export function TranscriptViewer({
     isFreeTier?: boolean;
 }) {
     if (!segments || segments.length === 0) {
-        return <p className="text-sm text-stone-400 py-4">No transcript available.</p>;
+        return <p className="py-4 text-sm text-muted-foreground">No transcript available.</p>;
     }
 
     return (
-        <div className="divide-y divide-stone-100">
+        <div className="min-w-0">
             {[...segments].sort((a, b) => a.start - b.start).map((segment, index) => (
                 <SegmentRow
                     key={index}

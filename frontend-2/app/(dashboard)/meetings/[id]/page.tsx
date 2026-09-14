@@ -2,7 +2,7 @@
 // Copyright (C) 2025-2026 Afeef Janjua
 "use client";
 
-import { useState, useEffect, useRef, use, useCallback } from "react";
+import { useState, useEffect, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import { usePostHog } from "posthog-js/react";
 import { getMeeting, updateMeetingSummary, restoreMeetingSummary, Meeting, updateMeetingType, reExtractIntelligence, listLanguages, type LanguageEntry } from "@/app/lib/api";
@@ -28,7 +28,7 @@ import { StructuredOutputRenderer } from "@/app/components/structured-output-ren
 import { MeetingTypeSelector } from "@/app/components/meeting-type-selector";
 import { useTranscriptStore } from "@/app/lib/use-transcript-store";
 import { Separator } from "@/app/components/ui/separator";
-import { Pencil, Download, Mail, Copy, FileText, FileDown, ChevronDown, Eye, RotateCcw, RefreshCw, Loader2, Languages } from "lucide-react";
+import { Pencil, Download, Mail, Copy, FileText, FileDown, ChevronDown, Eye, RotateCcw, RefreshCw, Loader2, Languages, UserRound } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,9 +40,9 @@ import remarkGfm from "remark-gfm";
 
 const ROMAN_SPEAKER_COLORS: Record<string, string> = {
   SPEAKER_00: "bg-stone-500 text-white",
-  SPEAKER_01: "bg-amber-500 text-white",
-  SPEAKER_02: "bg-teal-500 text-white",
-  SPEAKER_03: "bg-emerald-500 text-white",
+  SPEAKER_01: "bg-stone-600 text-white",
+  SPEAKER_02: "bg-stone-700 text-white",
+  SPEAKER_03: "bg-stone-400 text-stone-950",
 };
 const romanSpeakerColor = (s: string) =>
   ROMAN_SPEAKER_COLORS[s] ?? "bg-stone-200 text-stone-500";
@@ -96,7 +96,6 @@ export default function MeetingDetailPage({
   const [reTranscribeOpen, setReTranscribeOpen] = useState(false);
   const [langCatalog, setLangCatalog] = useState<LanguageEntry[]>([]);
   const [transcriptView, setTranscriptView] = useState<"original" | "roman">("original");
-  const [mediaPlayerHeight, setMediaPlayerHeight] = useState(0);
 
   const { setSeekRequest } = useTranscriptStore();
   const resetTranscriptMedia = useTranscriptStore((state) => state.reset);
@@ -124,10 +123,6 @@ export default function MeetingDetailPage({
       resetTranscriptMedia(null);
     }
   }, [resetTranscriptMedia, shouldMountMediaPlayer]);
-
-  const handleMediaPlayerHeightChange = useCallback((height: number) => {
-    setMediaPlayerHeight(height);
-  }, []);
 
   const handleMeetingTypeChange = async (newType: MeetingType) => {
     if (!meeting) return;
@@ -308,6 +303,8 @@ export default function MeetingDetailPage({
     const m = Math.floor(seconds / 60);
     return `${m} min`;
   };
+
+  const transcriptSegmentCount = meeting.segments?.length ?? 0;
 
   return (
     <div className="relative flex flex-col h-full overflow-hidden">
@@ -603,9 +600,9 @@ export default function MeetingDetailPage({
           {/* Transcript Tab Content */}
           {activeTab === "transcript" && (
             <div className="space-y-4">
-              {/* Transcript toolbar — same bar style as summary */}
+              {/* Transcript toolbar — wraps so actions remain usable on narrow screens */}
               {meeting.status === "completed" && meeting.segments && meeting.segments.length > 0 && (
-                <div className="flex items-center gap-1 rounded-lg bg-muted/50 border border-border px-1.5 py-1">
+                <div className="flex flex-wrap items-center gap-1 rounded-lg border border-border bg-muted/50 px-1.5 py-1">
                   <Button variant="ghost" size="sm" onClick={async () => {
                     try { await exportPdf(meeting.id, "transcript"); posthog?.capture("transcript_exported", { meeting_id: meeting.id }); }
                     catch { alert("Failed to download PDF."); }
@@ -616,23 +613,27 @@ export default function MeetingDetailPage({
                   <div className="flex-1" />
                   {/* Roman script toggle — only shown when transliteration is available */}
                   {meeting.transliterated_text && (
-                    <div className="inline-flex gap-1 rounded-lg border border-stone-200 bg-background p-1 mr-1">
+                    <div role="group" aria-label="Transcript script" className="inline-flex gap-1 rounded-lg border border-border bg-background p-1 mr-1">
                       <button
+                        type="button"
+                        aria-pressed={transcriptView === "original"}
                         onClick={() => setTranscriptView("original")}
-                        className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                        className={`rounded-lg px-3 py-1 text-sm font-medium transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
                           transcriptView === "original"
-                            ? "bg-stone-900 text-white"
-                            : "text-stone-600 hover:bg-stone-100"
+                            ? "bg-foreground text-background"
+                            : "text-muted-foreground hover:bg-accent"
                         }`}
                       >
                         Original
                       </button>
                       <button
+                        type="button"
+                        aria-pressed={transcriptView === "roman"}
                         onClick={() => setTranscriptView("roman")}
-                        className={`rounded-md px-3 py-1 text-sm font-medium transition-colors ${
+                        className={`rounded-lg px-3 py-1 text-sm font-medium transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 ${
                           transcriptView === "roman"
-                            ? "bg-stone-900 text-white"
-                            : "text-stone-600 hover:bg-stone-100"
+                            ? "bg-foreground text-background"
+                            : "text-muted-foreground hover:bg-accent"
                         }`}
                       >
                         Roman
@@ -649,97 +650,115 @@ export default function MeetingDetailPage({
                   </Button>
                 </div>
               )}
-              {meeting.segments ? (
-                <div className="bg-white rounded-lg border border-stone-200 p-6">
-                  {transcriptView === "roman" && meeting.transliterated_text ? (
-                    (() => {
-                      const rows = parseRomanRows(meeting.transliterated_text);
-                      const hasSpeakers = rows.some((r) => r.speaker);
-                      return (
-                        <article className="space-y-5">
-                          {/* Info chip — uses muted tokens per design system */}
-                          <div className="flex items-start gap-2.5 rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
-                            <Languages className="size-4 mt-0.5 text-muted-foreground flex-shrink-0" aria-hidden />
-                            <p className="text-xs leading-relaxed text-muted-foreground">
-                              Roman transliteration — speaker attribution preserved, no timestamps.
-                            </p>
-                          </div>
+              <div className={`grid min-w-0 gap-4 lg:gap-6 ${shouldMountMediaPlayer ? "lg:grid-cols-[minmax(0,1.65fr)_minmax(20rem,0.85fr)]" : "lg:grid-cols-1"}`}>
+                {shouldMountMediaPlayer && (
+                  <section aria-labelledby="meeting-recording-heading" className="min-w-0 space-y-3">
+                    <div>
+                      <h2 id="meeting-recording-heading" className="text-lg font-semibold text-foreground">Recording</h2>
+                      <p className="mt-1 text-sm text-muted-foreground">Follow the transcript while you watch or listen.</p>
+                    </div>
+                    <StickyMediaPlayer key={mediaIdentity} meeting={meeting} />
+                  </section>
+                )}
 
-                          {hasSpeakers ? (
-                            <div className="divide-y divide-stone-100">
-                              {rows.map((row, i) => {
-                                const speaker = row.speaker ?? "SPEAKER_UNKNOWN";
-                                const label = romanSpeakerLabel(speaker);
-                                const isUnknown = speaker === "SPEAKER_UNKNOWN";
-                                return (
-                                  <div
-                                    key={i}
-                                    className="flex gap-4 py-4 border-b border-stone-100 last:border-none"
-                                  >
-                                    <div className="flex-shrink-0 pt-0.5">
-                                      <div
-                                        className={`w-8 h-8 rounded-full flex items-center justify-center text-sm font-semibold ${romanSpeakerColor(speaker)}`}
-                                      >
-                                        {isUnknown ? (
-                                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                                            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
-                                            <circle cx="12" cy="7" r="4" />
-                                          </svg>
-                                        ) : (
-                                          label.charAt(label.indexOf(" ") + 1)
-                                        )}
-                                      </div>
-                                    </div>
-                                    <div className="flex-1 min-w-0">
-                                      <div className="flex items-baseline gap-2 mb-1">
-                                        <span className="text-sm font-medium text-stone-900">
-                                          {label}
-                                        </span>
-                                      </div>
-                                      <p className="text-sm leading-relaxed text-stone-700 whitespace-pre-wrap">
-                                        {row.text}
-                                      </p>
-                                    </div>
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          ) : (
-                            <div className="space-y-4 text-[15px] leading-[1.8] text-foreground">
-                              {rows.map((row, i) => (
-                                <p key={i} className="whitespace-pre-wrap">
-                                  {row.text}
+                <aside
+                  aria-labelledby="meeting-transcript-heading"
+                  className="flex min-h-0 flex-col overflow-hidden rounded-lg border border-border bg-card lg:h-[calc(100vh-15rem)] lg:min-h-[24rem] lg:max-h-[calc(100vh-15rem)]"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-3 border-b border-border px-4 py-4 sm:px-5">
+                    <div className="min-w-0">
+                      <h2 id="meeting-transcript-heading" className="text-lg font-semibold text-foreground">Transcript</h2>
+                      <p className="mt-1 text-sm text-muted-foreground" aria-live="polite">
+                        {transcriptSegmentCount > 0
+                          ? `${transcriptSegmentCount} ${transcriptSegmentCount === 1 ? "segment" : "segments"}`
+                          : "No transcript available yet"}
+                      </p>
+                    </div>
+                    {shouldMountMediaPlayer && (
+                      <span className="shrink-0 rounded-4xl border border-border bg-muted/50 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                        Synced to recording
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 sm:px-5">
+                    {meeting.segments && meeting.segments.length > 0 ? (
+                      transcriptView === "roman" && meeting.transliterated_text ? (
+                        (() => {
+                          const rows = parseRomanRows(meeting.transliterated_text);
+                          const hasSpeakers = rows.some((r) => r.speaker);
+                          return (
+                            <article className="space-y-5 py-4">
+                              {/* Info chip — uses muted tokens per design system */}
+                              <div className="flex items-start gap-2.5 rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
+                                <Languages className="mt-0.5 size-4 flex-shrink-0 text-muted-foreground" aria-hidden="true" />
+                                <p className="text-xs leading-relaxed text-muted-foreground">
+                                  Roman transliteration — speaker attribution preserved, no timestamps.
                                 </p>
-                              ))}
-                            </div>
-                          )}
-                        </article>
-                      );
-                    })()
-                  ) : (
-                    <TranscriptViewer segments={meeting.segments} isFreeTier={isFreeTier} />
-                  )}
-                </div>
-              ) : (
-                <div className="bg-white rounded-lg border border-stone-200 p-6">
-                  <p className="text-sm text-stone-400 italic">No transcript available yet.</p>
-                </div>
-              )}
+                              </div>
+
+                              {hasSpeakers ? (
+                                <div className="divide-y divide-border">
+                                  {rows.map((row, i) => {
+                                    const speaker = row.speaker ?? "SPEAKER_UNKNOWN";
+                                    const label = romanSpeakerLabel(speaker);
+                                    const isUnknown = speaker === "SPEAKER_UNKNOWN";
+                                    return (
+                                      <div
+                                        key={i}
+                                        className="flex min-w-0 gap-3 border-b border-border py-4 last:border-none"
+                                      >
+                                        <div className="flex-shrink-0 pt-0.5">
+                                          <div
+                                            className={`flex size-8 items-center justify-center rounded-full text-sm font-semibold ${romanSpeakerColor(speaker)}`}
+                                          >
+                                            {isUnknown ? (
+                                              <UserRound className="size-3.5" aria-hidden="true" />
+                                            ) : (
+                                              label.charAt(label.indexOf(" ") + 1)
+                                            )}
+                                          </div>
+                                        </div>
+                                        <div className="min-w-0 flex-1">
+                                          <div className="mb-1 flex items-baseline gap-2">
+                                            <span className="text-sm font-medium text-foreground">
+                                              {label}
+                                            </span>
+                                          </div>
+                                          <p className="break-words whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+                                            {row.text}
+                                          </p>
+                                        </div>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <div className="space-y-4 text-sm leading-relaxed text-foreground">
+                                  {rows.map((row, i) => (
+                                    <p key={i} className="break-words whitespace-pre-wrap">
+                                      {row.text}
+                                    </p>
+                                  ))}
+                                </div>
+                              )}
+                            </article>
+                          );
+                        })()
+                      ) : (
+                        <TranscriptViewer segments={meeting.segments} isFreeTier={isFreeTier} />
+                      )
+                    ) : (
+                      <p className="py-6 text-sm italic text-muted-foreground">No transcript available yet.</p>
+                    )}
+                  </div>
+                </aside>
+              </div>
               {isFreeTier && <PaywallModal />}
             </div>
           )}
         </div>
 
-        {shouldMountMediaPlayer && (
-          <div aria-hidden="true" style={{ height: mediaPlayerHeight }} />
-        )}
-        {shouldMountMediaPlayer && (
-          <StickyMediaPlayer
-            key={mediaIdentity}
-            meeting={meeting}
-            onHeightChange={handleMediaPlayerHeightChange}
-          />
-        )}
       </div>
 
       {/* Share via Email Dialog */}
