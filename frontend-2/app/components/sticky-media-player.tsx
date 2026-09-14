@@ -2,60 +2,210 @@
 // Copyright (C) 2025-2026 Afeef Janjua
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranscriptStore } from "@/app/lib/use-transcript-store";
 import type { Meeting } from "@/app/lib/api";
 import { Play, Pause, RotateCcw } from "lucide-react";
 
-export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
-    const audioRef = useRef<HTMLAudioElement>(null);
+interface StickyMediaPlayerProps {
+    meeting: Meeting;
+    onHeightChange?: (height: number) => void;
+}
+
+const MEDIA_ERROR_MESSAGE = "This media could not be loaded. Transcript seeking is still available.";
+
+export function StickyMediaPlayer({ meeting, onHeightChange }: StickyMediaPlayerProps) {
+    const mediaRef = useRef<HTMLMediaElement>(null);
+    const playerRef = useRef<HTMLDivElement>(null);
     const rafRef = useRef<number | null>(null);
-    const { setCurrentTime, seekRequest, setSeekRequest, setIsPlaying, currentTime } = useTranscriptStore();
+    const setMediaRef = useCallback((element: HTMLMediaElement | null) => {
+        mediaRef.current = element;
+    }, []);
+    const {
+        currentTime,
+        duration,
+        isPlaying,
+        seekRequest,
+        setCurrentTime,
+        setDuration,
+        setIsPlaying,
+        setSeekRequest,
+        reset,
+    } = useTranscriptStore();
 
     const [playbackRate, setPlaybackRate] = useState(1);
-    const [duration, setDuration] = useState(meeting.duration_seconds || 0);
+    const [mediaError, setMediaError] = useState<string | null>(null);
+    const mediaType = meeting.media_type === "video" ? "video" : "audio";
+    const mediaSrc = meeting.audio_url || meeting.file_path || undefined;
+    const mediaKey = `${meeting.id}:${mediaSrc ?? ""}:${mediaType}`;
     const progressPercent = duration > 0
         ? Math.min(100, Math.max(0, (currentTime / duration) * 100))
         : 0;
 
-    // Sync seek requests from the UI (Transcript words clicking) to the native player
-    useEffect(() => {
-        if (seekRequest !== null && audioRef.current) {
-            audioRef.current.currentTime = seekRequest;
-            setSeekRequest(null);
+    const stopProgressLoop = useCallback(() => {
+        if (rafRef.current !== null) {
+            cancelAnimationFrame(rafRef.current);
+            rafRef.current = null;
         }
-    }, [seekRequest, setSeekRequest]);
+    }, []);
 
-    // High performance time tracking loop using RequestAnimationFrame
-    const loop = () => {
-        if (audioRef.current && !audioRef.current.paused) {
-            setCurrentTime(audioRef.current.currentTime);
-            rafRef.current = requestAnimationFrame(loop);
+    const updateProgress = useCallback(() => {
+        const animate = () => {
+            const media = mediaRef.current;
+            if (!media || media.paused || media.ended) {
+                rafRef.current = null;
+                return;
+            }
+
+            setCurrentTime(media.currentTime);
+            rafRef.current = requestAnimationFrame(animate);
+        };
+
+        animate();
+    }, [setCurrentTime]);
+
+    useEffect(() => {
+        const element = playerRef.current;
+        if (!element || !onHeightChange) return;
+
+        const reportHeight = () => onHeightChange(element.getBoundingClientRect().height);
+        reportHeight();
+
+        if (typeof ResizeObserver === "undefined") return;
+
+        const observer = new ResizeObserver(reportHeight);
+        observer.observe(element);
+        return () => {
+            observer.disconnect();
+            onHeightChange(0);
+        };
+    }, [onHeightChange]);
+
+    // Reset shared playback state whenever the media identity changes.
+    useEffect(() => {
+        const media = mediaRef.current;
+        reset(mediaKey);
+        stopProgressLoop();
+
+        if (!media) {
+            return () => {
+                if (useTranscriptStore.getState().mediaKey === mediaKey) reset(null);
+            };
         }
-    };
+
+        media.pause();
+        try {
+            media.currentTime = 0;
+        } catch {
+            // A media element without a source cannot accept currentTime yet.
+        }
+        media.playbackRate = 1;
+
+        const handleLoadedMetadata = () => {
+            if (Number.isFinite(media.duration) && media.duration > 0) {
+                setDuration(media.duration);
+            }
+        };
+        const handlePlay = () => {
+            setIsPlaying(true);
+            updateProgress();
+        };
+        const handlePause = () => {
+            setIsPlaying(false);
+            stopProgressLoop();
+            setCurrentTime(media.currentTime);
+        };
+        const handleEnded = () => {
+            setIsPlaying(false);
+            stopProgressLoop();
+            setCurrentTime(media.currentTime);
+        };
+        const handleTimeUpdate = () => setCurrentTime(media.currentTime);
+        const handleError = () => {
+            setIsPlaying(false);
+            stopProgressLoop();
+            setMediaError(MEDIA_ERROR_MESSAGE);
+        };
+
+        media.addEventListener("loadedmetadata", handleLoadedMetadata);
+        media.addEventListener("play", handlePlay);
+        media.addEventListener("pause", handlePause);
+        media.addEventListener("ended", handleEnded);
+        media.addEventListener("timeupdate", handleTimeUpdate);
+        media.addEventListener("error", handleError);
+
+        if (media.readyState >= 1) handleLoadedMetadata();
+
+        return () => {
+            media.pause();
+            stopProgressLoop();
+            media.removeEventListener("loadedmetadata", handleLoadedMetadata);
+            media.removeEventListener("play", handlePlay);
+            media.removeEventListener("pause", handlePause);
+            media.removeEventListener("ended", handleEnded);
+            media.removeEventListener("timeupdate", handleTimeUpdate);
+            media.removeEventListener("error", handleError);
+            if (useTranscriptStore.getState().mediaKey === mediaKey) reset(null);
+        };
+    }, [
+        mediaKey,
+        reset,
+        setCurrentTime,
+        setDuration,
+        setIsPlaying,
+        stopProgressLoop,
+        updateProgress,
+    ]);
+
+    useEffect(() => {
+        if (duration === 0 && meeting.duration_seconds && meeting.duration_seconds > 0) {
+            setDuration(meeting.duration_seconds);
+        }
+    }, [duration, meeting.duration_seconds, setDuration]);
+
+    // Sync seek requests from transcript words and timestamps to the native player.
+    useEffect(() => {
+        const media = mediaRef.current;
+        if (seekRequest === null || !media) return;
+
+        try {
+            media.currentTime = Math.max(0, seekRequest);
+            setCurrentTime(media.currentTime);
+            setSeekRequest(null);
+        } catch {
+            // Keep the request until the media element can accept a seek.
+        }
+    }, [seekRequest, setCurrentTime, setSeekRequest]);
 
     const togglePlay = () => {
-        if (audioRef.current) {
-            if (audioRef.current.paused) {
-                audioRef.current.play();
+        const media = mediaRef.current;
+        if (media) {
+            if (media.paused) {
+                void media.play().catch(() => {
+                    if (mediaRef.current === media) {
+                        setIsPlaying(false);
+                        setMediaError(MEDIA_ERROR_MESSAGE);
+                    }
+                });
             } else {
-                audioRef.current.pause();
+                media.pause();
             }
         }
     };
 
     const handleRewind = () => {
-        if (audioRef.current) {
-            audioRef.current.currentTime = Math.max(0, audioRef.current.currentTime - 10);
-            setCurrentTime(audioRef.current.currentTime);
+        const media = mediaRef.current;
+        if (media) {
+            media.currentTime = Math.max(0, media.currentTime - 10);
+            setCurrentTime(media.currentTime);
         }
     };
 
     const toggleSpeed = () => {
         const nextSpeed = playbackRate === 1 ? 1.5 : playbackRate === 1.5 ? 2 : 1;
         setPlaybackRate(nextSpeed);
-        if (audioRef.current) {
-            audioRef.current.playbackRate = nextSpeed;
+        if (mediaRef.current) {
+            mediaRef.current.playbackRate = nextSpeed;
         }
     };
 
@@ -67,22 +217,47 @@ export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
     };
 
     const formatTime = (secs: number) => {
+        if (!Number.isFinite(secs) || secs < 0) return "00:00";
         const m = Math.floor(secs / 60);
         const s = Math.floor(secs % 60);
-        return `${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
+        return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
     };
 
-    const audioSrc = meeting.audio_url || meeting.file_path || undefined;
-
     return (
-        <div className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 z-50 px-6 py-4 pb-safe">
+        <div ref={playerRef} className="fixed bottom-0 left-0 right-0 bg-white border-t border-stone-200 z-50 px-6 py-4 pb-safe">
             <div className="max-w-5xl mx-auto flex flex-col gap-3">
+                {mediaType === "video" ? (
+                    <video
+                        key={mediaKey}
+                        ref={setMediaRef}
+                        src={mediaSrc}
+                        preload="metadata"
+                        playsInline
+                        aria-label={`${meeting.title} video`}
+                        className="aspect-video w-full max-h-64 rounded-lg bg-stone-900 object-contain"
+                    />
+                ) : (
+                    <audio
+                        key={mediaKey}
+                        ref={setMediaRef}
+                        src={mediaSrc}
+                        preload="metadata"
+                        className="sr-only"
+                        aria-hidden="true"
+                    />
+                )}
+
+                {mediaError && (
+                    <p role="status" aria-live="polite" className="text-sm text-amber-700">
+                        {mediaError}
+                    </p>
+                )}
 
                 {/* Progress Bar with Speaker Segments */}
                 <div className="w-full h-1 bg-stone-100 rounded-lg relative group cursor-pointer overflow-hidden"
                     onClick={(e) => {
                         // Simple seek to click position
-                        if (!audioRef.current) return;
+                        if (!mediaRef.current || duration <= 0) return;
                         const bounds = e.currentTarget.getBoundingClientRect();
                         const percent = (e.clientX - bounds.left) / bounds.width;
                         const newTime = percent * duration;
@@ -123,8 +298,8 @@ export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
                                 <RotateCcw className="w-5 h-5" />
                             </button>
 
-                            <button type="button" aria-label={audioRef.current?.paused === false ? "Pause" : "Play"} onClick={togglePlay} className="w-8 h-8 flex items-center justify-center rounded-full bg-stone-900 text-white hover:bg-stone-800 transition-colors">
-                                {audioRef.current?.paused === false ? (
+                            <button type="button" aria-label={isPlaying ? "Pause" : "Play"} onClick={togglePlay} className="w-8 h-8 flex items-center justify-center rounded-full bg-stone-900 text-white hover:bg-stone-800 transition-colors">
+                                {isPlaying ? (
                                     <Pause className="w-4 h-4 fill-current" />
                                 ) : (
                                     <Play className="w-4 h-4 fill-current ml-0.5" />
@@ -151,29 +326,6 @@ export function StickyMediaPlayer({ meeting }: { meeting: Meeting }) {
                 </div>
 
             </div>
-
-            {/* Hidden Native Audio Element */}
-            <audio
-                ref={audioRef}
-                src={audioSrc}
-                onPlay={() => {
-                    setIsPlaying(true);
-                    rafRef.current = requestAnimationFrame(loop);
-                }}
-                onPause={() => {
-                    setIsPlaying(false);
-                    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-                }}
-                onEnded={() => {
-                    setIsPlaying(false);
-                    if (rafRef.current) cancelAnimationFrame(rafRef.current);
-                }}
-                onLoadedMetadata={(e) => {
-                    if (!meeting.duration_seconds) {
-                        setDuration(e.currentTarget.duration);
-                    }
-                }}
-            />
         </div>
     );
 }

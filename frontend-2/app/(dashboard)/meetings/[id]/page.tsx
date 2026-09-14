@@ -2,7 +2,7 @@
 // Copyright (C) 2025-2026 Afeef Janjua
 "use client";
 
-import { useState, useEffect, useRef, use } from "react";
+import { useState, useEffect, useRef, use, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { usePostHog } from "posthog-js/react";
 import { getMeeting, updateMeetingSummary, restoreMeetingSummary, Meeting, updateMeetingType, reExtractIntelligence, listLanguages, type LanguageEntry } from "@/app/lib/api";
@@ -96,11 +96,38 @@ export default function MeetingDetailPage({
   const [reTranscribeOpen, setReTranscribeOpen] = useState(false);
   const [langCatalog, setLangCatalog] = useState<LanguageEntry[]>([]);
   const [transcriptView, setTranscriptView] = useState<"original" | "roman">("original");
+  const [mediaPlayerHeight, setMediaPlayerHeight] = useState(0);
 
   const { setSeekRequest } = useTranscriptStore();
+  const resetTranscriptMedia = useTranscriptStore((state) => state.reset);
 
   // Stub for user tier logic
   const isFreeTier = false;
+  const mediaIdentity = meeting
+    ? `${meeting.id}:${meeting.audio_url ?? meeting.file_path ?? ""}:${meeting.media_type ?? "audio"}`
+    : null;
+  const shouldMountMediaPlayer = Boolean(
+    meeting
+      && meeting.id === Number(id)
+      && activeTab === "transcript"
+      && meeting.status === "completed"
+      && (meeting.audio_url || meeting.file_path)
+  );
+
+  useEffect(() => {
+    resetTranscriptMedia(mediaIdentity);
+    return () => resetTranscriptMedia(null);
+  }, [id, mediaIdentity, resetTranscriptMedia]);
+
+  useEffect(() => {
+    if (!shouldMountMediaPlayer) {
+      resetTranscriptMedia(null);
+    }
+  }, [resetTranscriptMedia, shouldMountMediaPlayer]);
+
+  const handleMediaPlayerHeightChange = useCallback((height: number) => {
+    setMediaPlayerHeight(height);
+  }, []);
 
   const handleMeetingTypeChange = async (newType: MeetingType) => {
     if (!meeting) return;
@@ -623,7 +650,7 @@ export default function MeetingDetailPage({
                 </div>
               )}
               {meeting.segments ? (
-                <div className="bg-white rounded-lg border border-stone-200 p-6 pb-20">
+                <div className="bg-white rounded-lg border border-stone-200 p-6">
                   {transcriptView === "roman" && meeting.transliterated_text ? (
                     (() => {
                       const rows = parseRomanRows(meeting.transliterated_text);
@@ -703,9 +730,15 @@ export default function MeetingDetailPage({
           )}
         </div>
 
-        {/* Sticky Player — inside scroll area so it sticks to bottom */}
-        {activeTab === "transcript" && meeting.status === "completed" && meeting.file_path && (
-          <StickyMediaPlayer meeting={meeting} />
+        {shouldMountMediaPlayer && (
+          <div aria-hidden="true" style={{ height: mediaPlayerHeight }} />
+        )}
+        {shouldMountMediaPlayer && (
+          <StickyMediaPlayer
+            key={mediaIdentity}
+            meeting={meeting}
+            onHeightChange={handleMediaPlayerHeightChange}
+          />
         )}
       </div>
 
