@@ -64,6 +64,7 @@ class MeetingService(BaseService):
                 Meeting.template_id,
                 Meeting.template_name,
                 Meeting.transcription_type,
+                Meeting.visual_breakdown_params,
                 Meeting.source_type,
                 Meeting.source_url,
                 Meeting.youtube_title,

@@ -150,6 +150,7 @@ export function UploadModal({ isOpen, onOpenChange }: UploadModalProps) {
                 transcription_type: transcriptionType,
                 meeting_type: meetingType,
                 ...(language ? { language } : {}),
+                content_type: item.file.type,
             }, { signal: item.abortController.signal });
 
             await axios.put(presignedData.upload_url, item.file, {

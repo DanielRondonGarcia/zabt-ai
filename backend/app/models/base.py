@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 from datetime import datetime
-from typing import Any, Optional, List
+from typing import Any, Optional, List, Literal
 from enum import Enum
 from sqlmodel import Field, SQLModel, Relationship
 from sqlalchemy import Column, String
@@ -292,6 +292,7 @@ class MeetingRead(MeetingBase):
     highlights: List[dict] = []
     layout_hint: Optional[str] = None
     audio_url: Optional[str] = None
+    media_type: Optional[Literal["audio", "video"]] = None
     # Visual breakdown (Plan 2 — frontend uses this to drive the tab state machine)
     visual_breakdown_status: Optional[str] = None
     visual_breakdown_error: Optional[str] = None

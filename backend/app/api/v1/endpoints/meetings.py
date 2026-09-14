@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+from collections.abc import Mapping
 from datetime import datetime
 from typing import List, Any, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -25,6 +26,28 @@ from app.services.email_share import email_share_service
 from app.services.integration import integration_service
 
 router = APIRouter()
+
+
+def _normalize_content_type(content_type: Any) -> str:
+    """Return the stable MIME value stored for a meeting upload."""
+    if not isinstance(content_type, str):
+        return ""
+    return content_type.split(";", 1)[0].strip().lower()
+
+
+def _normalize_media_type(
+    params: Mapping[str, Any] | None,
+) -> Literal["audio", "video"] | None:
+    """Map stored MIME metadata to the supported media presentation kind."""
+    if not isinstance(params, Mapping):
+        return None
+
+    content_type = _normalize_content_type(params.get("content_type"))
+    if content_type.startswith("audio/"):
+        return "audio"
+    if content_type.startswith("video/"):
+        return "video"
+    return None
 
 
 def dispatch_transcription_job(meeting_id: int) -> None:
@@ -139,6 +162,7 @@ def _build_meeting_response(meeting: Meeting) -> MeetingRead:
         highlights=[h.model_dump() for h in highlights_list],
         layout_hint=layout_hint,
         audio_url=audio_url,
+        media_type=_normalize_media_type(meeting.visual_breakdown_params),
         visual_breakdown_status=meeting.visual_breakdown_status,
         visual_breakdown_error=meeting.visual_breakdown_error,
         visual_breakdown_completed_at=meeting.visual_breakdown_completed_at,
@@ -185,13 +209,14 @@ def create_meeting(
     if requested_language is not None:
         meeting_service.update_field(meeting.id, "requested_language", requested_language)
         meeting.requested_language = requested_language
-    if meeting_in.content_type:
+    if meeting_in.content_type is not None:
+        normalized_content_type = _normalize_content_type(meeting_in.content_type)
         meeting_service.update_field(
             meeting.id,
             "visual_breakdown_params",
-            {"content_type": meeting_in.content_type},
+            {"content_type": normalized_content_type},
         )
-        meeting.visual_breakdown_params = {"content_type": meeting_in.content_type}
+        meeting.visual_breakdown_params = {"content_type": normalized_content_type}
     # Build response directly — new meetings have no segments yet,
     # and the meeting object is detached from the session.
     return MeetingRead(
@@ -215,6 +240,7 @@ def create_meeting(
         youtube_thumbnail_url=meeting.youtube_thumbnail_url,
         youtube_channel=meeting.youtube_channel,
         requested_language=meeting.requested_language,
+        media_type=_normalize_media_type(meeting.visual_breakdown_params),
         segments=[],
         speakers=None,
     )
@@ -229,7 +255,13 @@ def read_meetings(
     Retrieve meetings (without segments — use GET /{meeting_id} for full detail).
     """
     rows = meeting_service.get_meetings(owner_id=current_user.id, skip=skip, limit=limit)
-    return [MeetingRead(**row._asdict()) for row in rows]
+    meetings = []
+    for row in rows:
+        row_data = row._asdict()
+        visual_breakdown_params = row_data.pop("visual_breakdown_params", None)
+        row_data["media_type"] = _normalize_media_type(visual_breakdown_params)
+        meetings.append(MeetingRead(**row_data))
+    return meetings
 
 @router.get("/{meeting_id}", response_model=MeetingRead)
 def read_meeting(

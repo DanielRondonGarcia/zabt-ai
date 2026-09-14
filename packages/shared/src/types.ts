@@ -23,6 +23,8 @@ export interface SpeakerBreakdown {
 
 // Meeting
 
+export type MediaType = "audio" | "video";
+
 export interface Meeting {
   id: number;
   title: string;
@@ -48,6 +50,7 @@ export interface Meeting {
   youtube_thumbnail_url: string | null;
   youtube_channel: string | null;
   audio_url: string | null;
+  media_type: MediaType | null;
   speakers?: Record<string, SpeakerBreakdown>;
   segments?: TranscriptSegment[];
   meeting_type: MeetingType;
