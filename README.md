@@ -1,10 +1,11 @@
 # zabt.ai
 
-**Self-hosted AI meeting intelligence.** zabt.ai transcribes, diarizes, and summarizes
-your meetings on infrastructure *you* control — a self-hosted alternative to Otter.ai and
-Fireflies where your audio and transcripts never leave your machines. Upload a recording (or
-let the bot join a call), and get an accurate, speaker-labeled transcript and an LLM-written
-summary, powered by faster-whisper, pyannote, and any OpenAI-compatible model.
+**Self-hosted AI meeting intelligence.** zabt.ai transcribes, can diarize, and summarizes
+your meetings on infrastructure *you* control by default — a self-hosted alternative to Otter.ai
+and Fireflies. Upload a recording (or let the bot join a call), and get a transcript and an
+LLM-written summary, powered by faster-whisper, pyannote, and configurable providers. The optional
+OpenAI file provider sends selected audio to the configured OpenAI API; see the provider settings
+and capability boundaries in [the configuration reference](docs/configuration.md).
 
 [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](./LICENSE)
 
@@ -12,14 +13,16 @@ summary, powered by faster-whisper, pyannote, and any OpenAI-compatible model.
 
 ## Why zabt.ai
 
-- **Your data stays yours.** Audio, transcripts, and summaries live on your own hardware or
-  cloud account — nothing is sent to a third-party meeting-notes SaaS.
+- **Your data stays yours by default.** Audio, transcripts, and summaries live on your own
+  hardware or cloud account. If you select the optional OpenAI file provider, its documented file
+  API receives the selected audio; this is separate from summary and vision credentials.
 - **Runs on one machine.** `git clone` → `docker compose up`. Bundled Postgres, object
   storage, transcription worker, and web UI.
 - **Bring your own models.** Any OpenAI-compatible LLM endpoint (OpenRouter, Ollama, vLLM,
   LM Studio, OpenAI). Whisper model size is your call.
-- **Accurate, speaker-labeled transcripts.** faster-whisper for ASR + pyannote for
-  diarization ("who said what").
+- **Configurable transcription.** The default local GPU path and the existing RunPod path retain
+  faster-whisper + pyannote diarization; the first-slice OpenAI file path is general batch
+  transcription and may preserve missing speakers as `SPEAKER_UNKNOWN`.
 - **Scales when you need it.** The same codebase runs a single-box deploy or a split
   topology with RunPod serverless GPUs behind a small API VPS.
 
@@ -64,6 +67,14 @@ cp .env.example .env
 docker compose up -d
 ```
 
+The default transcription provider is `gpu-local`. To choose an alternative, edit `.env` before
+starting the services: set `TRANSCRIPTION_PROVIDER=runpod` with its existing RunPod settings, or
+set `TRANSCRIPTION_PROVIDER=openai-file`, `TRANSCRIPTION_MODEL=gpt-transcribe` (or
+`gpt-4o-mini-transcribe`), and the runtime-only `TRANSCRIPTION_API_KEY`. `OPENAI_API_KEY` remains
+the summary setting and is not used as a transcription fallback. For synchronized playback, set
+`TRANSCRIPTION_TIMESTAMP_MODE=word`; this keeps the primary model for transcript text and makes
+one additional `whisper-1` request per file/chunk for word timing.
+
 Then open:
 - Web UI → http://localhost:3000
 - API → http://localhost:8000
@@ -93,7 +104,8 @@ you accept the terms and download them yourself:**
 ## Features
 
 - Audio/video upload → transcription → diarization → LLM summary
-- Speaker-labeled, timestamped transcripts with an in-app viewer and editor
+- Timestamped transcripts with an in-app viewer and editor; speaker labels depend on the selected
+  provider capability
 - Customizable summary templates
 - YouTube URL ingestion
 - Microsoft Teams meeting bot (joins and records) *(optional)*
@@ -101,6 +113,12 @@ you accept the terms and download them yourself:**
 - Server-side PDF export of transcripts and summaries
 - Email + Telegram notifications *(optional)*
 - Medical transcription mode (MedASR)
+
+The first-slice provider registry is batch-only. It does not implement realtime transcription,
+OpenAI medical parity, generic OpenAI-compatible audio, or Ollama audio transcription. Unsupported
+selections fail explicitly instead of silently switching providers. Medical requests remain on
+the local/RunPod MedASR path. See [the full configuration reference](docs/configuration.md) for
+the model candidates, `.env` examples, and the credential-gated conformance fixture.
 
 ## Hardware requirements
 

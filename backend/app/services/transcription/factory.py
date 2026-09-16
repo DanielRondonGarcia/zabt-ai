@@ -1,68 +1,49 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-"""TranscriptionProviderFactory — dispatches by TRANSCRIPTION_BACKEND setting."""
+"""Compatibility entry point for the scoped transcription registry."""
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING
-
 from app.core.config import settings
-from app.models import UserTier, TranscriptionBackend
+from app.models import UserTier
+from app.services.transcription.contracts import ProviderName, TimestampMode
+from app.services.transcription.errors import TranscriptionConfigurationError
+from app.services.transcription.registry import PROVIDER_BUILDERS
+from app.services.transcription.registry import get_provider as _get_provider
 from app.services.transcription.types import TranscriptionConfig
 
-if TYPE_CHECKING:
-    from app.services.transcription.provider import TranscriptionProvider
-
-logger = logging.getLogger(__name__)
-
-_gpu_client: TranscriptionProvider | None = None
+_gpu_client = None  # legacy test/integration symbol; registry instances are fresh
 
 
-def _get_gpu_client(backend: TranscriptionBackend) -> TranscriptionProvider:
-    global _gpu_client
-    if _gpu_client is None:
-        from app.services.transcription.gpu_client import GpuTranscriptionClient
-
-        _gpu_client = GpuTranscriptionClient(backend=backend)
-    return _gpu_client
+def get_provider(user_tier: UserTier | None = None, provider: str | ProviderName | None = None):
+    return _get_provider(settings, provider)
 
 
-def _validate_runpod_config() -> None:
-    """Fail fast if RunPod is selected but credentials are missing."""
-    missing = []
-    if not settings.RUNPOD_API_KEY:
-        missing.append("RUNPOD_API_KEY")
-    if not settings.RUNPOD_ENDPOINT_ID:
-        missing.append("RUNPOD_ENDPOINT_ID")
-    if missing:
-        raise RuntimeError(
-            f"TRANSCRIPTION_BACKEND=runpod but missing required env vars: {', '.join(missing)}. "
-            "Set these in your .env file or environment."
-        )
-
-
-def get_provider(
-    user_tier: UserTier | None = None,
-) -> TranscriptionProvider:
-    """Return the active TranscriptionProvider based on TRANSCRIPTION_BACKEND setting."""
-    backend = settings.TRANSCRIPTION_BACKEND
-
-    if backend == TranscriptionBackend.RUNPOD:
-        _validate_runpod_config()
-
-    return _get_gpu_client(backend)
-
-
-def build_config(
-    user_tier: UserTier | None = None,
-    language: str | None = None,
-    allowed_languages: set[str] | None = None,
-) -> TranscriptionConfig:
-    """Build a TranscriptionConfig with diarization settings from config."""
+def build_config(user_tier: UserTier | None = None, language: str | None = None,
+                 allowed_languages: set[str] | None = None) -> TranscriptionConfig:
+    raw_timestamp = getattr(settings, "TRANSCRIPTION_TIMESTAMP_MODE", "none")
+    if not isinstance(raw_timestamp, str):
+        raw_timestamp = "none"
+    try:
+        timestamp_mode = TimestampMode(raw_timestamp)
+    except ValueError as exc:
+        raise TranscriptionConfigurationError("Unsupported TRANSCRIPTION_TIMESTAMP_MODE", setting="TRANSCRIPTION_TIMESTAMP_MODE") from exc
+    if allowed_languages is None:
+        raw = getattr(settings, "TRANSCRIPTION_ALLOWED_LANGUAGES", "")
+        allowed_languages = {item.strip() for item in raw.split(",") if item.strip()} if isinstance(raw, str) else None
+    configured_language = getattr(settings, "TRANSCRIPTION_LANGUAGE", None)
+    response_format = getattr(settings, "TRANSCRIPTION_RESPONSE_FORMAT", None)
+    model = getattr(settings, "TRANSCRIPTION_MODEL", None)
     return TranscriptionConfig(
         min_speakers=settings.DIARIZATION_MIN_SPEAKERS,
         max_speakers=settings.DIARIZATION_MAX_SPEAKERS,
-        language=language,
+        language=language if language is not None else configured_language,
         allowed_languages=allowed_languages,
+        timestamp_mode=timestamp_mode.value,
+        response_format=response_format if isinstance(response_format, str) else None,
+        speaker_required=bool(getattr(settings, "TRANSCRIPTION_SPEAKER_REQUIRED", False)),
+        model=model if isinstance(model, str) else None,
     )
+
+
+__all__ = ["get_provider", "build_config", "PROVIDER_BUILDERS"]

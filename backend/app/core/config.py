@@ -7,8 +7,6 @@ from dotenv import load_dotenv
 from pydantic import PostgresDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
-from app.models import TranscriptionBackend
-
 # Single .env at the repo root (one file per project, not per service).
 # This file lives at <repo>/backend/app/core/config.py — three parents up = repo root.
 # In Docker, /app/app/core/config.py resolves to /app, where there is no .env;
@@ -90,8 +88,29 @@ class Settings(BaseSettings):
     S3_PUBLIC_URL: str = ""  # Public URL for browser presigned URLs (defaults to S3_ENDPOINT_URL)
     S3_REGION: str = "auto"
 
-    # Transcription Backend Toggle
-    TRANSCRIPTION_BACKEND: TranscriptionBackend = TranscriptionBackend.RUNPOD
+    # Canonical provider selection. TRANSCRIPTION_BACKEND remains a local/RunPod
+    # compatibility alias and is never used to select an alternate provider.
+    TRANSCRIPTION_PROVIDER: Optional[str] = None
+    TRANSCRIPTION_BACKEND: Optional[str] = None
+    TRANSCRIPTION_MODEL: str = "gpt-transcribe"
+    TRANSCRIPTION_API_KEY: str = ""
+    TRANSCRIPTION_LANGUAGE: Optional[str] = None
+    TRANSCRIPTION_ALLOWED_LANGUAGES: str = ""
+    TRANSCRIPTION_TIMESTAMP_MODE: str = "none"
+    TRANSCRIPTION_TIMESTAMP_MODEL: str = "whisper-1"
+    TRANSCRIPTION_RESPONSE_FORMAT: str = "json"
+    TRANSCRIPTION_SPEAKER_REQUIRED: bool = False
+    # OpenAI file uploads stay on the existing single-request path below this
+    # safe threshold. Larger media is converted to deterministic local MP3
+    # chunks before it reaches the provider's 25 MB limit.
+    TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES: int = 20_000_000
+    TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES: int = 15_000_000
+    TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS: float = 600.0
+    TRANSCRIPTION_OPENAI_MAX_CHUNKS: int = 1024
+    TRANSCRIPTION_OPENAI_MAX_RETRIES: int = 2
+    TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS: float = 1.0
+    TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS: float = 8.0
+    TRANSCRIPTION_FFMPEG_TIMEOUT_SECONDS: float = 900.0
 
     # GPU Service (used when TRANSCRIPTION_BACKEND=gpu-local)
     GPU_SERVICE_URL: str = "http://gpu-worker:8001"
@@ -154,6 +173,80 @@ class Settings(BaseSettings):
             raise ValueError("AUTH_COOKIE_SECURE must be true when AUTH_COOKIE_SAMESITE=none")
         if self.AUTH_ENVIRONMENT == "production" and not self.AUTH_COOKIE_SECURE:
             raise ValueError("AUTH_COOKIE_SECURE must be true when AUTH_ENVIRONMENT=production")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_transcription_settings(self) -> "Settings":
+        provider = (self.TRANSCRIPTION_PROVIDER or "").strip()
+        backend = (self.TRANSCRIPTION_BACKEND or "").strip()
+        valid_providers = {"gpu-local", "runpod", "openai-file"}
+        valid_backends = {"gpu-local", "runpod"}
+        if provider and provider not in valid_providers:
+            raise ValueError(f"TRANSCRIPTION_PROVIDER must be one of {sorted(valid_providers)}")
+        if backend and backend not in valid_backends:
+            raise ValueError(f"TRANSCRIPTION_BACKEND must be one of {sorted(valid_backends)}")
+        if provider and backend and provider != backend:
+            raise ValueError(
+                "TRANSCRIPTION_PROVIDER and compatibility TRANSCRIPTION_BACKEND disagree; "
+                "configure one provider explicitly"
+            )
+        selected = provider or backend or "gpu-local"
+        self.TRANSCRIPTION_PROVIDER = selected
+        self.TRANSCRIPTION_BACKEND = selected if selected in valid_backends else None
+
+        if not self.TRANSCRIPTION_MODEL.strip():
+            raise ValueError("TRANSCRIPTION_MODEL must not be empty")
+        if not self.TRANSCRIPTION_TIMESTAMP_MODEL.strip():
+            raise ValueError("TRANSCRIPTION_TIMESTAMP_MODEL must not be empty")
+        if self.TRANSCRIPTION_TIMESTAMP_MODE not in {"none", "segment", "word"}:
+            raise ValueError("TRANSCRIPTION_TIMESTAMP_MODE must be none, segment, or word")
+        if self.TRANSCRIPTION_RESPONSE_FORMAT not in {"json", "verbose_json", "diarized_json"}:
+            raise ValueError(
+                "TRANSCRIPTION_RESPONSE_FORMAT must be json, verbose_json, or diarized_json"
+            )
+        if selected == "openai-file" and not (
+            self.TRANSCRIPTION_API_KEY.strip() or self.OPENAI_API_KEY.strip()
+        ):
+            raise ValueError(
+                "TRANSCRIPTION_API_KEY or OPENAI_API_KEY is required for "
+                "TRANSCRIPTION_PROVIDER=openai-file"
+            )
+        if selected == "runpod" and (not self.RUNPOD_API_KEY.strip() or not self.RUNPOD_ENDPOINT_ID.strip()):
+            raise ValueError(
+                "RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID are required for "
+                "TRANSCRIPTION_PROVIDER=runpod"
+            )
+        if self.TRANSCRIPTION_SPEAKER_REQUIRED:
+            raise ValueError(
+                "TRANSCRIPTION_SPEAKER_REQUIRED requires a provider with cloud_diarization; "
+                "gpu-local, runpod, and first-slice openai-file are not cloud diarization providers"
+            )
+        if selected != "openai-file":
+            return self
+        if not 0 < self.TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES < 25_000_000:
+            raise ValueError(
+                "TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES must be between 1 and 24999999"
+            )
+        if not 0 < self.TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES <= self.TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES:
+            raise ValueError(
+                "TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES must be positive and no larger "
+                "than TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES"
+            )
+        if self.TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS <= 0:
+            raise ValueError("TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS must be greater than zero")
+        if not 0 <= self.TRANSCRIPTION_OPENAI_MAX_RETRIES <= 5:
+            raise ValueError("TRANSCRIPTION_OPENAI_MAX_RETRIES must be between 0 and 5")
+        if self.TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS < 0:
+            raise ValueError("TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS must not be negative")
+        if self.TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS < self.TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS:
+            raise ValueError(
+                "TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS must be at least "
+                "TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS"
+            )
+        if self.TRANSCRIPTION_OPENAI_MAX_CHUNKS <= 0:
+            raise ValueError("TRANSCRIPTION_OPENAI_MAX_CHUNKS must be greater than zero")
+        if self.TRANSCRIPTION_FFMPEG_TIMEOUT_SECONDS <= 0:
+            raise ValueError("TRANSCRIPTION_FFMPEG_TIMEOUT_SECONDS must be greater than zero")
         return self
 
     # Diarization Settings (passed to GPU service via TranscriptionConfig)

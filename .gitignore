@@ -210,3 +210,4 @@ kong/ssl/
 # Local AI runtime state
 .atl/
 .codegraph/
+.playwright-mcp/

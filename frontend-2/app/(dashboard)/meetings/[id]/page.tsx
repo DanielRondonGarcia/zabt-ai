@@ -110,6 +110,7 @@ export default function MeetingDetailPage({
       && meeting.id === Number(id)
       && activeTab === "transcript"
       && meeting.status === "completed"
+      && meeting.segments?.length
       && (meeting.audio_url || meeting.file_path)
   );
 
@@ -305,6 +306,7 @@ export default function MeetingDetailPage({
   };
 
   const transcriptSegmentCount = meeting.segments?.length ?? 0;
+  const hasTranscriptText = Boolean(meeting.transcript_text?.trim());
 
   return (
     <div className="relative flex flex-col h-full overflow-hidden">
@@ -671,7 +673,9 @@ export default function MeetingDetailPage({
                       <p className="mt-1 text-sm text-muted-foreground" aria-live="polite">
                         {transcriptSegmentCount > 0
                           ? `${transcriptSegmentCount} ${transcriptSegmentCount === 1 ? "segment" : "segments"}`
-                          : "No transcript available yet"}
+                          : hasTranscriptText
+                            ? "Text transcript without timestamped segments"
+                            : "No transcript available yet"}
                       </p>
                     </div>
                     {shouldMountMediaPlayer && (
@@ -749,7 +753,11 @@ export default function MeetingDetailPage({
                         <TranscriptViewer segments={meeting.segments} isFreeTier={isFreeTier} />
                       )
                     ) : (
-                      <p className="py-6 text-sm italic text-muted-foreground">No transcript available yet.</p>
+                      <TranscriptViewer
+                        segments={meeting.segments ?? []}
+                        transcriptText={meeting.transcript_text}
+                        isFreeTier={isFreeTier}
+                      />
                     )}
                   </div>
                 </aside>

@@ -50,3 +50,7 @@ class TestTranscriptionDefaults:
     def test_gpu_local_timeout_default_supports_long_cpu_jobs(self):
         default = Settings.model_fields["GPU_LOCAL_TIMEOUT"].default
         assert default == 7200
+
+    def test_openai_timestamp_model_defaults_to_whisper(self):
+        default = Settings.model_fields["TRANSCRIPTION_TIMESTAMP_MODEL"].default
+        assert default == "whisper-1"

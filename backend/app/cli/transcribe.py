@@ -10,7 +10,14 @@ import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from app.services.transcription.types import TranscriptionConfig, TranscriptionResult
+from app.services.transcription import (
+    BatchTranscriptionRequest,
+    TimestampMode,
+    build_config,
+    get_provider,
+)
+from app.services.transcription.source import AudioSourceResolver
+from app.services.transcription.types import TranscriptionResult
 
 err_console = Console(stderr=True)
 
@@ -35,14 +42,19 @@ def _print_transcript(result: TranscriptionResult) -> None:
         console.print(f"  {seg.text}")
 
     console.print("\n" + "-" * 40)
-    dur_min = int(result.audio_duration_seconds // 60)
-    dur_sec = result.audio_duration_seconds % 60
+    if result.audio_duration_seconds is None:
+        duration = "unknown"
+    else:
+        dur_min = int(result.audio_duration_seconds // 60)
+        dur_sec = result.audio_duration_seconds % 60
+        duration = f"{dur_min}m {dur_sec:.0f}s"
+    cost = "unknown" if result.estimated_cost is None else f"${result.estimated_cost:.4f}"
     console.print(
         f"Language: {result.language}  |  "
         f"Segments: {len(result.segments)}  |  "
-        f"Duration: {dur_min}m {dur_sec:.0f}s  |  "
+        f"Duration: {duration}  |  "
         f"Provider: {result.provider_name}  |  "
-        f"Cost: ${result.estimated_cost:.4f}"
+        f"Cost: {cost}"
     )
 
 
@@ -82,11 +94,17 @@ def transcribe(
     log_level = logging.INFO if verbose else logging.WARNING
     logging.basicConfig(level=log_level, format="%(name)s — %(message)s")
 
-    # Import provider (lazy to avoid heavy imports until needed)
-    from app.services.transcription import get_provider
-
-    provider = get_provider()
-    tx_config = TranscriptionConfig()
+    tx_config = build_config()
+    request = BatchTranscriptionRequest(
+        source=AudioSourceResolver.local_path(file),
+        language=tx_config.language,
+        allowed_languages=frozenset(tx_config.allowed_languages) if tx_config.allowed_languages else None,
+        transcription_type=tx_config.transcription_type,
+        timestamp_mode=TimestampMode(tx_config.timestamp_mode),
+        speaker_required=tx_config.speaker_required,
+        response_format=tx_config.response_format,
+        model=tx_config.model,
+    )
 
     # Run transcription with progress indicator
     try:
@@ -113,35 +131,32 @@ def transcribe(
                 return f"{prefix} Transcribing audio... {detail}"
             return f"{prefix} {stage}" if prefix else stage
 
-        if json_output:
-            last_stage = {"value": ""}
-
-            def on_status_change(stage: str) -> None:
-                label = _resolve_label(stage)
-                # Avoid repeating identical lines in JSON mode
-                if not stage.startswith(last_stage["value"]):
-                    err_console.print(f"  {label}")
-                last_stage["value"] = stage.split(" (")[0]
-
-            err_console.print("[dim]Processing...[/dim]")
-            result = provider.process_audio(
-                str(file), config=tx_config, on_status_change=on_status_change
-            )
-        else:
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                console=Console(stderr=True),
-                transient=True,
-            ) as progress:
-                task = progress.add_task("Initializing...", total=None)
+        with get_provider() as provider:
+            if json_output:
+                last_stage = {"value": ""}
 
                 def on_status_change(stage: str) -> None:
-                    progress.update(task, description=_resolve_label(stage))
+                    label = _resolve_label(stage)
+                    # Avoid repeating identical lines in JSON mode
+                    if not stage.startswith(last_stage["value"]):
+                        err_console.print(f"  {label}")
+                    last_stage["value"] = stage.split(" (")[0]
 
-                result = provider.process_audio(
-                    str(file), config=tx_config, on_status_change=on_status_change
-                )
+                err_console.print("[dim]Processing...[/dim]")
+                result = provider.transcribe(request, on_status_change=on_status_change)
+            else:
+                with Progress(
+                    SpinnerColumn(),
+                    TextColumn("[progress.description]{task.description}"),
+                    console=Console(stderr=True),
+                    transient=True,
+                ) as progress:
+                    task = progress.add_task("Initializing...", total=None)
+
+                    def on_status_change(stage: str) -> None:
+                        progress.update(task, description=_resolve_label(stage))
+
+                    result = provider.transcribe(request, on_status_change=on_status_change)
     except FileNotFoundError as e:
         err_console.print(f"[bold red]Error:[/bold red] {e}")
         raise typer.Exit(code=1)

@@ -14,6 +14,7 @@ fake_config.settings = SimpleNamespace()
 sys.modules["app.core.config"] = fake_config
 
 from app.models import TranscriptionBackend
+from app.services.transcription.errors import UnsupportedCapabilityError
 
 
 from app.services.transcription.gpu_client import GpuTranscriptionClient
@@ -22,14 +23,14 @@ from app.services.transcription.gpu_client import GpuTranscriptionClient
 gpu_client_module = sys.modules["app.services.transcription.gpu_client"]
 
 
-def _transcription_config(storage_key: str) -> SimpleNamespace:
+def _transcription_config(storage_key: str, transcription_type: str = "general") -> SimpleNamespace:
     return SimpleNamespace(
         storage_key=storage_key,
         min_speakers=1,
         max_speakers=10,
         language=None,
         allowed_languages=None,
-        transcription_type=SimpleNamespace(value="general"),
+        transcription_type=SimpleNamespace(value=transcription_type),
     )
 
 
@@ -138,6 +139,45 @@ def test_runpod_backend_uses_public_presigned_download_url():
             "transcription_type": "general",
         }
     )
+
+
+def test_runpod_medical_request_preserves_mediasr_wire_type():
+    client = GpuTranscriptionClient.__new__(GpuTranscriptionClient)
+    client._backend = TranscriptionBackend.RUNPOD
+    client._poll_interval = 0
+    client._timeout = 60
+    client._submit = MagicMock(return_value="job-1")
+    client._poll = MagicMock(return_value=("COMPLETED", {"text": "ok", "segments": []}, None))
+    storage = MagicMock()
+    storage.get_public_presigned_download_url.return_value = "https://public.example/audio"
+
+    with patch.dict(
+        sys.modules,
+        {"app.services.storage": SimpleNamespace(storage=storage)},
+    ):
+        client.process_audio(
+            "/tmp/audio.wav",
+            config=_transcription_config("media/audio.wav", transcription_type="medical"),
+        )
+
+    client._submit.assert_called_once_with(
+        {
+            "audio_url": "https://public.example/audio",
+            "min_speakers": 1,
+            "max_speakers": 10,
+            "transcription_type": "medical",
+        }
+    )
+
+
+def test_gpu_realtime_remains_explicitly_unsupported():
+    client = GpuTranscriptionClient.__new__(GpuTranscriptionClient)
+    client._backend = TranscriptionBackend.GPU_LOCAL
+    with pytest.raises(UnsupportedCapabilityError) as raised:
+        import asyncio
+
+        asyncio.run(client.transcribe_chunk(b"audio"))
+    assert raised.value.capability == "realtime"
 
 
 def test_local_long_job_times_out_with_local_setting_and_preserves_polling():

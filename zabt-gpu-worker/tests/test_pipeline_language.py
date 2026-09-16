@@ -38,3 +38,33 @@ def test_validate_and_force_uses_explicit_force_over_detection():
     )
     assert final.code == "ur"
     assert final.was_forced is True
+
+
+def test_medical_jobs_keep_the_medasr_pipeline_route(monkeypatch):
+    from src.pipeline import PipelineConfig, run_pipeline
+
+    called = {}
+
+    def fake_medasr(audio_path, config, model, callback):
+        called["config"] = config
+        return {"segments": []}, "en"
+
+    def fail_whisper(*args):
+        raise AssertionError("medical jobs must not enter WhisperX")
+
+    monkeypatch.setattr("src.pipeline._transcribe_medasr", fake_medasr)
+    monkeypatch.setattr("src.pipeline._transcribe_whisperx", fail_whisper)
+    result = run_pipeline(
+        "fixture.wav",
+        PipelineConfig(
+            device="cpu",
+            compute_type="int8",
+            whisper_model_name="base",
+            diarization_model_name="unused",
+            hf_token="",
+            transcription_type="medical",
+        ),
+    )
+
+    assert result["language"] == "en"
+    assert called["config"].transcription_type == "medical"

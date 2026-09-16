@@ -1,0 +1,245 @@
+change: modular-transcription-providers
+phase: verify
+artifact_store: openspec
+last_updated: 2026-09-14
+next_recommended: verify
+blocker: Credential-gated external WAV/MP3 conformance prerequisites are unavailable; verification remains incomplete.
+artifacts:
+  exploration: true
+  research: true
+  proposal: true
+  specs: true
+  design: true
+  tasks: true
+  apply_progress: true
+  verify_report: true
+tasks_progress:
+  completed:
+    - 1.1
+    - 1.2
+    - 1.3
+    - 1.4
+    - 2.1
+    - 2.2
+    - 3.1
+    - 3.2
+    - 3.3
+    - 4.1
+    - 4.2
+    - 4.3
+    - 4.4
+    - 5.1
+    - 5.2
+  pending: []
+research:
+  selected: true
+  revision: 4
+  outcome: done
+  status: success
+  artifact: openspec/changes/modular-transcription-providers/research.md
+  next_recommended: product-discovery
+  blocker: null
+  selected_request:
+    source_classes:
+      - documentation
+      - open-web
+    questions:
+      - Q1
+      - Q2
+      - Q3
+      - Q4
+      - Q5
+      - Q6
+    intent:
+      - official batch/file model identifiers and API contract
+      - first conformance candidate and configurable comparison candidate
+      - timestamps, duration, language, diarization boundaries, file formats, and observed pricing
+      - separate batch versus realtime capability boundary
+      - official Ollama compatibility boundary
+      - first-slice conformance fixture and acceptance matrix
+    deferred_non_blocking_questions:
+      - exact retry and cancellation semantics
+      - full privacy and retention policy
+      - medical transcription parity and handling
+      - generic OpenAI-compatible base_url audio behavior
+      - production quality and latency benchmarking
+  admission:
+    capability: gentle-ai.sdd-research-capability/v1
+    requested_grants:
+      documentation:
+        - firecrawl:01a0a192-b123-771c-92c8-70290e23599b
+        - firecrawl:01a0a192-b1a3-76d6-96da-e4d48f4dfddc
+        - firecrawl:01a0a192-b33d-74ab-86d4-66c6b502ea00
+        - firecrawl:01a0a189-1bbb-77ff-a824-a9421250f8fd
+        - firecrawl:01a0a189-a6f8-7325-867e-f305964fde69
+        - firecrawl:01a0a189-a83f-7103-83af-dbd507f53eb8
+        - firecrawl:01a0a189-1ad4-70dd-bab9-c5ae9fc3c049
+      open-web:
+        - firecrawl:01a0a192-b123-771c-92c8-70290e23599b
+        - firecrawl:01a0a192-b1a3-76d6-96da-e4d48f4dfddc
+        - firecrawl:01a0a192-b33d-74ab-86d4-66c6b502ea00
+        - firecrawl:01a0a189-1bbb-77ff-a824-a9421250f8fd
+        - firecrawl:01a0a189-a6f8-7325-867e-f305964fde69
+        - firecrawl:01a0a189-a83f-7103-83af-dbd507f53eb8
+        - firecrawl:01a0a189-1ad4-70dd-bab9-c5ae9fc3c049
+    exact_grants:
+      documentation:
+        - firecrawl:01a0a192-b123-771c-92c8-70290e23599b
+        - firecrawl:01a0a192-b1a3-76d6-96da-e4d48f4dfddc
+        - firecrawl:01a0a192-b33d-74ab-86d4-66c6b502ea00
+        - firecrawl:01a0a189-1bbb-77ff-a824-a9421250f8fd
+        - firecrawl:01a0a189-a6f8-7325-867e-f305964fde69
+        - firecrawl:01a0a189-a83f-7103-83af-dbd507f53eb8
+        - firecrawl:01a0a189-1ad4-70dd-bab9-c5ae9fc3c049
+      open-web:
+        - firecrawl:01a0a192-b123-771c-92c8-70290e23599b
+        - firecrawl:01a0a192-b1a3-76d6-96da-e4d48f4dfddc
+        - firecrawl:01a0a192-b33d-74ab-86d4-66c6b502ea00
+        - firecrawl:01a0a189-1bbb-77ff-a824-a9421250f8fd
+        - firecrawl:01a0a189-a6f8-7325-867e-f305964fde69
+        - firecrawl:01a0a189-a83f-7103-83af-dbd507f53eb8
+        - firecrawl:01a0a189-1ad4-70dd-bab9-c5ae9fc3c049
+    observed_grants:
+      documentation:
+        - firecrawl:01a0a192-b123-771c-92c8-70290e23599b
+        - firecrawl:01a0a192-b1a3-76d6-96da-e4d48f4dfddc
+        - firecrawl:01a0a192-b33d-74ab-86d4-66c6b502ea00
+        - firecrawl:01a0a189-1bbb-77ff-a824-a9421250f8fd
+        - firecrawl:01a0a189-a6f8-7325-867e-f305964fde69
+        - firecrawl:01a0a189-a83f-7103-83af-dbd507f53eb8
+        - firecrawl:01a0a189-1ad4-70dd-bab9-c5ae9fc3c049
+      open-web:
+        - firecrawl:01a0a192-b123-771c-92c8-70290e23599b
+        - firecrawl:01a0a192-b1a3-76d6-96da-e4d48f4dfddc
+        - firecrawl:01a0a192-b33d-74ab-86d4-66c6b502ea00
+        - firecrawl:01a0a189-1bbb-77ff-a824-a9421250f8fd
+        - firecrawl:01a0a189-a6f8-7325-867e-f305964fde69
+        - firecrawl:01a0a189-a83f-7103-83af-dbd507f53eb8
+        - firecrawl:01a0a189-1ad4-70dd-bab9-c5ae9fc3c049
+    admitted_source_class:
+      - documentation
+      - open-web
+    access_policy: User-authorized Firecrawl first-party source IDs only.
+    rejected_source_classes: []
+    blocker: null
+  evidence_references:
+    openspec:
+      exploration: openspec/changes/modular-transcription-providers/exploration.md
+      research: openspec/changes/modular-transcription-providers/research.md
+    engram: []
+  product_decisions:
+    status: confirmed
+    items:
+      - First batch candidate is `gpt-transcribe`, configurable through the transcription provider/model environment settings.
+      - `SPEAKER_UNKNOWN` is accepted for the first batch slice; the normalizer must not fabricate speaker labels.
+      - If speakers are required later, diarization is a cloud-provider responsibility; providers without cloud diarization are not eligible for that mode.
+      - Medical transcription remains on the existing local/RunPod MedASR path; OpenAI general transcription does not replace it.
+      - Realtime transcription remains excluded from the first batch implementation slice.
+  proposal_ready: true
+  follow_up:
+    reason: Research and product decisions are complete for the selected first batch implementation slice.
+    next_action: Launch sdd-propose with the confirmed product handoff.
+  readiness:
+    evidence_valid: true
+    research_done: true
+    decisions_confirmed: true
+    evidence_references_valid: true
+    selected_store_ready: true
+preproposal:
+  schema: gentle-ai.sdd-preproposal/v1
+  schemaVersion: 1
+  revision: 4
+  exploration:
+    outcome: explored
+    reference:
+      store: openspec
+      path: openspec/changes/modular-transcription-providers/exploration.md
+  research_request:
+    selected: true
+    source_classes:
+      - documentation
+      - open-web
+    questions:
+      - Q1
+      - Q2
+      - Q3
+      - Q4
+      - Q5
+      - Q6
+    selected_intent:
+      - official batch/file model identifiers and API contract
+      - first conformance candidate and configurable comparison candidate
+      - timestamps, duration, language, diarization boundaries, file formats, and observed pricing
+      - separate batch versus realtime capability boundary
+      - official Ollama compatibility boundary
+      - first-slice conformance fixture and acceptance matrix
+    deferred_non_blocking_questions:
+      - exact retry and cancellation semantics
+      - full privacy and retention policy
+      - medical transcription parity and handling
+      - generic OpenAI-compatible base_url audio behavior
+      - production quality and latency benchmarking
+  admission:
+    capability: gentle-ai.sdd-research-capability/v1
+    exact_grants:
+      documentation:
+        - firecrawl:01a0a192-b123-771c-92c8-70290e23599b
+        - firecrawl:01a0a192-b1a3-76d6-96da-e4d48f4dfddc
+        - firecrawl:01a0a192-b33d-74ab-86d4-66c6b502ea00
+        - firecrawl:01a0a189-1bbb-77ff-a824-a9421250f8fd
+        - firecrawl:01a0a189-a6f8-7325-867e-f305964fde69
+        - firecrawl:01a0a189-a83f-7103-83af-dbd507f53eb8
+        - firecrawl:01a0a189-1ad4-70dd-bab9-c5ae9fc3c049
+      open-web:
+        - firecrawl:01a0a192-b123-771c-92c8-70290e23599b
+        - firecrawl:01a0a192-b1a3-76d6-96da-e4d48f4dfddc
+        - firecrawl:01a0a192-b33d-74ab-86d4-66c6b502ea00
+        - firecrawl:01a0a189-1bbb-77ff-a824-a9421250f8fd
+        - firecrawl:01a0a189-a6f8-7325-867e-f305964fde69
+        - firecrawl:01a0a189-a83f-7103-83af-dbd507f53eb8
+        - firecrawl:01a0a189-1ad4-70dd-bab9-c5ae9fc3c049
+    observed_grants:
+      documentation:
+        - firecrawl:01a0a192-b123-771c-92c8-70290e23599b
+        - firecrawl:01a0a192-b1a3-76d6-96da-e4d48f4dfddc
+        - firecrawl:01a0a192-b33d-74ab-86d4-66c6b502ea00
+        - firecrawl:01a0a189-1bbb-77ff-a824-a9421250f8fd
+        - firecrawl:01a0a189-a6f8-7325-867e-f305964fde69
+        - firecrawl:01a0a189-a83f-7103-83af-dbd507f53eb8
+        - firecrawl:01a0a189-1ad4-70dd-bab9-c5ae9fc3c049
+      open-web:
+        - firecrawl:01a0a192-b123-771c-92c8-70290e23599b
+        - firecrawl:01a0a192-b1a3-76d6-96da-e4d48f4dfddc
+        - firecrawl:01a0a192-b33d-74ab-86d4-66c6b502ea00
+        - firecrawl:01a0a189-1bbb-77ff-a824-a9421250f8fd
+        - firecrawl:01a0a189-a6f8-7325-867e-f305964fde69
+        - firecrawl:01a0a189-a83f-7103-83af-dbd507f53eb8
+        - firecrawl:01a0a189-1ad4-70dd-bab9-c5ae9fc3c049
+    admitted_source_class:
+      - documentation
+      - open-web
+    access_policy: User-authorized Firecrawl first-party source IDs only.
+    rejected_source_classes: []
+    blocker: null
+  outcome: done
+  evidence_references:
+    openspec:
+      exploration: openspec/changes/modular-transcription-providers/exploration.md
+      research: openspec/changes/modular-transcription-providers/research.md
+    engram: []
+  product_decisions:
+    status: confirmed
+    items:
+      - First batch candidate is `gpt-transcribe`, configurable through the transcription provider/model environment settings.
+      - `SPEAKER_UNKNOWN` is accepted for the first batch slice; the normalizer must not fabricate speaker labels.
+      - If speakers are required later, diarization is a cloud-provider responsibility; providers without cloud diarization are not eligible for that mode.
+      - Medical transcription remains on the existing local/RunPod MedASR path; OpenAI general transcription does not replace it.
+      - Realtime transcription remains excluded from the first batch implementation slice.
+  proposal_ready: true
+  next_recommended: tasks
+  readiness:
+    evidence_valid: true
+    research_done: true
+    decisions_confirmed: true
+    evidence_references_valid: true
+    selected_store_ready: true

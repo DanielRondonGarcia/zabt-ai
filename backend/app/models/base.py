@@ -14,6 +14,8 @@ class TranscriptionType(str, Enum):
 
 
 class TranscriptionBackend(str, Enum):
+    """Compatibility enum for the existing local and RunPod transports."""
+
     RUNPOD = "runpod"
     GPU_LOCAL = "gpu-local"
 
@@ -194,6 +196,8 @@ class TranscriptSegment(SQLModel, table=True):
     start_time: float
     end_time: float
     text: str
+    # Provider normalizers use SPEAKER_UNKNOWN when labels are unavailable;
+    # nullable storage remains compatible with existing transcript rows.
     speaker: Optional[str] = None
     words: List[dict] = Field(default_factory=list, sa_column=Column(JSONB))
 

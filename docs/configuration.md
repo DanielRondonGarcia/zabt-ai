@@ -76,7 +76,7 @@ intentionally unavailable without a configured delivery provider.
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `OPENAI_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint, including Ollama Cloud. |
-| `OPENAI_API_KEY` | — | **REQUIRED for a remote summary endpoint.** It remains independent from visual inference; keep it separate from auth settings. |
+| `OPENAI_API_KEY` | — | **REQUIRED for a remote summary endpoint.** It is also the default shared credential for `openai-file` when `TRANSCRIPTION_API_KEY` is empty; use a credential accepted by the official OpenAI API for that path. It remains independent from visual inference and auth settings. |
 | `OPENAI_MODEL` | `google/gemini-3.1-flash-lite-preview` | Model id understood by your endpoint. |
 
 ## Object storage
@@ -94,18 +94,97 @@ intentionally unavailable without a configured delivery provider.
 
 ## Transcription
 
+Transcription provider selection, model, and options are independent from the summary and vision
+endpoint settings. Copy `.env.example` to `.env`, choose one provider, and pass the same
+`TRANSCRIPTION_*` values to the API and worker. For `openai-file`, `TRANSCRIPTION_API_KEY` is an
+optional override; when it is empty, the provider uses `OPENAI_API_KEY`. The audio client always
+uses the official OpenAI endpoint and never inherits `OPENAI_BASE_URL`. Provider errors are
+surfaced explicitly; the registry never silently switches to another provider.
+
+### Provider selection and file options
+
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `TRANSCRIPTION_BACKEND` | `gpu-local` | `gpu-local` (bundled worker) or `runpod`. |
+| `TRANSCRIPTION_PROVIDER` | `gpu-local` | `gpu-local`, `runpod`, or `openai-file`. This is the canonical selector. |
+| `TRANSCRIPTION_BACKEND` | — | Compatibility alias for `gpu-local`/`runpod` only. Do not set it to a different value from `TRANSCRIPTION_PROVIDER`. |
+| `TRANSCRIPTION_MODEL` | `gpt-transcribe` | OpenAI file candidates are `gpt-transcribe` and `gpt-4o-mini-transcribe`; model choice is explicit and configurable. GPU/RunPod model selection remains in their worker settings. |
+| `TRANSCRIPTION_API_KEY` | — | Optional credential override for `openai-file`; when empty, `OPENAI_API_KEY` is used. The audio client still uses the official OpenAI endpoint, not `OPENAI_BASE_URL`. Never put a credential in the repository. |
+| `TRANSCRIPTION_LANGUAGE` | — | Optional language sent to the selected provider. |
+| `TRANSCRIPTION_ALLOWED_LANGUAGES` | — | Optional comma-separated Whisper/provider language hints. |
+| `TRANSCRIPTION_TIMESTAMP_MODE` | `none` | `none`, `segment`, or `word`. `word` enables word highlighting and the optional timestamp pass. |
+| `TRANSCRIPTION_TIMESTAMP_MODEL` | `whisper-1` | Model used only by the optional timestamp pass. The primary `TRANSCRIPTION_MODEL` remains the text/summary model. |
+| `TRANSCRIPTION_RESPONSE_FORMAT` | `json` | Format for the primary text request. It may remain `json`; the separate timestamp request always uses `verbose_json`. |
+| `TRANSCRIPTION_SPEAKER_REQUIRED` | `false` | The first-slice providers do not advertise cloud diarization, so `true` is rejected before audio submission. Missing optional speakers remain `SPEAKER_UNKNOWN`. |
+| `TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES` | `20000000` | Safe threshold for retaining the existing one-request path; must remain below OpenAI's 25 MB file limit. |
+| `TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES` | `15000000` | Post-FFmpeg chunk-size guard; a larger generated chunk fails with an actionable preparation error. |
+| `TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS` | `600` | Target duration for deterministic mono 16 kHz MP3 chunks. |
+| `TRANSCRIPTION_OPENAI_MAX_CHUNKS` | `1024` | Bounded protection against unexpectedly long media. |
+| `TRANSCRIPTION_OPENAI_MAX_RETRIES` | `2` | Additional attempts for transient OpenAI connection, 408, 429, and 5xx failures; the SDK's automatic retries are disabled. |
+| `TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS` / `TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS` | `1` / `8` | Bounded exponential retry delay in seconds. |
+| `TRANSCRIPTION_FFMPEG_TIMEOUT_SECONDS` | `900` | Timeout for each FFmpeg/ffprobe preparation command. |
+
+Examples:
+
+```dotenv
+# Default local GPU path; the existing RunPod wire contract remains available.
+TRANSCRIPTION_PROVIDER=gpu-local
+# TRANSCRIPTION_PROVIDER=runpod
+# TRANSCRIPTION_API_KEY=  # optional override; empty uses OPENAI_API_KEY
+
+# Explicit general OpenAI file transcription (not medical or realtime).
+# TRANSCRIPTION_PROVIDER=openai-file
+# TRANSCRIPTION_MODEL=gpt-transcribe
+# TRANSCRIPTION_API_KEY=your-transcription-openai-key
+# TRANSCRIPTION_RESPONSE_FORMAT=json
+# TRANSCRIPTION_TIMESTAMP_MODEL=whisper-1
+# TRANSCRIPTION_TIMESTAMP_MODE=word
+# TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES=20000000
+# TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES=15000000
+# TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS=600
+```
+
+`openai-file` submits a local supported audio/media file (including WAV/MP3/MP4 and other documented
+suffixes) through the official file-transcription API. Files at or below the safe single-request threshold retain the existing
+path. Larger files are decoded locally with the FFmpeg/ffprobe toolchain, converted to mono 16 kHz
+MP3, split into deterministic chunks, validated before upload, transcribed sequentially, and
+merged with absolute offsets. Temporary chunks are deleted on success or failure; chunk names are
+deterministic within one task workspace, but cross-restart resume is not persisted because this
+correction does not add a database/schema migration. FFmpeg is installed in the backend API/worker
+image. When `TRANSCRIPTION_TIMESTAMP_MODE` is `segment` or `word`, each file/chunk is submitted
+twice: the configured primary model (normally `gpt-transcribe`) supplies canonical text and usage,
+then `whisper-1` supplies playback timing with `verbose_json`. This adds one OpenAI request and
+its associated latency/cost per file/chunk; a failed timestamp pass preserves primary text and
+records a capability gap instead of claiming synchronized words. It is a general batch provider:
+realtime is not exposed, cloud medical parity is not claimed, and `gpt-4o-transcribe-diarize` is a
+future-only candidate until a separate capability contract is verified. The shared credential-gated
+fixture lives under `backend/tests/fixtures/transcription/`; it never stores private audio.
+
+Ollama remains supported for the separate visual/LLM paths where their settings say so, but it is
+not registered as an audio transcription provider. Generic OpenAI-compatible `base_url` audio is
+also not assumed: `OPENAI_BASE_URL` configures summarization only, and an unverified audio provider
+selection is rejected rather than routed through another endpoint.
+
+### Local, RunPod, and medical settings
+
+These settings preserve the existing local/RunPod transport and MedASR path:
+
+| Variable | Default | Notes |
+|----------|---------|-------|
 | `GPU_SERVICE_URL` | `http://worker-gpu:8001` | Local GPU worker URL. |
 | `WHISPER_MODEL` | `large-v3` | `tiny`/`base`/`small`/`medium`/`large-v3`. Smaller = faster/less VRAM. |
 | `DIARIZATION_MODEL` | `pyannote/speaker-diarization-3.1` | Gated on HF — accept terms. |
 | `MEDASR_MODEL` | `google/medasr` | Optional medical ASR model. |
 | `HF_TOKEN` | — | **REQUIRED for diarization.** Accept the pyannote gate first. |
 | `DIARIZATION_MIN_SPEAKERS` / `DIARIZATION_MAX_SPEAKERS` | `1` / `10` | Speaker-count bounds. |
-| `RUNPOD_API_KEY` / `RUNPOD_ENDPOINT_ID` | — | Used when `TRANSCRIPTION_BACKEND=runpod`. |
+| `RUNPOD_API_KEY` / `RUNPOD_ENDPOINT_ID` | — | Used when `TRANSCRIPTION_PROVIDER=runpod` (or the compatibility alias selects it). |
 | `RUNPOD_POLL_INTERVAL` / `RUNPOD_TIMEOUT` | `5` / `1800` | RunPod poll cadence / job timeout (s). |
 | `GPU_LOCAL_TIMEOUT` | `7200` | Local `gpu-local` worker job timeout (s), including CPU-only transcription. Change it in `.env` and recreate the backend `worker` with `--no-build`; no image rebuild is required. |
+
+Medical transcription stays on local/RunPod MedASR. Selecting `openai-file` for a medical request
+fails explicitly; it does not claim medical parity or replace the existing path. No database or
+transcript-schema migration is needed for provider selection, and rollback is configuration-only:
+set `TRANSCRIPTION_PROVIDER=gpu-local` or `TRANSCRIPTION_PROVIDER=runpod` with the corresponding
+existing settings.
 
 ## Visual breakdown (optional; profile `vision`)
 

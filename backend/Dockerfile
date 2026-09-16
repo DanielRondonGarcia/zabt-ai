@@ -4,8 +4,10 @@
 # ============================================================
 FROM python:3.11-slim AS api
 
-# System dependencies: PostgreSQL runtime + WeasyPrint (Pango/HarfBuzz) + Noto fonts
+# System dependencies: FFmpeg for bounded OpenAI long-file preparation,
+# PostgreSQL runtime + WeasyPrint (Pango/HarfBuzz) + Noto fonts
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
     libpq5 \
     libpango-1.0-0 \
     libpangoft2-1.0-0 \

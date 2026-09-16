@@ -118,12 +118,28 @@ function SegmentRow({
 
 export function TranscriptViewer({
     segments,
+    transcriptText,
     isFreeTier = false,
 }: {
     segments: TranscriptSegment[];
+    transcriptText?: string | null;
     isFreeTier?: boolean;
 }) {
     if (!segments || segments.length === 0) {
+        if (transcriptText?.trim()) {
+            return (
+                <article className="space-y-3 py-4">
+                    <div className="rounded-lg border border-border bg-muted/50 px-3.5 py-2.5">
+                        <p className="text-xs leading-relaxed text-muted-foreground">
+                            Text transcript without timestamped segments. Seeking is unavailable.
+                        </p>
+                    </div>
+                    <p className="break-words whitespace-pre-wrap text-sm leading-relaxed text-foreground">
+                        {transcriptText}
+                    </p>
+                </article>
+            );
+        }
         return <p className="py-4 text-sm text-muted-foreground">No transcript available.</p>;
     }
 

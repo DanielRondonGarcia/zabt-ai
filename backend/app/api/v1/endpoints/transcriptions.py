@@ -8,6 +8,7 @@ from app.models import User
 from app.core import security
 from app.core.config import settings
 from app.services.transcription import get_provider
+from app.services.transcription.errors import UnsupportedCapabilityError
 from app.services.meeting import meeting_service
 import time
 
@@ -67,9 +68,17 @@ async def websocket_endpoint(
         await websocket.close(code=1008)
         return
 
-    provider = get_provider()
+    provider = None
 
     try:
+        provider = get_provider()
+        if not getattr(provider, "capabilities", None) or not provider.capabilities.realtime:
+            raise UnsupportedCapabilityError(
+                "realtime",
+                getattr(provider, "provider_name", "unknown"),
+                getattr(provider, "model", None),
+                "The configured transcription provider is batch-only; realtime is not implemented",
+            )
         while True:
             # Check for binary audio data
             data = await websocket.receive_bytes()
@@ -98,8 +107,13 @@ async def websocket_endpoint(
                     "is_final": True,
                 })
 
+    except UnsupportedCapabilityError as exc:
+        await websocket.close(code=1003, reason=str(exc))
     except WebSocketDisconnect:
         print(f"Client disconnected from meeting {meeting_id}")
     except Exception as e:
         print(f"WebSocket error: {e}")
         await websocket.close()
+    finally:
+        if provider is not None:
+            provider.close()

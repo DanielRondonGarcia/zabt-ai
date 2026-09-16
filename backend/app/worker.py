@@ -23,14 +23,20 @@ from app.db.engine import engine
 from app.models import (
     Meeting,
     TranscriptSegment,
-    TranscriptionBackend,
     TranscriptionType,
     User,
     VisualSegment,
 )
 from app.services.meeting import meeting_service
 from app.services.storage import storage
-from app.services.transcription import get_provider, build_config
+from app.services.transcription import (
+    BatchTranscriptionRequest,
+    TimestampMode,
+    build_config,
+    get_provider,
+)
+from app.services.transcription.contracts import ProviderName
+from app.services.transcription.source import AudioSourceResolver
 from app.services.styles import style_service
 from app.services.ai_agent import summarize_transcript
 from app.services.template import template_service
@@ -80,13 +86,19 @@ def send_notification(
 
 # ── Shared temp directory for passing file paths between stages ──────────────
 # Must be a volume shared across all worker replicas — /tmp is per-container.
-TEMP_DIR = os.environ.get("TEMP_DIR", "/media/tmp")  # noqa: env override for non-docker dev
+TEMP_DIR = os.environ.get("TEMP_DIR", "/media/tmp")
 os.makedirs(TEMP_DIR, exist_ok=True)
 
 
-def _temp_path_for(meeting_id: int) -> str:
-    """Return the conventional temp file path for a meeting's downloaded audio."""
-    return os.path.join(TEMP_DIR, f"zabt_meeting_{meeting_id}.audio")
+def _configured_transcription_provider() -> str:
+    value = getattr(settings, "TRANSCRIPTION_PROVIDER", None) or getattr(settings, "TRANSCRIPTION_BACKEND", None)
+    return value.value if hasattr(value, "value") else str(value or ProviderName.GPU_LOCAL.value)
+
+
+def _temp_path_for(meeting_id: int, source_key: str | None = None) -> str:
+    """Return a stable temp path while preserving the source file extension."""
+    suffix = os.path.splitext(source_key or "")[1] or ".audio"
+    return os.path.join(TEMP_DIR, f"zabt_meeting_{meeting_id}{suffix}")
 
 
 # ── Error callback (linked to each stage via link_error) ─────────────────────
@@ -102,6 +114,8 @@ def on_stage_failure(request, exc, traceback):
 
     logger.info("on_stage_failure triggered meeting_id=%s exc=%s", meeting_id, str(exc))
     meeting_service.mark_failed(meeting_id, str(exc))
+
+    failed_meeting = None
 
     # Track failure in PostHog
     try:
@@ -133,10 +147,14 @@ def on_stage_failure(request, exc, traceback):
     except Exception:
         logger.exception("on_stage_failure email lookup failed meeting_id=%s", meeting_id)
 
-    # Clean up temp file if it exists
-    temp_path = _temp_path_for(meeting_id)
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
+    # Clean up temp files for both the legacy suffix and the source suffix.
+    temp_paths = {
+        _temp_path_for(meeting_id),
+        _temp_path_for(meeting_id, getattr(failed_meeting, "file_path", None)),
+    }
+    for temp_path in temp_paths:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 # ── Stage 1: Download ────────────────────────────────────────────────────────
@@ -157,11 +175,11 @@ def stage_download(meeting_id: int) -> int:
             raise ValueError("No S3 file path associated with meeting.")
 
         # RunPod fetches audio directly via presigned URL — skip local download
-        if settings.TRANSCRIPTION_BACKEND == TranscriptionBackend.RUNPOD:
+        if _configured_transcription_provider() == ProviderName.RUNPOD.value:
             logger.info("stage_download skipped (RunPod mode) meeting_id=%s", meeting_id)
         else:
             download_url = storage.get_presigned_download_url(meeting.file_path)
-            temp_audio_path = _temp_path_for(meeting_id)
+            temp_audio_path = _temp_path_for(meeting_id, meeting.file_path)
             urllib.request.urlretrieve(download_url, temp_audio_path)
 
         logger.info("stage_download complete meeting_id=%s owner_id=%s", meeting_id, meeting.owner_id)
@@ -216,10 +234,8 @@ def stage_transcribe(meeting_id: int) -> int:
     """Run the transcription provider pipeline (transcribe + align + diarize)."""
     logger.info("stage_transcribe started meeting_id=%s", meeting_id)
 
-    is_runpod = settings.TRANSCRIPTION_BACKEND == TranscriptionBackend.RUNPOD
+    is_runpod = _configured_transcription_provider() == ProviderName.RUNPOD.value
     temp_audio_path = _temp_path_for(meeting_id)
-    if not is_runpod and not os.path.exists(temp_audio_path):
-        raise FileNotFoundError(f"Temp audio file not found: {temp_audio_path}")
 
     def on_transcribe_progress(stage: str):
         """Callback from provider — updates sub_status for each internal stage."""
@@ -236,6 +252,9 @@ def stage_transcribe(meeting_id: int) -> int:
             meeting = session.get(Meeting, meeting_id)
             if not meeting:
                 raise ValueError(f"Meeting {meeting_id} not found.")
+            temp_audio_path = _temp_path_for(meeting_id, meeting.file_path)
+            if not is_runpod and not os.path.exists(temp_audio_path):
+                raise FileNotFoundError(f"Temp audio file not found: {temp_audio_path}")
 
             # Look up user tier for provider routing
             user: User | None = session.get(User, meeting.owner_id) if meeting.owner_id else None
@@ -247,25 +266,38 @@ def stage_transcribe(meeting_id: int) -> int:
                 session, meeting_id
             )
 
-        # Get the active provider and tier-aware config
-        provider = get_provider(user_tier=user_tier)
+        # Build the provider-neutral request while preserving storage-key
+        # resolution for GPU/RunPod and a local file for OpenAI.
         config = build_config(
             user_tier=user_tier,
             language=forced_lang,
             allowed_languages=allowed_langs or None,
         )
-        config.storage_key = meeting.file_path  # Used by RunPodProvider for presigned URL
         config.transcription_type = meeting.transcription_type or TranscriptionType.GENERAL
 
         meeting_service.update_sub_status(meeting_id, "transcribing")
 
-        # Run the transcription pipeline
-        result = provider.process_audio(
-            temp_audio_path,
-            config=config,
-            on_status_change=on_transcribe_progress,
-            on_heartbeat=on_transcription_heartbeat,
-        )
+        with get_provider(user_tier=user_tier) as provider:
+            source = AudioSourceResolver.resolve_for_provider(
+                temp_audio_path,
+                getattr(provider, "provider_name", _configured_transcription_provider()),
+                storage_key=meeting.file_path,
+            )
+            request = BatchTranscriptionRequest(
+                source=source,
+                language=config.language,
+                allowed_languages=frozenset(config.allowed_languages) if config.allowed_languages else None,
+                transcription_type=config.transcription_type,
+                timestamp_mode=TimestampMode(config.timestamp_mode),
+                speaker_required=config.speaker_required,
+                response_format=config.response_format,
+                model=config.model,
+            )
+            result = provider.transcribe(
+                request,
+                on_status_change=on_transcribe_progress,
+                on_heartbeat=on_transcription_heartbeat,
+            )
 
         # Write segments to DB
         with Session(engine) as session:
@@ -292,7 +324,7 @@ def stage_transcribe(meeting_id: int) -> int:
                     start_time=seg.start,
                     end_time=seg.end,
                     text=seg.text,
-                    speaker=seg.speaker,
+                    speaker=seg.speaker or "SPEAKER_UNKNOWN",
                     words=words_dicts,
                 )
                 session.add(db_segment)
@@ -300,14 +332,14 @@ def stage_transcribe(meeting_id: int) -> int:
             meeting_obj = session.get(Meeting, meeting_id)
             if meeting_obj:
                 meeting_obj.transcript_text = result.text
-                if result.audio_duration_seconds:
+                if result.audio_duration_seconds is not None:
                     meeting_obj.duration_seconds = int(result.audio_duration_seconds)
             session.commit()
 
             # Update minutes used this month
             if user_tier is not None:
                 user_obj = session.get(User, meeting.owner_id) if meeting.owner_id else None
-                if user_obj:
+                if user_obj and result.audio_duration_seconds is not None:
                     user_obj.minutes_used_this_month += ceil(result.audio_duration_seconds / 60)
                     session.add(user_obj)
                     session.commit()
@@ -320,7 +352,9 @@ def stage_transcribe(meeting_id: int) -> int:
         if os.path.exists(temp_audio_path):
             os.remove(temp_audio_path)
 
-    def _duration_tier(seconds: float) -> str:
+    def _duration_tier(seconds: float | None) -> str:
+        if seconds is None:
+            return "unknown"
         if seconds < 600:
             return "short"
         if seconds <= 3600:
@@ -339,12 +373,23 @@ def stage_transcribe(meeting_id: int) -> int:
                 },
             )
             user_obj = session.get(User, meeting_for_analytics.owner_id)
+            duration_minutes = (
+                ceil(result.audio_duration_seconds / 60)
+                if result.audio_duration_seconds is not None
+                else None
+            )
             notify(
                 "transcription_completed",
                 (user_obj.email if user_obj else None) or str(meeting_for_analytics.owner_id),
                 meeting_for_analytics.title,
                 meeting_id=meeting_id,
-                extra={"Duration": f"{ceil(result.audio_duration_seconds / 60)} min"},
+                extra={
+                    "Duration": (
+                        f"{duration_minutes} min"
+                        if duration_minutes is not None
+                        else "unknown"
+                    )
+                },
             )
 
             # Capture language-resolution telemetry (best-effort)
@@ -1359,7 +1404,7 @@ def stage_youtube_download(meeting_id: int) -> int:
                 session.commit()
 
         # Move/rename to the conventional temp path for stage_transcribe
-        conventional_path = _temp_path_for(meeting_id)
+        conventional_path = _temp_path_for(meeting_id, file_key)
         os.rename(audio_path, conventional_path)
 
         logger.info(

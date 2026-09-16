@@ -16,6 +16,7 @@ import httpx
 
 from app.core.config import settings
 from app.models import TranscriptionBackend
+from app.services.transcription.errors import UnsupportedCapabilityError
 from app.services.transcription.types import (
     ResultSegment,
     TranscriptionConfig,
@@ -151,7 +152,17 @@ class GpuTranscriptionClient:
         )
 
     async def transcribe_chunk(self, data: bytes) -> str:
-        raise NotImplementedError("GPU service does not support real-time chunk transcription.")
+        raise UnsupportedCapabilityError(
+            "realtime",
+            self._backend.value,
+            message="GPU transcription is batch-only in this provider contract",
+        )
+
+    def close(self) -> None:
+        http = getattr(self, "_http", None)
+        if http is not None:
+            self._http = None
+            http.close()
 
     # ── Backend-specific methods ──────────────────────────────────────────
 
@@ -228,6 +239,6 @@ class GpuTranscriptionClient:
             segments=segments,
             provider_name=output.get("provider_name", "gpu_whisper"),
             recognition_method=output.get("recognition_method", "gpu_whisperx"),
-            audio_duration_seconds=output.get("audio_duration_seconds", 0.0),
+            audio_duration_seconds=output.get("audio_duration_seconds"),
             estimated_cost=output.get("estimated_cost", 0.0),
         )
