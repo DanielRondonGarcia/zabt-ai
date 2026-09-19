@@ -93,7 +93,9 @@ class Settings(BaseSettings):
     TRANSCRIPTION_PROVIDER: Optional[str] = None
     TRANSCRIPTION_BACKEND: Optional[str] = None
     TRANSCRIPTION_MODEL: str = "gpt-transcribe"
+    TRANSCRIPTION_BASE_URL: str = "https://api.openai.com/v1"
     TRANSCRIPTION_API_KEY: str = ""
+    TRANSCRIPTION_CLOUD_DIARIZATION: bool = False
     TRANSCRIPTION_LANGUAGE: Optional[str] = None
     TRANSCRIPTION_ALLOWED_LANGUAGES: str = ""
     TRANSCRIPTION_TIMESTAMP_MODE: str = "none"
@@ -104,6 +106,10 @@ class Settings(BaseSettings):
     # safe threshold. Larger media is converted to deterministic local MP3
     # chunks before it reaches the provider's 25 MB limit.
     TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES: int = 20_000_000
+    # Custom OpenAI-compatible gateways such as Actsis can opt in to one full
+    # media upload below this threshold. The default 0 keeps official OpenAI
+    # and custom gateways on the existing safe chunking behavior.
+    TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: int = 0
     TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES: int = 15_000_000
     TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS: float = 600.0
     TRANSCRIPTION_OPENAI_MAX_CHUNKS: int = 1024
@@ -125,8 +131,9 @@ class Settings(BaseSettings):
     RUNPOD_POLL_INTERVAL: int = 5
     RUNPOD_TIMEOUT: int = 300
 
-    # Visual breakdown worker (zabt-vision-worker — see Plan 1/2 specs)
-    VISION_BACKEND: str = "local"  # "local" | "runpod"
+    # Visual breakdown runs in the backend/Celery worker. The legacy transport
+    # settings remain accepted for older deployments but are no longer needed.
+    VISION_BACKEND: str = "direct"
     VISION_LOCAL_URL: str = "http://zabt-vision-worker:8003"
     VISION_RUNPOD_ENDPOINT_ID: Optional[str] = None
     VISION_RUNPOD_API_KEY: Optional[str] = None
@@ -141,6 +148,21 @@ class Settings(BaseSettings):
     VISION_EGRESS_POLICY: Literal["deny", "allowlist", "allow"] = "deny"
     VISION_ALLOWED_HOSTS: str = ""
     VISION_SIGNED_URL_EXPIRATION: int = 3600
+    VISION_OPENAI_API_KEY: str = ""
+    VISION_OPENAI_BASE_URL: str = ""
+    VISION_OPENAI_MODEL: str = "gpt-4o-mini"
+    VISION_OPENAI_IMAGE_DETAIL: Literal["low", "auto", "high"] = "low"
+    VISION_OPENAI_MAX_TOKENS: int = 1024
+    VISION_FPS: int = 2
+    VISION_MAX_FRAMES: int = 120
+    VISION_MAX_CANDIDATE_FRAMES: int = 12
+    VISION_MAX_SEGMENTS: int = 20
+    VISION_MAX_FRAME_BYTES: int = 2_000_000
+    VISION_MAX_MEDIA_BYTES: int = 500_000_000
+    VISION_CHANGE_THRESHOLD: float = 0.18
+    VISION_CONFIDENCE_THRESHOLD: float = 0.7
+    VISION_MAX_TRANSCRIPT_CHARS: int = 6000
+    VISION_FFMPEG_TIMEOUT_SECONDS: float = 900.0
 
     # Summary context budgets
     SUMMARY_CHUNK_SECONDS: int = 120
@@ -176,6 +198,41 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_embedding_settings(self) -> "Settings":
+        """Validate embedding provider configuration."""
+        provider = (self.EMBEDDING_PROVIDER or "").strip().lower()
+        valid_providers = {"ollama", "openai"}
+
+        if provider not in valid_providers:
+            raise ValueError(
+                f"EMBEDDING_PROVIDER must be one of {sorted(valid_providers)}, "
+                f"got '{self.EMBEDDING_PROVIDER}'"
+            )
+
+        if provider == "openai":
+            # Only check the explicitly set attributes, not env vars
+            api_key = (self.EMBEDDING_API_KEY or "").strip()
+            if not api_key:
+                # Check if OPENAI_API_KEY was explicitly set on this instance
+                openai_key = (self.OPENAI_API_KEY or "").strip()
+                if not openai_key:
+                    raise ValueError(
+                        "EMBEDDING_API_KEY (or OPENAI_API_KEY) must be set for "
+                        "EMBEDDING_PROVIDER=openai"
+                    )
+
+        if self.EMBEDDING_DIMENSION <= 0:
+            raise ValueError("EMBEDDING_DIMENSION must be a positive integer")
+        if self.EMBEDDING_MAX_BATCH <= 0:
+            raise ValueError("EMBEDDING_MAX_BATCH must be a positive integer")
+
+        base_url = (self.EMBEDDING_BASE_URL or "").strip()
+        if not base_url:
+            raise ValueError("EMBEDDING_BASE_URL must not be empty")
+
+        return self
+
+    @model_validator(mode="after")
     def _validate_transcription_settings(self) -> "Settings":
         provider = (self.TRANSCRIPTION_PROVIDER or "").strip()
         backend = (self.TRANSCRIPTION_BACKEND or "").strip()
@@ -204,22 +261,31 @@ class Settings(BaseSettings):
             raise ValueError(
                 "TRANSCRIPTION_RESPONSE_FORMAT must be json, verbose_json, or diarized_json"
             )
-        if selected == "openai-file" and not (
-            self.TRANSCRIPTION_API_KEY.strip() or self.OPENAI_API_KEY.strip()
-        ):
+        transcription_base_url = self.TRANSCRIPTION_BASE_URL.rstrip("/")
+        if not transcription_base_url:
+            raise ValueError("TRANSCRIPTION_BASE_URL must not be empty")
+        if selected == "openai-file":
+            has_provider_key = bool(self.TRANSCRIPTION_API_KEY.strip() or self.ACTSIS_API_KEY.strip())
+            has_shared_key = bool(self.OPENAI_API_KEY.strip())
+            if transcription_base_url == "https://api.openai.com/v1":
+                if not (has_provider_key or has_shared_key):
+                    raise ValueError(
+                        "TRANSCRIPTION_API_KEY, ACTSIS_API_KEY, or OPENAI_API_KEY is required "
+                        "for TRANSCRIPTION_PROVIDER=openai-file"
+                    )
+            elif not has_provider_key:
+                raise ValueError(
+                    "TRANSCRIPTION_API_KEY or ACTSIS_API_KEY is required for a custom "
+                    "TRANSCRIPTION_BASE_URL"
+                )
+        if self.TRANSCRIPTION_SPEAKER_REQUIRED and not self.TRANSCRIPTION_CLOUD_DIARIZATION:
             raise ValueError(
-                "TRANSCRIPTION_API_KEY or OPENAI_API_KEY is required for "
-                "TRANSCRIPTION_PROVIDER=openai-file"
+                "TRANSCRIPTION_SPEAKER_REQUIRED requires TRANSCRIPTION_CLOUD_DIARIZATION=true"
             )
         if selected == "runpod" and (not self.RUNPOD_API_KEY.strip() or not self.RUNPOD_ENDPOINT_ID.strip()):
             raise ValueError(
                 "RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID are required for "
                 "TRANSCRIPTION_PROVIDER=runpod"
-            )
-        if self.TRANSCRIPTION_SPEAKER_REQUIRED:
-            raise ValueError(
-                "TRANSCRIPTION_SPEAKER_REQUIRED requires a provider with cloud_diarization; "
-                "gpu-local, runpod, and first-slice openai-file are not cloud diarization providers"
             )
         if selected != "openai-file":
             return self
@@ -227,6 +293,8 @@ class Settings(BaseSettings):
             raise ValueError(
                 "TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES must be between 1 and 24999999"
             )
+        if self.TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES < 0:
+            raise ValueError("TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES must not be negative")
         if not 0 < self.TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES <= self.TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES:
             raise ValueError(
                 "TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES must be positive and no larger "
@@ -275,10 +343,33 @@ class Settings(BaseSettings):
     POSTHOG_API_KEY: str = ""
     POSTHOG_HOST: str = "https://us.i.posthog.com"
 
+    # Embedding Provider Settings (Ollama/OpenAI-compatible /v1/embeddings)
+    EMBEDDING_PROVIDER: str = "ollama"  # "ollama" | "openai"
+    EMBEDDING_BASE_URL: str = "http://host.docker.internal:11434/v1"
+    EMBEDDING_MODEL: str = "nomic-embed-text"
+    EMBEDDING_DIMENSION: int = 768
+    EMBEDDING_API_KEY: str = ""
+    EMBEDDING_MAX_BATCH: int = 32
+    QDRANT_URL: str = "http://qdrant:6333"
+    QDRANT_API_KEY: str = ""
+    QDRANT_COLLECTION_PREFIX: str = "meeting_embeddings"
+    INDEXING_ENABLED: bool = True  # Feature toggle / rollback switch
+
     # AI Settings (OpenAI-compatible — works with OpenRouter, Together, etc.)
     OPENAI_BASE_URL: str = ""
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = ""
+    # Credentials and optional CA bundle for the internal Actsis OpenAI-compatible gateway.
+    # Keep both values in .env; Compose passes them only to backend services.
+    ACTSIS_API_KEY: str = ""
+    ACTSIS_CA_BUNDLE: str = ""
+
+    # Retrieval-backed chat uses an OpenAI-compatible endpoint. Chat-specific
+    # values can override the shared summary settings when a separate gateway
+    # is desired; an empty chat key falls back to OPENAI_API_KEY.
+    AI_CHAT_BASE_URL: str = "https://api.openai.com/v1"
+    AI_CHAT_MODEL: str = "gpt-4o-mini"
+    AI_CHAT_API_KEY: str = ""
 
     # Notifications
     NOTIFICATION_PROVIDER: str = ""  # "telegram" or "" (disabled)

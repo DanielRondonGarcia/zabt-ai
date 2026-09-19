@@ -32,19 +32,17 @@ def _resolve_language_after_detect(
 ) -> _ResolvedLanguage:
     """Pick the language to use after a first-pass detection.
 
-    - If user explicitly forced a language with no allowed set, use it.
+    - If user explicitly forced a language, use it.
     - Else if no allowed set, trust detection.
     - Else if detected is in allowed set, trust detection.
-    - Else fall back to forced (caller's primary).
+    - Else keep detection because there is no explicit forced language.
     """
-    if forced and not allowed:
+    if forced:
         return _ResolvedLanguage(code=forced, was_forced=True)
     if not allowed:
         return _ResolvedLanguage(code=detected, was_forced=False)
     if detected in allowed:
         return _ResolvedLanguage(code=detected, was_forced=False)
-    if forced:
-        return _ResolvedLanguage(code=forced, was_forced=True)
     return _ResolvedLanguage(code=detected, was_forced=False)
 
 
@@ -106,8 +104,8 @@ def _transcribe_whisperx(
 
     if resolved.was_forced and language != detected:
         logger.info(
-            "  Detected %s outside allowed set %s — re-transcribing forced as %s",
-            detected, config.allowed_languages, language,
+            "  Detected %s but explicit language is %s — re-transcribing forced",
+            detected, language,
         )
         raw_result = whisper_model.transcribe(
             audio_path,

@@ -79,6 +79,41 @@ const apiClient = createApiClient({
 
 // ── Local email/password authentication ──────────────────────────────────────
 
+export interface MeetingProcessingEvent {
+  id: number;
+  run_id: number;
+  meeting_id: number;
+  stage: string;
+  event_type: "started" | "completed" | "failed" | "skipped" | (string & {});
+  status: "started" | "completed" | "failed" | "skipped" | (string & {});
+  task_id: string | null;
+  message: string | null;
+  error: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface MeetingProcessingRun {
+  id: number;
+  meeting_id: number;
+  owner_id: number;
+  trigger: string;
+  status: "queued" | "running" | "completed" | "failed" | (string & {});
+  root_task_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  final_error: string | null;
+  events: MeetingProcessingEvent[];
+}
+
+export interface MeetingProcessingAudit {
+  meeting_id: number;
+  runs: MeetingProcessingRun[];
+}
+
 export interface LocalAuthResponse {
   access_token: string | null;
   refresh_token: string | null;
@@ -114,6 +149,88 @@ export const register = async (
 
 export const login = async (email: string, password: string): Promise<void> => {
   await loginWithRememberMe(email, password, false);
+};
+
+// ── Groups and AI chat ────────────────────────────────────────────────────────
+
+export interface GroupSummary {
+  id: number;
+  name: string;
+  description: string | null;
+  owner_id: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface GroupPayload {
+  name: string;
+  description?: string | null;
+}
+
+export interface AIChatSource {
+  meeting_id: number;
+  kind: string;
+  chunk_index: number;
+  score: number;
+  text: string;
+}
+
+export interface AIChatResponse {
+  group_id: number;
+  answer: string;
+  sources: AIChatSource[];
+}
+
+export interface AskAiChatPayload {
+  groupId: number;
+  message: string;
+  limit?: number;
+}
+
+export const getGroups = async (): Promise<GroupSummary[]> => {
+  const { data } = await apiClient.get<GroupSummary[]>("/groups/");
+  return data;
+};
+
+export const createGroup = async (payload: GroupPayload): Promise<GroupSummary> => {
+  const { data } = await apiClient.post<GroupSummary>("/groups/", payload);
+  return data;
+};
+
+export const updateGroup = async (
+  groupId: number,
+  payload: Partial<GroupPayload>,
+): Promise<GroupSummary> => {
+  const { data } = await apiClient.patch<GroupSummary>(`/groups/${groupId}`, payload);
+  return data;
+};
+
+export const deleteGroup = async (groupId: number): Promise<void> => {
+  await apiClient.delete(`/groups/${groupId}`);
+};
+
+export const assignMeetingGroup = async (
+  meetingId: number,
+  groupId: number | null,
+): Promise<Meeting> => {
+  const { data } = await apiClient.patch<Meeting>(
+    `/meetings/${meetingId}/assign-group`,
+    { group_id: groupId },
+  );
+  return data;
+};
+
+export const askAiChat = async ({
+  groupId,
+  message,
+  limit,
+}: AskAiChatPayload): Promise<AIChatResponse> => {
+  const { data } = await apiClient.post<AIChatResponse>("/ai-chat/", {
+    group_id: groupId,
+    message,
+    ...(limit !== undefined ? { limit } : {}),
+  });
+  return data;
 };
 
 // ── Styles ────────────────────────────────────────────────────────────────────
@@ -196,6 +313,16 @@ export const getMeetings = async (
 
 export const getMeeting = async (id: number): Promise<Meeting> => {
   const res = await apiClient.get<Meeting>(`/meetings/${id}`);
+  return res.data;
+};
+
+export const getMeetingProcessingAudit = async (meetingId: number): Promise<MeetingProcessingAudit> => {
+  const res = await apiClient.get<MeetingProcessingAudit>(`/meetings/${meetingId}/processing-audit`);
+  return res.data;
+};
+
+export const reprocessMeeting = async (meetingId: number): Promise<Meeting> => {
+  const res = await apiClient.post<Meeting>(`/meetings/${meetingId}/reprocess`);
   return res.data;
 };
 

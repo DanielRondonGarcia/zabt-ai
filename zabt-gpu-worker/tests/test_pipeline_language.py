@@ -40,6 +40,16 @@ def test_validate_and_force_uses_explicit_force_over_detection():
     assert final.was_forced is True
 
 
+def test_validate_and_force_uses_explicit_force_over_allowed_detection():
+    from src.pipeline import _resolve_language_after_detect
+
+    final = _resolve_language_after_detect(
+        detected="en", forced="es", allowed={"en", "es"},
+    )
+    assert final.code == "es"
+    assert final.was_forced is True
+
+
 def test_medical_jobs_keep_the_medasr_pipeline_route(monkeypatch):
     from src.pipeline import PipelineConfig, run_pipeline
 

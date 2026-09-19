@@ -1,5 +1,10 @@
 # Cloud production Compose deployment
 
+> **Topology note:** This guide documents the single-machine `cloud-prod` stack with local stateful
+> services and model workers. For the managed-dependency topology with no local infrastructure or
+> model workers, use [`full-cloud-deployment.md`](./full-cloud-deployment.md) and
+> `docker-compose.full-cloud.yml` instead.
+
 `docker-compose.cloud.prod.yml` runs a production image stack on one machine. The API, backend
 worker, web app, vision worker, and GPU worker come from published release images, while PostgreSQL,
 MinIO, Redis, and local GPU transcription stay on the same Compose network. Summaries and visual

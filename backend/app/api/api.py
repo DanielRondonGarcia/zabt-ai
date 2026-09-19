@@ -2,8 +2,10 @@
 # Copyright (C) 2025-2026 Afeef Janjua
 from fastapi import APIRouter
 from app.api.v1.endpoints import (
+    ai_chat,
     auth,
     devices,
+    groups,
     health,
     highlights,
     integrations,
@@ -28,6 +30,8 @@ api_router.include_router(billing.router, prefix="/billing", tags=["billing"])
 api_router.include_router(webhooks.router, prefix="/webhooks", tags=["webhooks"])
 api_router.include_router(health.router, prefix="/health", tags=["health"])
 api_router.include_router(templates.router, prefix="/templates", tags=["templates"])
+api_router.include_router(groups.router, prefix="/groups", tags=["groups"])
+api_router.include_router(ai_chat.router, prefix="/ai-chat", tags=["ai-chat"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
 api_router.include_router(highlights.router, tags=["highlights"])
 api_router.include_router(devices.router, prefix="/devices", tags=["devices"])

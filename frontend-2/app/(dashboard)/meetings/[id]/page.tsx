@@ -5,8 +5,8 @@
 import { useState, useEffect, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import { usePostHog } from "posthog-js/react";
-import { getMeeting, updateMeetingSummary, restoreMeetingSummary, Meeting, updateMeetingType, reExtractIntelligence, listLanguages, type LanguageEntry } from "@/app/lib/api";
-import type { MeetingType } from "@/app/lib/api";
+import { assignMeetingGroup, getGroups, getMeeting, getMeetingProcessingAudit, updateMeetingSummary, restoreMeetingSummary, Meeting, updateMeetingType, reExtractIntelligence, listLanguages, reprocessMeeting, type GroupSummary, type LanguageEntry } from "@/app/lib/api";
+import type { MeetingProcessingAudit, MeetingType } from "@/app/lib/api";
 import { ReTranscribeDialog } from "@/app/components/ReTranscribeDialog";
 import { StatusBadge } from "@/app/components/status-badge";
 import { Button } from "@/app/components/ui/button";
@@ -26,6 +26,8 @@ import { KeyQuestionsList } from "@/app/components/key-questions-list";
 import { ChaptersList } from "@/app/components/chapters-list";
 import { StructuredOutputRenderer } from "@/app/components/structured-output-renderer";
 import { MeetingTypeSelector } from "@/app/components/meeting-type-selector";
+import { MeetingGroupSelector } from "@/app/components/meeting-group-selector";
+import { MeetingProcessingAuditCard } from "@/app/components/meeting-processing-audit";
 import { useTranscriptStore } from "@/app/lib/use-transcript-store";
 import { Separator } from "@/app/components/ui/separator";
 import { Pencil, Download, Mail, Copy, FileText, FileDown, ChevronDown, Eye, RotateCcw, RefreshCw, Loader2, Languages, UserRound } from "lucide-react";
@@ -95,7 +97,15 @@ export default function MeetingDetailPage({
   const [showShareDialog, setShowShareDialog] = useState(false);
   const [reTranscribeOpen, setReTranscribeOpen] = useState(false);
   const [langCatalog, setLangCatalog] = useState<LanguageEntry[]>([]);
+  const [groups, setGroups] = useState<GroupSummary[]>([]);
+  const [groupsLoading, setGroupsLoading] = useState(true);
+  const [groupSaving, setGroupSaving] = useState(false);
+  const [groupError, setGroupError] = useState<string | null>(null);
   const [transcriptView, setTranscriptView] = useState<"original" | "roman">("original");
+  const [isReprocessing, setIsReprocessing] = useState(false);
+  const [reprocessError, setReprocessError] = useState<string | null>(null);
+  const [processingAudit, setProcessingAudit] = useState<MeetingProcessingAudit | null>(null);
+  const [processingAuditLoading, setProcessingAuditLoading] = useState(false);
 
   const { setSeekRequest } = useTranscriptStore();
   const resetTranscriptMedia = useTranscriptStore((state) => state.reset);
@@ -135,6 +145,21 @@ export default function MeetingDetailPage({
     }
   };
 
+  const handleGroupChange = async (groupId: number | null) => {
+    if (!meeting) return;
+    setGroupSaving(true);
+    setGroupError(null);
+    try {
+      const updated = await assignMeetingGroup(meeting.id, groupId);
+      setMeeting(updated);
+    } catch (err) {
+      console.error("Failed to update meeting group:", err);
+      setGroupError("The meeting group could not be updated.");
+    } finally {
+      setGroupSaving(false);
+    }
+  };
+
   const handleRetryExtraction = async () => {
     if (!meeting) return;
     try {
@@ -146,6 +171,10 @@ export default function MeetingDetailPage({
 
   useEffect(() => {
     listLanguages().then(setLangCatalog).catch(() => {});
+    getGroups()
+      .then(setGroups)
+      .catch(() => setGroupError("Groups could not be loaded."))
+      .finally(() => setGroupsLoading(false));
   }, []);
 
   const langDisplayName = (code: string | null | undefined) =>
@@ -153,6 +182,19 @@ export default function MeetingDetailPage({
 
   const elapsedRef = useRef(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refreshProcessingAudit = async (meetingId = Number(id)) => {
+    if (!Number.isFinite(meetingId)) return;
+    setProcessingAuditLoading(true);
+    try {
+      const audit = await getMeetingProcessingAudit(meetingId);
+      setProcessingAudit(audit);
+    } catch {
+      setProcessingAudit(null);
+    } finally {
+      setProcessingAuditLoading(false);
+    }
+  };
 
   useEffect(() => {
     const load = async () => {
@@ -175,6 +217,7 @@ export default function MeetingDetailPage({
 
         setMeeting(data);
         setLoading(false);
+        void refreshProcessingAudit(data.id);
         if (isActiveMeeting(data)) startPolling();
       } catch {
         // Fallback for UI testing
@@ -194,12 +237,14 @@ export default function MeetingDetailPage({
       try {
         const data = await getMeeting(Number(id));
         setMeeting(data);
+        void refreshProcessingAudit(data.id);
         if (!isActiveMeeting(data)) stopPolling();
         else if (elapsedRef.current >= 30 && intervalRef.current) {
           clearInterval(intervalRef.current);
           intervalRef.current = setInterval(async () => {
             const refreshed = await getMeeting(Number(id));
             setMeeting(refreshed);
+            void refreshProcessingAudit(refreshed.id);
             if (!isActiveMeeting(refreshed)) stopPolling();
           }, 10000);
         }
@@ -213,6 +258,36 @@ export default function MeetingDetailPage({
     if (intervalRef.current) {
       clearInterval(intervalRef.current);
       intervalRef.current = null;
+    }
+  };
+
+  const getRequestErrorMessage = (err: unknown, fallback: string) => {
+    if (typeof err === "object" && err !== null && "response" in err) {
+      const response = (err as { response?: { data?: { detail?: unknown } } }).response;
+      if (typeof response?.data?.detail === "string") return response.data.detail;
+    }
+    return err instanceof Error && err.message ? err.message : fallback;
+  };
+
+  const handleReprocess = async () => {
+    if (!meeting || isReprocessing) return;
+    setIsReprocessing(true);
+    setReprocessError(null);
+    try {
+      const updated = await reprocessMeeting(meeting.id);
+      setMeeting(updated);
+      setTranscriptView("original");
+      setError(null);
+      void refreshProcessingAudit(updated.id);
+      stopPolling();
+      startPolling();
+    } catch (err) {
+      setReprocessError(getRequestErrorMessage(
+        err,
+        "The meeting could not be reprocessed. Confirm the stored media file still exists, then try again.",
+      ));
+    } finally {
+      setIsReprocessing(false);
     }
   };
 
@@ -345,6 +420,15 @@ export default function MeetingDetailPage({
                   </span>
                 </>
               )}
+              <span className="text-border">·</span>
+              <MeetingGroupSelector
+                value={meeting.group_id ?? null}
+                groups={groups}
+                loading={groupsLoading}
+                saving={groupSaving}
+                error={groupError}
+                onChange={handleGroupChange}
+              />
             </div>
           </div>
         </div>
@@ -371,11 +455,35 @@ export default function MeetingDetailPage({
         )}
 
         {meeting.status === "failed" && (
-          <div className="bg-red-50 border border-red-200 rounded-lg px-5 py-4 text-sm text-red-800">
-            <p className="font-medium mb-1">Processing failed</p>
-            <p className="text-red-700">
-              {meeting.sub_status || "The AI pipeline encountered an error for this meeting. Partial results may be available below."}
-            </p>
+          <div className="bg-red-50 border border-red-200 rounded-lg px-5 py-4 text-sm text-red-800 space-y-3">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <p className="font-medium mb-1">Processing failed</p>
+                <p className="text-red-700">
+                  {meeting.sub_status || "The AI pipeline encountered an error for this meeting. Partial results may be available below."}
+                </p>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="shrink-0 border-red-300 bg-white text-red-800 hover:bg-red-100 hover:text-red-900"
+                onClick={handleReprocess}
+                disabled={isReprocessing}
+              >
+                {isReprocessing ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : (
+                  <RefreshCw className="size-3.5" />
+                )}
+                Reprocess
+              </Button>
+            </div>
+            {reprocessError && (
+              <p className="rounded-lg border border-red-200 bg-white px-3 py-2 text-red-700">
+                {reprocessError}
+              </p>
+            )}
           </div>
         )}
 
@@ -401,6 +509,8 @@ export default function MeetingDetailPage({
       {/* Scrollable content area */}
       <div className="flex-1 overflow-y-auto">
         <div className="px-6 py-6 space-y-4">
+          <MeetingProcessingAuditCard audit={processingAudit} loading={processingAuditLoading} />
+
           {/* Summary Tab Content */}
           {activeTab === "summary" && (
             <div className="space-y-4">

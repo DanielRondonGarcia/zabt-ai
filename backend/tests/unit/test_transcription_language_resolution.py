@@ -36,6 +36,24 @@ def test_resolves_to_meeting_requested_language_whisper_code():
         _cleanup(meeting_id, user_id)
 
 
+def test_resolves_requested_language_spanish_to_whisper_code():
+    with Session(engine) as s:
+        u = User(email="lang-res-spanish@example.com", supabase_id="lr-spanish-supa", tier=UserTier.FREE,
+                 language_preferences=["english", "spanish"])
+        s.add(u); s.commit(); s.refresh(u)
+        m = Meeting(title="t", owner_id=u.id, requested_language="spanish")
+        s.add(m); s.commit(); s.refresh(m)
+        meeting_id, user_id = m.id, u.id
+
+    try:
+        with Session(engine) as s:
+            forced, allowed = _resolve_meeting_language_for_transcription(s, meeting_id)
+        assert forced == "es"
+        assert allowed == {"en", "es"}
+    finally:
+        _cleanup(meeting_id, user_id)
+
+
 def test_resolves_when_requested_language_is_transliteration_target():
     # urdu_roman is a transliteration target — underlying transcribe should be ur
     with Session(engine) as s:

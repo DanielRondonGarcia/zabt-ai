@@ -33,6 +33,8 @@ export interface Meeting {
   duration_seconds: number | null;
   created_at: string;
   status: MeetingStatus;
+  /** Owner-scoped group used for retrieval and AI Chat context. */
+  group_id: number | null;
   /** Known pipeline stages plus bounded backend error text for failed meetings. */
   sub_status: MeetingSubStatus | (string & {}) | null;
   transcript_text: string | null;
@@ -96,6 +98,41 @@ export interface MeetingList {
   total: number;
   skip: number;
   limit: number;
+}
+
+export interface MeetingProcessingEvent {
+  id: number;
+  run_id: number;
+  meeting_id: number;
+  stage: string;
+  event_type: "started" | "completed" | "failed" | "skipped" | (string & {});
+  status: "started" | "completed" | "failed" | "skipped" | (string & {});
+  task_id: string | null;
+  message: string | null;
+  error: string | null;
+  metadata: Record<string, unknown> | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface MeetingProcessingRun {
+  id: number;
+  meeting_id: number;
+  owner_id: number;
+  trigger: string;
+  status: "queued" | "running" | "completed" | "failed" | (string & {});
+  root_task_id: string | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  final_error: string | null;
+  events: MeetingProcessingEvent[];
+}
+
+export interface MeetingProcessingAudit {
+  meeting_id: number;
+  runs: MeetingProcessingRun[];
 }
 
 export interface MeetingHighlight {

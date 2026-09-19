@@ -1,6 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-"""Client for zabt-vision-worker. Mirrors GpuTranscriptionClient shape."""
+"""Legacy client for the standalone vision worker.
+
+The backend Celery path uses :class:`DirectVisionService` instead; this module
+remains available only for older integrations and compatibility tests.
+"""
 from __future__ import annotations
 
 import logging

@@ -7,6 +7,10 @@ from app.models.base import (
     SummaryTemplate,
     SummaryTemplateRead,
     SummaryTemplateListItem,
+    Group,
+    GroupRead,
+    GroupCreate,
+    GroupUpdate,
     UserTier,
     UserBase,
     User,
@@ -70,6 +74,14 @@ from app.models.device import (
     DeviceRead,
 )
 
+from app.models.processing_audit import (
+    MeetingProcessingAuditRead,
+    MeetingProcessingEvent,
+    MeetingProcessingEventRead,
+    MeetingProcessingRun,
+    MeetingProcessingRunRead,
+)
+
 __all__ = [
     # base
     "TranscriptionType",
@@ -77,6 +89,10 @@ __all__ = [
     "SummaryTemplate",
     "SummaryTemplateRead",
     "SummaryTemplateListItem",
+    "Group",
+    "GroupRead",
+    "GroupCreate",
+    "GroupUpdate",
     "UserTier",
     "UserBase",
     "User",
@@ -123,4 +139,10 @@ __all__ = [
     "Device",
     "DeviceCreate",
     "DeviceRead",
+    # processing audit
+    "MeetingProcessingAuditRead",
+    "MeetingProcessingEvent",
+    "MeetingProcessingEventRead",
+    "MeetingProcessingRun",
+    "MeetingProcessingRunRead",
 ]

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-"""Typed contracts for the vision worker's HTTP/RunPod response."""
+"""Typed contracts for the visual breakdown result shared with the worker stage."""
 from dataclasses import dataclass
 from typing import Any, Dict, List, Literal, Optional
 
@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 
 class VisualSegmentResponse(BaseModel):
-    id: str               # worker-assigned uuid hex (becomes part of the S3 key)
+    id: str               # segment uuid hex (becomes part of the S3 key)
     sequence: int
     start_time: float
     end_time: float

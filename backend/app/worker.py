@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from math import ceil
 
 from celery import Celery, chain
-from celery.signals import worker_shutdown
+from celery.signals import task_failure, task_prerun, task_success, worker_shutdown
 
 from app.core.config import settings
 from app.core.logging import init_sentry, init_logfire, get_logger
@@ -42,11 +42,16 @@ from app.services.ai_agent import summarize_transcript
 from app.services.template import template_service
 from app.services import analytics
 from app.services.notifications import notify
+from app.services.embeddings import get_embedding_provider
+from app.services.embeddings.chunk import build_meeting_chunks
+from app.services.vector_store import EmbeddingPoint, get_vector_store
 from app.services.meeting_recovery import (
     MeetingRecoveryPlan,
     claim_recovery_plan,
     dispatch_recovery_plan,
 )
+from app.services.meeting_processing_audit import meeting_processing_audit
+from app.services.visual_breakdown.direct_service import DirectVisionService
 
 from sqlalchemy import func
 from sqlmodel import Session, select
@@ -101,6 +106,140 @@ def _temp_path_for(meeting_id: int, source_key: str | None = None) -> str:
     return os.path.join(TEMP_DIR, f"zabt_meeting_{meeting_id}{suffix}")
 
 
+_AUDITED_STAGE_TASKS = {
+    "stage_download",
+    "stage_youtube_download",
+    "stage_transcribe",
+    "stage_transliterate",
+    "stage_optional_visual_breakdown",
+    "stage_summarize",
+    "stage_extract_intelligence",
+    "stage_embedding",
+}
+
+
+def _audit_headers(run_id: int | None, meeting_id: int, stage: str) -> dict[str, str]:
+    headers = {"meeting_id": str(meeting_id), "stage": stage}
+    if run_id is not None:
+        headers["meeting_processing_run_id"] = str(run_id)
+    return headers
+
+
+def _get_audit_header(task, key: str) -> str | None:
+    headers = getattr(getattr(task, "request", None), "headers", None) or {}
+    if isinstance(headers, dict):
+        value = headers.get(key)
+        return str(value) if value is not None else None
+    return None
+
+
+def _task_request_args(task) -> tuple | list | None:
+    request = getattr(task, "request", None)
+    args = getattr(request, "args", None)
+    return args if args is not None else None
+
+
+def _task_request_id(task) -> str | None:
+    request = getattr(task, "request", None)
+    value = getattr(request, "id", None)
+    return str(value) if value is not None else None
+
+
+def _audit_run_id_from_task(task) -> int | None:
+    value = _get_audit_header(task, "meeting_processing_run_id")
+    try:
+        return int(value) if value else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _meeting_id_from_task_args(args) -> int | None:
+    if not args:
+        return None
+    try:
+        return int(args[0])
+    except (TypeError, ValueError):
+        return None
+
+
+def _build_pipeline_signatures(meeting_id: int, stages: list, run_id: int | None):
+    signatures = []
+    for index, stage in enumerate(stages):
+        stage_name = stage.name
+        signature = stage.s(meeting_id) if index == 0 else stage.s()
+        link_errors = [] if stage_name == "stage_embedding" else [on_stage_failure.s()]
+        signatures.append(
+            signature.set(
+                headers=_audit_headers(run_id, meeting_id, stage_name),
+                link_error=link_errors,
+            )
+        )
+    return signatures
+
+
+@task_prerun.connect
+def _record_audit_stage_started(task_id=None, task=None, args=None, **kwargs):
+    stage = getattr(task, "name", None)
+    if stage not in _AUDITED_STAGE_TASKS:
+        return
+    meeting_id = _meeting_id_from_task_args(args)
+    if meeting_id is None:
+        return
+    run_id = _audit_run_id_from_task(task)
+    meeting_processing_audit.stage_started(
+        run_id=run_id,
+        meeting_id=meeting_id,
+        stage=stage,
+        task_id=task_id,
+        metadata={"celery_task_name": stage},
+    )
+
+
+@task_success.connect
+def _record_audit_stage_succeeded(sender=None, result=None, **kwargs):
+    task = sender
+    stage = getattr(task, "name", None)
+    if stage not in _AUDITED_STAGE_TASKS:
+        return
+    args = _task_request_args(task)
+    meeting_id = _meeting_id_from_task_args(args)
+    if meeting_id is None:
+        meeting_id = result if isinstance(result, int) else None
+    if meeting_id is None:
+        return
+    run_id = _audit_run_id_from_task(task)
+    task_id = _task_request_id(task)
+    meeting_processing_audit.stage_completed(
+        run_id=run_id,
+        meeting_id=meeting_id,
+        stage=stage,
+        task_id=task_id,
+        metadata={"celery_state": "SUCCESS"},
+    )
+    if stage == "stage_embedding":
+        meeting_processing_audit.run_completed(run_id, message="Processing pipeline completed")
+
+
+@task_failure.connect
+def _record_audit_stage_failed(task_id=None, exception=None, args=None, sender=None, **kwargs):
+    stage = getattr(sender, "name", None)
+    if stage not in _AUDITED_STAGE_TASKS:
+        return
+    meeting_id = _meeting_id_from_task_args(args)
+    if meeting_id is None:
+        return
+    run_id = _audit_run_id_from_task(sender)
+    meeting_processing_audit.stage_failed(
+        run_id=run_id,
+        meeting_id=meeting_id,
+        stage=stage,
+        task_id=task_id,
+        error=exception,
+        metadata={"celery_task_name": stage},
+    )
+    meeting_processing_audit.run_failed(run_id, error=exception)
+
+
 # ── Error callback (linked to each stage via link_error) ─────────────────────
 
 @celery_app.task(name="on_stage_failure")
@@ -113,6 +252,18 @@ def on_stage_failure(request, exc, traceback):
         return
 
     logger.info("on_stage_failure triggered meeting_id=%s exc=%s", meeting_id, str(exc))
+    headers = getattr(request, "headers", None) or {}
+    run_id = None
+    if isinstance(headers, dict):
+        try:
+            header_run_id = headers.get("meeting_processing_run_id")
+            run_id = int(header_run_id) if header_run_id else None
+        except (TypeError, ValueError):
+            run_id = None
+    # task_failure is the authority for per-stage failure events. The linked
+    # error callback still preserves existing meeting failure behavior and
+    # idempotently ensures the run is terminal when headers are available.
+    meeting_processing_audit.run_failed(run_id, error=exc)
     meeting_service.mark_failed(meeting_id, str(exc))
 
     failed_meeting = None
@@ -892,33 +1043,6 @@ def _acquire_visual_lease(meeting_id: int, run_epoch: str) -> bool:
         return True
 
 
-def _fresh_visual_url(file_path: str, *, backend: str | None = None) -> str:
-    """Generate a signed URL reachable by the selected vision backend."""
-    expiration = int(getattr(settings, "VISION_SIGNED_URL_EXPIRATION", 3600))
-    selected_backend = str(
-        settings.VISION_BACKEND if backend is None else backend
-    ).strip().casefold()
-    if selected_backend == "local":
-        method_names = (
-            "get_presigned_download_url",
-            "get_fresh_presigned_download_url",
-            "get_public_presigned_download_url",
-        )
-    else:
-        method_names = (
-            "get_fresh_presigned_download_url",
-            "get_public_presigned_download_url",
-            "get_presigned_download_url",
-        )
-
-    for method_name in method_names:
-        method = getattr(storage, method_name, None)
-        if callable(method):
-            return method(file_path, expiration=expiration)
-
-    raise RuntimeError("Storage provider cannot generate a visual download URL")
-
-
 def _safe_visual_params(result) -> dict:
     """Persist only bounded configuration/metric values returned by the worker."""
     allowed = {
@@ -927,6 +1051,9 @@ def _safe_visual_params(result) -> dict:
         "ocr_diff_threshold",
         "ensemble_min_signals",
         "confidence_threshold",
+        "max_frames",
+        "candidate_count",
+        "change_threshold",
         "skip_reason",
         "warning_code",
     }
@@ -996,8 +1123,6 @@ def _emit_visual_side_effects(finalization: dict, result=None) -> None:
 
 
 def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
-    from app.services.visual_breakdown.vision_client import VisionClient
-
     logger.info(
         "%s started meeting_id=%s",
         "stage_optional_visual_breakdown" if optional else "stage_visual_breakdown",
@@ -1066,13 +1191,12 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
     meeting_service.update_sub_status(meeting_id, "analyzing_video")
     meeting_service.increment_visual_breakdown_attempt(meeting_id, run_epoch)
     try:
-        vision_backend = str(settings.VISION_BACKEND).strip().casefold()
-        video_url = _fresh_visual_url(file_path, backend=vision_backend)
-        result = VisionClient(backend=vision_backend).submit_and_wait(
+        result = DirectVisionService().submit_and_wait(
             {
-                "video_url": video_url,
+                "file_path": file_path,
                 "owner_id": str(owner_id) if owner_id is not None else "unknown",
                 "meeting_id": str(meeting_id),
+                "source_type": source_type,
                 "transcript": transcript_payload,
                 "params": {
                     key: stored_visual_params[key]
@@ -1108,13 +1232,14 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
         return meeting_id
 
     if not result.segments:
+        skip_reason = str(getattr(result, "params", {}).get("skip_reason") or "no_relevant_visual")
         finalization = meeting_service.finalize_visual_breakdown(
             meeting_id,
             run_epoch,
             outcome="skipped",
-            reason="no_relevant_visual",
-            warning_code="no_relevant_visual",
-            result_params={"skip_reason": "no_relevant_visual"},
+            reason=skip_reason,
+            warning_code=skip_reason,
+            result_params={"skip_reason": skip_reason},
         )
         _emit_visual_side_effects(finalization, result)
         return meeting_id
@@ -1209,11 +1334,9 @@ def _dispatch_recovery_stages(meeting_id: int, stages: list) -> None:
     if not stages:
         return
 
-    signatures = []
-    for index, stage in enumerate(stages):
-        signature = stage.s(meeting_id) if index == 0 else stage.s()
-        signatures.append(signature.set(link_error=[on_stage_failure.s()]))
-    chain(*signatures).apply_async()
+    run = meeting_processing_audit.get_or_create_pending_run(meeting_id, trigger="recovery")
+    result = chain(*_build_pipeline_signatures(meeting_id, stages, getattr(run, "id", None))).apply_async()
+    meeting_processing_audit.set_root_task(getattr(run, "id", None), getattr(result, "id", None))
 
 
 def _dispatch_recovery_plan(meeting_id: int, plan: MeetingRecoveryPlan) -> None:
@@ -1322,19 +1445,231 @@ celery_app.conf.beat_schedule = {
 celery_app.conf.timezone = "UTC"
 
 
+# ── Embedding indexing lifecycle ─────────────────────────────────────────────
+
+_EMBEDDING_RETRY_EXCEPTIONS = (RuntimeError, TimeoutError, ConnectionError)
+
+
+def _capture_embedding_event(owner_id: int | None, event_name: str, properties: dict) -> None:
+    """Best-effort operational telemetry without indexed text or credentials."""
+    if owner_id is None:
+        return
+    try:
+        analytics.capture(owner_id, event_name, properties)
+    except Exception:
+        logger.warning("embedding telemetry capture failed event=%s", event_name, exc_info=True)
+
+
+@celery_app.task(
+    name="stage_embedding",
+    autoretry_for=_EMBEDDING_RETRY_EXCEPTIONS,
+    max_retries=3,
+    retry_backoff=True,
+)
+def stage_embedding(meeting_id: int) -> int:
+    """Index grouped meeting content into the active vector collection."""
+    if not settings.INDEXING_ENABLED:
+        logger.info("stage_embedding skipped disabled meeting_id=%s", meeting_id)
+        return meeting_id
+
+    meeting = meeting_service.get(Meeting, meeting_id)
+    if not meeting:
+        logger.warning("stage_embedding skipped missing meeting_id=%s", meeting_id)
+        return meeting_id
+    if not meeting.group_id:
+        logger.info("stage_embedding skipped ungrouped meeting_id=%s", meeting_id)
+        return meeting_id
+    if not meeting.owner_id:
+        logger.warning("stage_embedding skipped missing owner meeting_id=%s", meeting_id)
+        return meeting_id
+
+    logger.info(
+        "stage_embedding started meeting_id=%s owner_id=%s group_id=%s",
+        meeting_id,
+        meeting.owner_id,
+        meeting.group_id,
+    )
+    _capture_embedding_event(
+        meeting.owner_id,
+        "embedding_index_started",
+        {"meeting_id": meeting_id, "group_id": meeting.group_id},
+    )
+
+    try:
+        chunks = build_meeting_chunks(
+            meeting_id=meeting.id,
+            transcript_text=meeting.transcript_text,
+            transliterated_text=meeting.transliterated_text,
+            summary_text=meeting.summary_text,
+            original_summary_text=meeting.original_summary_text,
+            structured_output=meeting.structured_output,
+            structured_output_status=meeting.structured_output_status,
+        )
+        if not chunks:
+            logger.info("stage_embedding skipped no content meeting_id=%s", meeting_id)
+            _capture_embedding_event(
+                meeting.owner_id,
+                "embedding_index_completed",
+                {"meeting_id": meeting_id, "group_id": meeting.group_id, "point_count": 0},
+            )
+            return meeting_id
+
+        provider = get_embedding_provider()
+        vectors = provider.embed([chunk.text for chunk in chunks])
+        points = [
+            EmbeddingPoint(
+                id=chunk.id,
+                vector=vector,
+                text=chunk.text,
+                owner_id=meeting.owner_id,
+                group_id=meeting.group_id,
+                meeting_id=meeting.id,
+                kind=chunk.kind,
+                chunk_index=chunk.chunk_index,
+                chunk_count=chunk.chunk_count,
+                source_type=meeting.source_type or "upload",
+                model=settings.EMBEDDING_MODEL,
+            )
+            for chunk, vector in zip(chunks, vectors)
+        ]
+        get_vector_store().upsert_points(points)
+    except Exception:
+        logger.exception(
+            "stage_embedding failed meeting_id=%s owner_id=%s group_id=%s",
+            meeting_id,
+            meeting.owner_id,
+            meeting.group_id,
+        )
+        _capture_embedding_event(
+            meeting.owner_id,
+            "embedding_index_failed",
+            {"meeting_id": meeting_id, "group_id": meeting.group_id},
+        )
+        raise
+
+    logger.info("stage_embedding complete meeting_id=%s points=%s", meeting_id, len(points))
+    _capture_embedding_event(
+        meeting.owner_id,
+        "embedding_index_completed",
+        {"meeting_id": meeting_id, "group_id": meeting.group_id, "point_count": len(points)},
+    )
+    return meeting_id
+
+
+@celery_app.task(
+    name="delete_meeting_vectors",
+    autoretry_for=_EMBEDDING_RETRY_EXCEPTIONS,
+    max_retries=3,
+    retry_backoff=True,
+)
+def delete_meeting_vectors(meeting_id: int) -> int:
+    """Delete all vectors tagged with a meeting id."""
+    if not settings.INDEXING_ENABLED:
+        return meeting_id
+    meeting = meeting_service.get(Meeting, meeting_id)
+    owner_id = getattr(meeting, "owner_id", None)
+    group_id = getattr(meeting, "group_id", None)
+    logger.info(
+        "delete_meeting_vectors started meeting_id=%s owner_id=%s group_id=%s",
+        meeting_id,
+        owner_id,
+        group_id,
+    )
+    try:
+        if meeting and meeting.owner_id:
+            get_vector_store().delete_by_filter(owner_id=meeting.owner_id, meeting_id=meeting_id)
+        else:
+            get_vector_store().delete_by_filter(meeting_id=meeting_id)
+    except Exception:
+        logger.exception("delete_meeting_vectors failed meeting_id=%s owner_id=%s", meeting_id, owner_id)
+        _capture_embedding_event(owner_id, "embedding_delete_failed", {"meeting_id": meeting_id, "group_id": group_id})
+        raise
+    logger.info("delete_meeting_vectors complete meeting_id=%s", meeting_id)
+    _capture_embedding_event(owner_id, "embedding_delete_completed", {"meeting_id": meeting_id, "group_id": group_id})
+    return meeting_id
+
+
+@celery_app.task(
+    name="delete_group_vectors",
+    autoretry_for=_EMBEDDING_RETRY_EXCEPTIONS,
+    max_retries=3,
+    retry_backoff=True,
+)
+def delete_group_vectors(group_id: int) -> int:
+    """Delete all vectors tagged with a group id."""
+    if not settings.INDEXING_ENABLED:
+        return group_id
+    with Session(engine) as session:
+        from app.models import Group
+
+        group = session.get(Group, group_id)
+        owner_id = getattr(group, "owner_id", None)
+    logger.info("delete_group_vectors started group_id=%s owner_id=%s", group_id, owner_id)
+    try:
+        get_vector_store().delete_by_filter(owner_id=owner_id, group_id=group_id)
+    except Exception:
+        logger.exception("delete_group_vectors failed group_id=%s owner_id=%s", group_id, owner_id)
+        _capture_embedding_event(owner_id, "embedding_group_delete_failed", {"group_id": group_id})
+        raise
+    logger.info("delete_group_vectors complete group_id=%s", group_id)
+    _capture_embedding_event(owner_id, "embedding_group_delete_completed", {"group_id": group_id})
+    return group_id
+
+
+@celery_app.task(name="reindex_group")
+def reindex_group(group_id: int) -> int:
+    """Re-run indexing for all meetings currently assigned to a group."""
+    if not settings.INDEXING_ENABLED:
+        return group_id
+    with Session(engine) as session:
+        from app.models import Group
+
+        group = session.get(Group, group_id)
+        owner_id = getattr(group, "owner_id", None)
+        meeting_ids = session.exec(select(Meeting.id).where(Meeting.group_id == group_id)).all()
+    logger.info(
+        "reindex_group started group_id=%s owner_id=%s meeting_count=%s",
+        group_id,
+        owner_id,
+        len(meeting_ids),
+    )
+    _capture_embedding_event(
+        owner_id,
+        "embedding_reindex_started",
+        {"group_id": group_id, "meeting_count": len(meeting_ids)},
+    )
+    try:
+        for meeting_id in meeting_ids:
+            stage_embedding.delay(meeting_id)
+    except Exception:
+        logger.exception("reindex_group failed group_id=%s owner_id=%s", group_id, owner_id)
+        _capture_embedding_event(owner_id, "embedding_reindex_failed", {"group_id": group_id})
+        raise
+    logger.info("reindex_group complete group_id=%s enqueued=%s", group_id, len(meeting_ids))
+    _capture_embedding_event(
+        owner_id,
+        "embedding_reindex_completed",
+        {"group_id": group_id, "meeting_count": len(meeting_ids)},
+    )
+    return group_id
+
+
 # ── Pipeline dispatch helper ─────────────────────────────────────────────────
 
 def dispatch_pipeline(meeting_id: int):
     """Build and dispatch the Celery chain for processing a meeting."""
-    pipeline = chain(
-        stage_download.s(meeting_id).set(link_error=[on_stage_failure.s()]),
-        stage_transcribe.s().set(link_error=[on_stage_failure.s()]),
-        stage_transliterate.s().set(link_error=[on_stage_failure.s()]),
-        stage_optional_visual_breakdown.s().set(link_error=[on_stage_failure.s()]),
-        stage_summarize.s().set(link_error=[on_stage_failure.s()]),
-        stage_extract_intelligence.s().set(link_error=[on_stage_failure.s()]),
-    )
-    pipeline.apply_async()
+    run = meeting_processing_audit.get_or_create_pending_run(meeting_id, trigger="pipeline")
+    stages = [
+        stage_download,
+        stage_transcribe,
+        stage_transliterate,
+        stage_optional_visual_breakdown,
+        stage_summarize,
+        stage_extract_intelligence,
+        stage_embedding,
+    ]
+    result = chain(*_build_pipeline_signatures(meeting_id, stages, getattr(run, "id", None))).apply_async()
+    meeting_processing_audit.set_root_task(getattr(run, "id", None), getattr(result, "id", None))
 
 
 # ── Stage 0 (YouTube): Download from YouTube ────────────────────────────────
@@ -1441,12 +1776,15 @@ def dispatch_youtube_pipeline(meeting_id: int):
     same optional-visual → summary → transcript-intelligence chain.  The
     optional stage short-circuits YouTube audio without downloading media twice.
     """
-    pipeline = chain(
-        stage_youtube_download.s(meeting_id).set(link_error=[on_stage_failure.s()]),
-        stage_transcribe.s().set(link_error=[on_stage_failure.s()]),
-        stage_transliterate.s().set(link_error=[on_stage_failure.s()]),
-        stage_optional_visual_breakdown.s().set(link_error=[on_stage_failure.s()]),
-        stage_summarize.s().set(link_error=[on_stage_failure.s()]),
-        stage_extract_intelligence.s().set(link_error=[on_stage_failure.s()]),
-    )
-    pipeline.apply_async()
+    run = meeting_processing_audit.get_or_create_pending_run(meeting_id, trigger="youtube")
+    stages = [
+        stage_youtube_download,
+        stage_transcribe,
+        stage_transliterate,
+        stage_optional_visual_breakdown,
+        stage_summarize,
+        stage_extract_intelligence,
+        stage_embedding,
+    ]
+    result = chain(*_build_pipeline_signatures(meeting_id, stages, getattr(run, "id", None))).apply_async()
+    meeting_processing_audit.set_root_task(getattr(run, "id", None), getattr(result, "id", None))

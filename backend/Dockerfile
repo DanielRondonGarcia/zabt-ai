@@ -14,7 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libharfbuzz-subset0 \
     libharfbuzz0b \
     fonts-noto-core \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+# Trust the internal Actsis gateway CA inside Linux containers. The gateway is
+# an OpenAI-compatible provider for embeddings/transcription, not a source of
+# application secrets.
+COPY certs/actsis-root-ca.crt /usr/local/share/ca-certificates/actsis-root-ca.crt
+RUN update-ca-certificates
 
 WORKDIR /app
 

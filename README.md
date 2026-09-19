@@ -113,6 +113,7 @@ you accept the terms and download them yourself:**
 - Server-side PDF export of transcripts and summaries
 - Email + Telegram notifications *(optional)*
 - Medical transcription mode (MedASR)
+- User-owned groups with group-scoped embedding retrieval; see the [group embedding overview](docs/group-embedding-overview.md), [group API](docs/group-api.md), and [embedding configuration](docs/embedding-configuration.md)
 
 The first-slice provider registry is batch-only. It does not implement realtime transcription,
 OpenAI medical parity, generic OpenAI-compatible audio, or Ollama audio transcription. Unsupported

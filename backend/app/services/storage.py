@@ -29,6 +29,8 @@ class StorageProvider(Protocol):
 
     def upload_file(self, file_data: bytes, object_key: str, content_type: str) -> None: ...
 
+    def download_file(self, object_key: str) -> bytes: ...
+
     def delete_file(self, object_key: str) -> None: ...
 
     def delete_prefix(self, prefix: str) -> int:
@@ -142,6 +144,16 @@ class MinioStorage:
         self.s3_client.put_object(
             Bucket=self.bucket, Key=object_key, Body=file_data, ContentType=content_type
         )
+
+    def download_file(self, object_key: str) -> bytes:
+        response = self.s3_client.get_object(Bucket=self.bucket, Key=object_key)
+        body = response["Body"]
+        try:
+            return body.read()
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
 
     def delete_file(self, object_key: str) -> None:
         self.s3_client.delete_object(Bucket=self.bucket, Key=object_key)
@@ -298,6 +310,16 @@ class S3Storage:
         self.s3_client.put_object(
             Bucket=self.bucket, Key=object_key, Body=file_data, ContentType=content_type
         )
+
+    def download_file(self, object_key: str) -> bytes:
+        response = self.s3_client.get_object(Bucket=self.bucket, Key=object_key)
+        body = response["Body"]
+        try:
+            return body.read()
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
 
     def delete_file(self, object_key: str) -> None:
         self.s3_client.delete_object(Bucket=self.bucket, Key=object_key)

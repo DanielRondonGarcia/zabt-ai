@@ -8,6 +8,7 @@ import { useEffect, useState } from "react";
 import { fetchCurrentUser } from "@/app/lib/api";
 import { ProfileMenu } from "@/app/components/profile-menu";
 import clsx from "clsx";
+import { Users } from "lucide-react";
 
 // ── Icons ──────────────────────────────────────────────────────────────────────
 
@@ -51,6 +52,7 @@ const HashIcon = () => (
 const NAV_LINKS = [
     { href: "/", label: "Home", icon: <HomeIcon /> },
     { href: "/ai-chat", label: "AI Chat", icon: <ChatIcon /> },
+    { href: "/groups", label: "Groups", icon: <Users className="size-4" /> },
     { href: "/templates", label: "Templates", icon: <TemplatesIcon /> },
     { href: "/integrations", label: "Integrations", icon: <IntegrationsIcon /> },
     { href: "/settings", label: "Settings", icon: <SettingsIcon /> },

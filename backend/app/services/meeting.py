@@ -516,7 +516,15 @@ class MeetingService(BaseService):
             meeting.original_summary_text = meeting.summary_text
         meeting.summary_text = summary_text
         meeting.summary_edited = True
-        return self.save(meeting)
+        saved = self.save(meeting)
+        if saved and saved.group_id:
+            try:
+                from app.worker import stage_embedding
+
+                stage_embedding.delay(meeting_id)
+            except Exception:
+                pass
+        return saved
 
     def restore_summary(self, meeting_id: int) -> Optional[Meeting]:
         """Restore the original AI-generated summary."""
@@ -527,7 +535,15 @@ class MeetingService(BaseService):
             return None
         meeting.summary_text = meeting.original_summary_text
         meeting.summary_edited = False
-        return self.save(meeting)
+        saved = self.save(meeting)
+        if saved and saved.group_id:
+            try:
+                from app.worker import stage_embedding
+
+                stage_embedding.delay(meeting_id)
+            except Exception:
+                pass
+        return saved
 
     def create_from_youtube(self, url: str, owner_id: int) -> Meeting:
         """Create a meeting record for YouTube ingestion.
@@ -564,9 +580,22 @@ class MeetingService(BaseService):
             session.add(meeting)
             session.commit()
             session.refresh(meeting)
+            if field in {"transcript_text", "transliterated_text", "summary_text", "structured_output", "structured_output_status"} and meeting.group_id:
+                try:
+                    from app.worker import stage_embedding
+
+                    stage_embedding.delay(meeting_id)
+                except Exception:
+                    pass
             return meeting
 
     def delete_meeting(self, meeting_id: int) -> bool:
+        try:
+            from app.worker import delete_meeting_vectors
+
+            delete_meeting_vectors.delay(meeting_id)
+        except Exception:
+            pass
         return self.delete(Meeting, meeting_id)
 
 meeting_service = MeetingService()

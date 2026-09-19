@@ -11,7 +11,6 @@ from app.models import Meeting, User, VisualSegment
 from app.services.visual_breakdown.types import VisualSegmentResponse, VisionWorkerResult
 from app.worker import (
     _acquire_visual_lease,
-    _fresh_visual_url,
     stage_extract_intelligence,
     stage_optional_visual_breakdown,
     stage_summarize,
@@ -52,7 +51,7 @@ def _completed_worker_result() -> VisionWorkerResult:
             ),
         ],
         raw_output_s3_key="users/1/meetings/X/visual/raw_output.json",
-        model="qwen3-vl:8b-thinking",
+        model="gpt-4o-mini",
         params={"fps": 2},
         stage_metrics={
             "extract_frames": {"duration_ms": 1000, "frame_count": 40},
@@ -66,9 +65,7 @@ def test_happy_path_completes_meeting_and_persists_segments(meeting_with_file):
     worker_result = _completed_worker_result()
 
     with (
-        patch("app.worker.settings.VISION_BACKEND", "LOCAL"),
-        patch("app.services.visual_breakdown.vision_client.VisionClient") as mock_cls,
-        patch("app.services.storage.storage.get_presigned_download_url", return_value="https://signed/"),
+        patch("app.worker.DirectVisionService") as mock_cls,
         patch("app.services.analytics.capture") as mock_capture,
         patch("app.worker.notify") as mock_notify,
     ):
@@ -79,7 +76,10 @@ def test_happy_path_completes_meeting_and_persists_segments(meeting_with_file):
         out = stage_visual_breakdown(meeting_id)
 
     assert out == meeting_id
-    mock_cls.assert_called_once_with(backend="local")
+    mock_cls.assert_called_once_with()
+    request = mock_cls.return_value.submit_and_wait.call_args.args[0]
+    assert request["file_path"] == "users/1/meetings/X/audio.mp4"
+    assert "video_url" not in request
 
     # Meeting fields updated
     with Session(engine) as session:
@@ -87,7 +87,7 @@ def test_happy_path_completes_meeting_and_persists_segments(meeting_with_file):
         assert m.visual_breakdown_status == "completed"
         assert m.visual_breakdown_completed_at is not None
         assert m.visual_raw_output_s3_key == "users/1/meetings/X/visual/raw_output.json"
-        assert m.visual_breakdown_model == "qwen3-vl:8b-thinking"
+        assert m.visual_breakdown_model == "gpt-4o-mini"
         assert m.visual_breakdown_run_count == 1
 
     # Segments persisted
@@ -109,52 +109,39 @@ def test_happy_path_completes_meeting_and_persists_segments(meeting_with_file):
     assert mock_notify.call_args.args[0] == "visual_breakdown_completed"
 
 
-def test_local_visual_backend_uses_internal_presigned_download_url():
-    storage = MagicMock()
-    storage.get_presigned_download_url.return_value = "http://minio:9000/internal/video"
+def test_legacy_presigned_visual_helpers_are_removed():
+    assert not hasattr(__import__("app.worker", fromlist=["_fresh_visual_url"]), "_fresh_visual_url")
 
+
+def test_worker_does_not_construct_the_legacy_external_vision_client(meeting_with_file):
     with (
-        patch("app.worker.storage", storage),
-        patch("app.worker.settings.VISION_SIGNED_URL_EXPIRATION", 1234),
+        patch("app.worker.DirectVisionService") as direct_service,
+        patch("app.services.visual_breakdown.vision_client.VisionClient") as legacy_client,
+        patch("app.services.analytics.capture"),
+        patch("app.services.notifications.notify"),
     ):
-        url = _fresh_visual_url("media/video.mp4", backend="LoCaL")
+        direct_service.return_value.submit_and_wait.return_value = VisionWorkerResult(
+            status="completed",
+            segments=[],
+            model="gpt-4o-mini",
+            params={"skip_reason": "no_relevant_visual"},
+            stage_metrics={},
+        )
+        assert stage_visual_breakdown(meeting_with_file) == meeting_with_file
 
-    assert url == "http://minio:9000/internal/video"
-    storage.get_presigned_download_url.assert_called_once_with(
-        "media/video.mp4", expiration=1234
-    )
-    storage.get_fresh_presigned_download_url.assert_not_called()
-    storage.get_public_presigned_download_url.assert_not_called()
-
-
-def test_external_visual_backend_uses_fresh_public_presigned_download_url():
-    storage = MagicMock()
-    storage.get_fresh_presigned_download_url.return_value = "https://public.example/video"
-
-    with (
-        patch("app.worker.storage", storage),
-        patch("app.worker.settings.VISION_SIGNED_URL_EXPIRATION", 1234),
-    ):
-        url = _fresh_visual_url("media/video.mp4", backend="RUNPOD")
-
-    assert url == "https://public.example/video"
-    storage.get_fresh_presigned_download_url.assert_called_once_with(
-        "media/video.mp4", expiration=1234
-    )
-    storage.get_public_presigned_download_url.assert_not_called()
-    storage.get_presigned_download_url.assert_not_called()
+    direct_service.assert_called_once_with()
+    legacy_client.assert_not_called()
 
 
 def test_worker_failure_falls_back_without_failing_meeting(meeting_with_file):
     meeting_id = meeting_with_file
     failed_result = VisionWorkerResult(
-        status="failed", segments=[], model="qwen3-vl:8b-thinking", params={},
+        status="failed", segments=[], model="gpt-4o-mini", params={},
         stage_metrics={}, error="ffmpeg blew up", failed_stage="extract_frames",
     )
 
     with (
-        patch("app.services.visual_breakdown.vision_client.VisionClient") as mock_cls,
-        patch("app.services.storage.storage.get_presigned_download_url", return_value="https://signed/"),
+        patch("app.worker.DirectVisionService") as mock_cls,
         patch("app.services.analytics.capture") as mock_capture,
         patch("app.services.notifications.notify"),
     ):
@@ -178,8 +165,7 @@ def test_client_exception_falls_back_without_reraising(meeting_with_file):
     meeting_id = meeting_with_file
 
     with (
-        patch("app.services.visual_breakdown.vision_client.VisionClient") as mock_cls,
-        patch("app.services.storage.storage.get_presigned_download_url", return_value="https://signed/"),
+        patch("app.worker.DirectVisionService") as mock_cls,
         patch("app.services.analytics.capture"),
         patch("app.services.notifications.notify"),
     ):
@@ -204,8 +190,7 @@ def test_missing_file_path_skips_without_calling_worker(meeting_with_file, db: S
     db.commit()
 
     with (
-        patch("app.services.visual_breakdown.vision_client.VisionClient") as mock_cls,
-        patch("app.services.storage.storage.get_presigned_download_url"),
+        patch("app.worker.DirectVisionService") as mock_cls,
         patch("app.services.analytics.capture"),
         patch("app.services.notifications.notify"),
     ):
@@ -224,7 +209,7 @@ def test_missing_file_path_skips_without_calling_worker(meeting_with_file, db: S
 def test_optional_stage_disabled_skips_with_stable_id(meeting_with_file):
     with (
         patch("app.worker.settings.VISION_ENABLED", False),
-        patch("app.services.visual_breakdown.vision_client.VisionClient") as mock_cls,
+        patch("app.worker.DirectVisionService") as mock_cls,
     ):
         out = stage_optional_visual_breakdown(meeting_with_file)
 
@@ -248,8 +233,7 @@ def test_duplicate_delivery_converges_to_one_run_and_stable_meeting_id(meeting_w
     """Duplicate/retry delivery converges on one logical visual run."""
     worker_result = _completed_worker_result()
     with (
-        patch("app.services.visual_breakdown.vision_client.VisionClient") as mock_cls,
-        patch("app.services.storage.storage.get_presigned_download_url", return_value="https://signed/"),
+        patch("app.worker.DirectVisionService") as mock_cls,
         patch("app.services.analytics.capture") as mock_capture,
         patch("app.worker.notify") as mock_notify,
     ):

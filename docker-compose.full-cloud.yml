@@ -1,0 +1,163 @@
+# Zabt full-cloud application topology.
+#
+# This file is standalone. It does not inherit profiles or service definitions
+# from another Compose file. Publish the three application images first, then
+# provide the external dependency settings through a secret-managed env file.
+
+x-backend-environment: &backend-environment
+  # Managed database and broker.
+  DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set for full-cloud deployment}
+  REDIS_URL: ${REDIS_URL:?REDIS_URL must be set for full-cloud deployment}
+
+  # First-party authentication and public origins.
+  AUTH_ENVIRONMENT: production
+  AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?AUTH_JWT_SECRET must be set for full-cloud deployment}
+  AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-zabt-api}
+  AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-zabt-client}
+  AUTH_ACCESS_TOKEN_EXPIRE_MINUTES: ${AUTH_ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+  AUTH_REFRESH_SESSION_EXPIRE_DAYS: ${AUTH_REFRESH_SESSION_EXPIRE_DAYS:-30}
+  AUTH_ACCESS_COOKIE_NAME: ${AUTH_ACCESS_COOKIE_NAME:-zabt_access_token}
+  AUTH_REFRESH_COOKIE_NAME: ${AUTH_REFRESH_COOKIE_NAME:-zabt_refresh_token}
+  AUTH_COOKIE_SECURE: "true"
+  AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+  AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
+  AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:?AUTH_ALLOWED_ORIGINS must be set for full-cloud deployment}
+  BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:?BACKEND_CORS_ORIGINS must be set for full-cloud deployment}
+  APP_URL: ${APP_URL:?APP_URL must be set for full-cloud deployment}
+
+  # External S3-compatible object storage. S3_PUBLIC_URL must be reachable by
+  # browsers because upload and download URLs are signed for direct access.
+  STORAGE_PROVIDER: s3
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:?S3_ENDPOINT_URL must be set for full-cloud deployment}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID must be set for full-cloud deployment}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY must be set for full-cloud deployment}
+  S3_BUCKET_NAME: ${S3_BUCKET_NAME:?S3_BUCKET_NAME must be set for full-cloud deployment}
+  S3_PUBLIC_URL: ${S3_PUBLIC_URL:?S3_PUBLIC_URL must be set for full-cloud deployment}
+  S3_REGION: ${S3_REGION:-auto}
+
+  # Actsis is isolated from summary/chat credentials. The image contains the
+  # deployment CA certificate at this default path; override it when needed.
+  ACTSIS_API_KEY: ${ACTSIS_API_KEY:?ACTSIS_API_KEY must be set for full-cloud deployment}
+  ACTSIS_CA_BUNDLE: ${ACTSIS_CA_BUNDLE:-/usr/local/share/ca-certificates/actsis-root-ca.crt}
+  TRANSCRIPTION_PROVIDER: openai-file
+  TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-whisper-1}
+  TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:?TRANSCRIPTION_BASE_URL must be set for full-cloud deployment}
+  TRANSCRIPTION_API_KEY: ${TRANSCRIPTION_API_KEY:-}
+  TRANSCRIPTION_CLOUD_DIARIZATION: "false"
+  TRANSCRIPTION_LANGUAGE: ${TRANSCRIPTION_LANGUAGE:-}
+  TRANSCRIPTION_ALLOWED_LANGUAGES: ${TRANSCRIPTION_ALLOWED_LANGUAGES:-}
+  TRANSCRIPTION_TIMESTAMP_MODE: ${TRANSCRIPTION_TIMESTAMP_MODE:-none}
+  TRANSCRIPTION_TIMESTAMP_MODEL: ${TRANSCRIPTION_TIMESTAMP_MODEL:-whisper-1}
+  TRANSCRIPTION_RESPONSE_FORMAT: json
+  TRANSCRIPTION_SPEAKER_REQUIRED: "false"
+  TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES: ${TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES:-20000000}
+  TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: ${TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES:-0}
+  TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES: ${TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES:-15000000}
+  TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS: ${TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS:-600}
+  TRANSCRIPTION_OPENAI_MAX_CHUNKS: ${TRANSCRIPTION_OPENAI_MAX_CHUNKS:-1024}
+  TRANSCRIPTION_OPENAI_MAX_RETRIES: ${TRANSCRIPTION_OPENAI_MAX_RETRIES:-2}
+  TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS: ${TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS:-1}
+  TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS: ${TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS:-8}
+  TRANSCRIPTION_FFMPEG_TIMEOUT_SECONDS: ${TRANSCRIPTION_FFMPEG_TIMEOUT_SECONDS:-900}
+
+  # Actsis embeddings and external Qdrant.
+  EMBEDDING_PROVIDER: openai
+  EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:?EMBEDDING_BASE_URL must be set for full-cloud deployment}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:?EMBEDDING_MODEL must be set for full-cloud deployment}
+  EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:?EMBEDDING_DIMENSION must be set for full-cloud deployment}
+  EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+  EMBEDDING_MAX_BATCH: ${EMBEDDING_MAX_BATCH:-32}
+  QDRANT_URL: ${QDRANT_URL:?QDRANT_URL must be set for full-cloud deployment}
+  QDRANT_API_KEY: ${QDRANT_API_KEY:?QDRANT_API_KEY must be set for full-cloud deployment}
+  QDRANT_COLLECTION_PREFIX: ${QDRANT_COLLECTION_PREFIX:-meeting_embeddings}
+  INDEXING_ENABLED: ${INDEXING_ENABLED:-true}
+
+  # OpenAI summary, structured intelligence, and retrieval chat.
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:?OPENAI_BASE_URL must be set for full-cloud deployment}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:?OPENAI_API_KEY must be set for full-cloud deployment}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+  AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:?AI_CHAT_BASE_URL must be set for full-cloud deployment}
+  AI_CHAT_MODEL: ${AI_CHAT_MODEL:-gpt-4o-mini}
+  AI_CHAT_API_KEY: ${AI_CHAT_API_KEY:-}
+
+  # Direct in-process visual inference in the backend worker. The visual key
+  # is deliberately required and never falls back to OPENAI_API_KEY.
+  VISION_ENABLED: "true"
+  VISION_BACKEND: direct
+  VISION_REQUIRE_VISION: "true"
+  VISION_CLOUD_ALLOWED: "true"
+  VISION_EGRESS_POLICY: allowlist
+  VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:?VISION_ALLOWED_HOSTS must be set for full-cloud deployment}
+  VISION_OPENAI_API_KEY: ${VISION_OPENAI_API_KEY:?VISION_OPENAI_API_KEY must be set for full-cloud deployment}
+  VISION_OPENAI_BASE_URL: ${VISION_OPENAI_BASE_URL:?VISION_OPENAI_BASE_URL must be set for full-cloud deployment}
+  VISION_OPENAI_MODEL: ${VISION_OPENAI_MODEL:-gpt-4o-mini}
+  VISION_OPENAI_IMAGE_DETAIL: ${VISION_OPENAI_IMAGE_DETAIL:-low}
+  VISION_OPENAI_MAX_TOKENS: ${VISION_OPENAI_MAX_TOKENS:-1024}
+  VISION_MAX_RETRIES: ${VISION_MAX_RETRIES:-2}
+  VISION_RETRY_BACKOFF_SECONDS: ${VISION_RETRY_BACKOFF_SECONDS:-5}
+  VISION_TIMEOUT: ${VISION_TIMEOUT:-1800}
+  VISION_FPS: ${VISION_FPS:-2}
+  VISION_MAX_FRAMES: ${VISION_MAX_FRAMES:-120}
+  VISION_MAX_CANDIDATE_FRAMES: ${VISION_MAX_CANDIDATE_FRAMES:-12}
+  VISION_MAX_SEGMENTS: ${VISION_MAX_SEGMENTS:-20}
+
+  SUMMARY_CHUNK_SECONDS: ${SUMMARY_CHUNK_SECONDS:-120}
+  SUMMARY_MAX_INPUT_TOKENS: ${SUMMARY_MAX_INPUT_TOKENS:-6000}
+
+  # Optional integrations and observability.
+  MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+  MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+  MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-common}
+  MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI:-}
+  TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+  RESEND_API_KEY: ${RESEND_API_KEY:-}
+  RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-no-reply@zabt.ai}
+  NOTIFICATION_PROVIDER: ${NOTIFICATION_PROVIDER:-}
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+  POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
+  POSTHOG_HOST: ${POSTHOG_HOST:-https://us.i.posthog.com}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: production
+  LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+  LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+
+services:
+  api:
+    image: ${ZABT_API_IMAGE:?ZABT_API_IMAGE must be set for full-cloud deployment}
+    restart: unless-stopped
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      <<: *backend-environment
+
+  worker:
+    image: ${ZABT_WORKER_IMAGE:?ZABT_WORKER_IMAGE must be set for full-cloud deployment}
+    restart: unless-stopped
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=${CELERY_WORKER_CONCURRENCY:-2}"]
+    environment:
+      <<: *backend-environment
+
+  beat:
+    image: ${ZABT_WORKER_IMAGE:?ZABT_WORKER_IMAGE must be set for full-cloud deployment}
+    restart: unless-stopped
+    command: ["celery", "-A", "app.worker.celery_app", "beat", "--loglevel=info"]
+    environment:
+      <<: *backend-environment
+
+  web:
+    image: ${ZABT_WEB_IMAGE:?ZABT_WEB_IMAGE must be set for full-cloud deployment}
+    restart: unless-stopped
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL must be set for full-cloud deployment}
+      NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:?NEXT_PUBLIC_FRONTEND_URL must be set for full-cloud deployment}
+      NEXT_PUBLIC_POSTHOG_KEY: ${NEXT_PUBLIC_POSTHOG_KEY:-}
+      NEXT_PUBLIC_POSTHOG_HOST: ${NEXT_PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}
+      NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+      NEXT_PUBLIC_SENTRY_ENVIRONMENT: production

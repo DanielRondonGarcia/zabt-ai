@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-"""Official OpenAI file-transcription adapter.
+"""OpenAI-compatible file-transcription adapter.
 
-This adapter intentionally implements only the general batch/file contract.
+This adapter supports official OpenAI and compatible gateways such as Actsis.
 Medical requests stay on the local/RunPod MedASR providers, and realtime is a
 separate capability that is not exposed by this provider.
 """
@@ -10,12 +10,14 @@ separate capability that is not exposed by this provider.
 from __future__ import annotations
 
 import shutil
+import ssl
 import tempfile
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+import httpx
 from openai import APIConnectionError, APITimeoutError, OpenAI
 
 from app.models import TranscriptionType
@@ -53,12 +55,12 @@ from app.services.transcription.types import (
 )
 
 
-SUPPORTED_MODELS = frozenset({"gpt-transcribe", "gpt-4o-mini-transcribe"})
+SUPPORTED_MODELS = frozenset({"gpt-transcribe", "gpt-4o-mini-transcribe", "whisper-1"})
 SUPPORTED_TIMESTAMP_MODELS = frozenset({"whisper-1"})
 SUPPORTED_AUDIO_FORMATS = frozenset({
     "flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "wav", "webm",
 })
-SUPPORTED_RESPONSE_FORMATS = frozenset({"json", "verbose_json"})
+SUPPORTED_RESPONSE_FORMATS = frozenset({"json", "verbose_json", "diarized_json"})
 OPENAI_AUDIO_BASE_URL = "https://api.openai.com/v1"
 OPENAI_FILE_SIZE_LIMIT_BYTES = 25_000_000
 DEFAULT_SINGLE_REQUEST_MAX_BYTES = 20_000_000
@@ -119,9 +121,13 @@ def _notify_heartbeat(callback: HeartbeatCallback | None) -> None:
 
 
 def _resolve_api_key(config: Any) -> str:
-    """Resolve the optional transcription override before the shared key."""
+    """Resolve a provider key without leaking the official key to custom gateways."""
 
-    for setting in ("TRANSCRIPTION_API_KEY", "OPENAI_API_KEY"):
+    base_url = str(getattr(config, "TRANSCRIPTION_BASE_URL", OPENAI_AUDIO_BASE_URL) or OPENAI_AUDIO_BASE_URL).rstrip("/")
+    settings = ("TRANSCRIPTION_API_KEY", "ACTSIS_API_KEY")
+    if base_url == OPENAI_AUDIO_BASE_URL:
+        settings = (*settings, "OPENAI_API_KEY")
+    for setting in settings:
         value = str(getattr(config, setting, "") or "").strip()
         if value:
             return value
@@ -160,6 +166,18 @@ def _is_transient_provider_error(error: BaseException) -> bool:
         return True
     status_code = _status_code(error)
     return status_code in {408, 429} or (status_code is not None and 500 <= status_code <= 599)
+
+
+def _is_request_size_rejection(error: BaseException) -> bool:
+    status_code = _status_code(error)
+    if status_code == 413:
+        return True
+    if status_code != 400:
+        return False
+    detail = str(error).casefold()
+    has_subject = any(term in detail for term in ("file", "size", "payload"))
+    has_large = any(term in detail for term in ("large", "too big", "too_large", "exceed", "maximum"))
+    return has_subject and has_large
 
 
 def _error_detail(error: BaseException) -> str:
@@ -276,7 +294,7 @@ class _TimestampPassUnavailable(TranscriptionError):
 
 
 class OpenAIFileProvider:
-    """Scoped provider for the official ``audio.transcriptions.create`` API."""
+    """Scoped provider for an OpenAI-compatible ``audio.transcriptions`` API."""
 
     provider_name = "openai-file"
     capabilities = OPENAI_FILE_CAPABILITIES
@@ -289,13 +307,33 @@ class OpenAIFileProvider:
         sleep: Callable[[float], None] | None = None,
     ) -> None:
         api_key = _resolve_api_key(config)
+        self.base_url = str(
+            getattr(config, "TRANSCRIPTION_BASE_URL", OPENAI_AUDIO_BASE_URL)
+            or OPENAI_AUDIO_BASE_URL
+        ).rstrip("/")
         if not api_key:
+            key_hint = "TRANSCRIPTION_API_KEY or ACTSIS_API_KEY"
+            if self.base_url == OPENAI_AUDIO_BASE_URL:
+                key_hint += " or OPENAI_API_KEY"
             raise TranscriptionConfigurationError(
-                "TRANSCRIPTION_API_KEY or OPENAI_API_KEY is required for provider 'openai-file'",
+                f"{key_hint} is required for provider 'openai-file'",
                 setting="TRANSCRIPTION_API_KEY",
             )
         self.model = str(getattr(config, "TRANSCRIPTION_MODEL", "gpt-transcribe") or "").strip()
         self._validate_model(self.model)
+        cloud_diarization = bool(getattr(config, "TRANSCRIPTION_CLOUD_DIARIZATION", False))
+        response_formats = SUPPORTED_RESPONSE_FORMATS if cloud_diarization else frozenset({"json", "verbose_json"})
+        self.capabilities = ProviderCapabilities(
+            batch=True,
+            medical=False,
+            segments=True,
+            words=True,
+            speakers=cloud_diarization,
+            duration=True,
+            cloud_diarization=cloud_diarization,
+            audio_formats=SUPPORTED_AUDIO_FORMATS,
+            response_formats=response_formats,
+        )
         self.timestamp_model = str(
             getattr(config, "TRANSCRIPTION_TIMESTAMP_MODEL", DEFAULT_TIMESTAMP_MODEL)
             or ""
@@ -309,6 +347,11 @@ class OpenAIFileProvider:
             config,
             "TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES",
             DEFAULT_SINGLE_REQUEST_MAX_BYTES,
+        )
+        self._direct_upload_max_bytes = _config_int(
+            config,
+            "TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES",
+            0,
         )
         self._chunk_max_bytes = _config_int(
             config,
@@ -345,12 +388,24 @@ class OpenAIFileProvider:
         self._sleep = sleep or time.sleep
         # Disable the SDK's automatic retries so this provider owns one bounded,
         # observable policy for both small and chunked requests.
-        self._client = client or OpenAI(
-            api_key=api_key,
-            base_url=OPENAI_AUDIO_BASE_URL,
-            max_retries=0,
-        )
+        if client is not None:
+            self._client = client
+        else:
+            self._client = OpenAI(
+                api_key=api_key,
+                base_url=self.base_url,
+                max_retries=0,
+                http_client=httpx.Client(verify=self._tls_context(config)),
+            )
         self._closed = False
+
+    @staticmethod
+    def _tls_context(config: Any) -> ssl.SSLContext:
+        context = ssl.create_default_context()
+        ca_bundle = str(getattr(config, "ACTSIS_CA_BUNDLE", "") or "").strip()
+        if ca_bundle:
+            context.load_verify_locations(cafile=ca_bundle)
+        return context
 
     def _validate_long_file_settings(self) -> None:
         if not 0 < self._single_request_max_bytes < OPENAI_FILE_SIZE_LIMIT_BYTES:
@@ -358,6 +413,11 @@ class OpenAIFileProvider:
                 f"TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES must be between 1 and "
                 f"{OPENAI_FILE_SIZE_LIMIT_BYTES - 1}",
                 setting="TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES",
+            )
+        if self._direct_upload_max_bytes < 0:
+            raise TranscriptionConfigurationError(
+                "TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES must not be negative",
+                setting="TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES",
             )
         if not 0 < self._chunk_max_bytes <= self._single_request_max_bytes:
             raise TranscriptionConfigurationError(
@@ -405,7 +465,7 @@ class OpenAIFileProvider:
                 "model",
                 OpenAIFileProvider.provider_name,
                 model,
-                "openai-file supports only gpt-transcribe and gpt-4o-mini-transcribe in this slice",
+                "openai-file supports gpt-transcribe, gpt-4o-mini-transcribe, and whisper-1",
             )
 
     def _validate_request(self, request: BatchTranscriptionRequest, model: str, response_format: str) -> None:
@@ -523,33 +583,91 @@ class OpenAIFileProvider:
         except OSError as exc:
             raise InvalidAudioSourceError(f"Unable to inspect audio file: {path}") from exc
 
-        if file_size <= self._single_request_max_bytes:
-            if on_status_change:
-                on_status_change("transcribing")
-            response = self._request_file_with_retries(
-                path,
-                params,
-                on_heartbeat=on_heartbeat,
-            )
-            primary_result = self._response_to_result(
-                response,
-                request,
-                model=model,
-                response_format=response_format,
-                submitted_language=submitted_language,
-            )
-            if request.timestamp_mode != TimestampMode.NONE:
-                if on_status_change:
-                    on_status_change("timestamping")
-                primary_result = self._with_timestamp_pass(
-                    primary_result,
+        direct_upload = self._should_direct_upload(file_size)
+        if file_size <= self._single_request_max_bytes or direct_upload:
+            try:
+                return self._transcribe_single_file(
                     path,
                     request,
+                    params,
+                    model=model,
+                    response_format=response_format,
                     submitted_language=submitted_language,
+                    on_status_change=on_status_change,
                     on_heartbeat=on_heartbeat,
                 )
-            return primary_result
+            except ProviderRequestError as exc:
+                if not direct_upload or not _is_request_size_rejection(exc):
+                    raise
 
+        return self._transcribe_chunks(
+            path,
+            request,
+            params,
+            model=model,
+            response_format=response_format,
+            submitted_language=submitted_language,
+            on_status_change=on_status_change,
+            on_heartbeat=on_heartbeat,
+        )
+
+    def _should_direct_upload(self, file_size: int) -> bool:
+        return (
+            self.base_url != OPENAI_AUDIO_BASE_URL
+            and self._direct_upload_max_bytes > 0
+            and file_size <= self._direct_upload_max_bytes
+        )
+
+    def _transcribe_single_file(
+        self,
+        path: Path,
+        request: BatchTranscriptionRequest,
+        params: dict[str, Any],
+        *,
+        model: str,
+        response_format: str,
+        submitted_language: str | None,
+        on_status_change: StatusCallback | None,
+        on_heartbeat: HeartbeatCallback | None,
+    ) -> TranscriptionResult:
+        if on_status_change:
+            on_status_change("transcribing")
+        response = self._request_file_with_retries(
+            path,
+            params,
+            on_heartbeat=on_heartbeat,
+        )
+        primary_result = self._response_to_result(
+            response,
+            request,
+            model=model,
+            response_format=response_format,
+            submitted_language=submitted_language,
+        )
+        if request.timestamp_mode != TimestampMode.NONE:
+            if on_status_change:
+                on_status_change("timestamping")
+            primary_result = self._with_timestamp_pass(
+                primary_result,
+                path,
+                request,
+                submitted_language=submitted_language,
+                on_heartbeat=on_heartbeat,
+            )
+        return primary_result
+
+    def _transcribe_chunks(
+        self,
+        path: Path,
+        request: BatchTranscriptionRequest,
+        params: dict[str, Any],
+        *,
+        model: str,
+        response_format: str,
+        submitted_language: str | None,
+        on_status_change: StatusCallback | None,
+        on_heartbeat: HeartbeatCallback | None,
+    ) -> TranscriptionResult:
         workspace = Path(tempfile.mkdtemp(prefix="zabt-openai-"))
         chunk_set: AudioChunkSet | None = None
         try:

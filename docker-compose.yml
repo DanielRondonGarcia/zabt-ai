@@ -39,10 +39,14 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
-      # LLM (summarization) — OpenAI-compatible endpoint (OpenRouter, LM Studio, Ollama, etc.)
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
+      # LLM (summarization and retrieval chat) — OpenAI-compatible endpoint.
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-google/gemini-3.1-flash-lite-preview}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      # Chat can target a separate compatible gateway; by default it reuses OpenAI.
+      AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-https://api.openai.com/v1}
+      AI_CHAT_MODEL: ${AI_CHAT_MODEL:-gpt-4o-mini}
+      AI_CHAT_API_KEY: ${AI_CHAT_API_KEY:-}
       # First-party local auth. There is no Compose fallback: every backend
       # process must receive the same strong deployment secret.
       AUTH_ENVIRONMENT: ${AUTH_ENVIRONMENT:-development}
@@ -73,13 +77,16 @@ services:
       S3_BUCKET_NAME: ${S3_BUCKET_NAME:-zabt-ai-bucket}
       S3_PUBLIC_URL: ${S3_PUBLIC_URL:-}
       S3_REGION: ${S3_REGION:-auto}
-      # Transcription selection is independent from summary endpoint/model settings.
-      # openai-file uses TRANSCRIPTION_API_KEY when set, otherwise OPENAI_API_KEY;
-      # its audio client always targets the official OpenAI endpoint.
-      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-}
+      # Transcription selection is independent from summary/chat endpoint settings.
+      # openai-file supports official OpenAI and compatible gateways such as Actsis.
+      ACTSIS_API_KEY: ${ACTSIS_API_KEY:-}
+      ACTSIS_CA_BUNDLE: ${ACTSIS_CA_BUNDLE:-}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-openai-file}
       TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_BACKEND:-}
-      TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-gpt-transcribe}
+      TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-whisper-1}
+      TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://ai.actsis.internal/v1}
       TRANSCRIPTION_API_KEY: ${TRANSCRIPTION_API_KEY:-}
+      TRANSCRIPTION_CLOUD_DIARIZATION: ${TRANSCRIPTION_CLOUD_DIARIZATION:-false}
       TRANSCRIPTION_LANGUAGE: ${TRANSCRIPTION_LANGUAGE:-}
       TRANSCRIPTION_ALLOWED_LANGUAGES: ${TRANSCRIPTION_ALLOWED_LANGUAGES:-}
       TRANSCRIPTION_TIMESTAMP_MODE: ${TRANSCRIPTION_TIMESTAMP_MODE:-none}
@@ -87,6 +94,8 @@ services:
       TRANSCRIPTION_RESPONSE_FORMAT: ${TRANSCRIPTION_RESPONSE_FORMAT:-json}
       TRANSCRIPTION_SPEAKER_REQUIRED: ${TRANSCRIPTION_SPEAKER_REQUIRED:-false}
       TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES: ${TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES:-20000000}
+      # Custom gateways such as Actsis can opt in to full-file uploads; 0 keeps chunking.
+      TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: ${TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES:-0}
       TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES: ${TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES:-15000000}
       TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS: ${TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS:-600}
       TRANSCRIPTION_OPENAI_MAX_CHUNKS: ${TRANSCRIPTION_OPENAI_MAX_CHUNKS:-1024}
@@ -124,6 +133,16 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
       BOT_WORKER_URL: ${BOT_WORKER_URL:-http://worker-bot:8002}
+      # Embedding/vector indexing (optional, rollback via INDEXING_ENABLED=false)
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-https://ai.actsis.internal/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-768}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MAX_BATCH: ${EMBEDDING_MAX_BATCH:-32}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_COLLECTION_PREFIX: ${QDRANT_COLLECTION_PREFIX:-meeting_embeddings}
+      INDEXING_ENABLED: ${INDEXING_ENABLED:-true}
       # Observability (all optional)
       POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
       POSTHOG_HOST: ${POSTHOG_HOST:-https://us.i.posthog.com}
@@ -143,7 +162,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
       target: worker
-    command: celery -A app.worker.celery_app worker --loglevel=info
+    # Desktop-safe default: each prefork worker imports the full backend and costs
+    # roughly 200 MB. Raise CELERY_WORKER_CONCURRENCY explicitly for production.
+    command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
     volumes:
       - media_data:/media
     environment:
@@ -155,9 +176,13 @@ services:
       AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-zabt-client}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
-      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      OPENAI_MODEL: ${OPENAI_MODEL:-google/gemini-3.1-flash-lite-preview}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      # Chat can target a separate compatible gateway; by default it reuses OpenAI.
+      AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-https://api.openai.com/v1}
+      AI_CHAT_MODEL: ${AI_CHAT_MODEL:-gpt-4o-mini}
+      AI_CHAT_API_KEY: ${AI_CHAT_API_KEY:-}
       APP_URL: ${APP_URL:-http://localhost:3001}
       STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
@@ -170,12 +195,15 @@ services:
       S3_BUCKET_NAME: ${S3_BUCKET_NAME:-zabt-ai-bucket}
       S3_PUBLIC_URL: ${S3_PUBLIC_URL:-}
       S3_REGION: ${S3_REGION:-auto}
-      # Transcription selection; openai-file uses the optional override below or
-      # the shared OPENAI_API_KEY, and always uses the official OpenAI audio endpoint.
-      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-}
+      # Transcription selection; openai-file supports official OpenAI and Actsis.
+      ACTSIS_API_KEY: ${ACTSIS_API_KEY:-}
+      ACTSIS_CA_BUNDLE: ${ACTSIS_CA_BUNDLE:-}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-openai-file}
       TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_BACKEND:-}
-      TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-gpt-transcribe}
+      TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-whisper-1}
+      TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://ai.actsis.internal/v1}
       TRANSCRIPTION_API_KEY: ${TRANSCRIPTION_API_KEY:-}
+      TRANSCRIPTION_CLOUD_DIARIZATION: ${TRANSCRIPTION_CLOUD_DIARIZATION:-false}
       TRANSCRIPTION_LANGUAGE: ${TRANSCRIPTION_LANGUAGE:-}
       TRANSCRIPTION_ALLOWED_LANGUAGES: ${TRANSCRIPTION_ALLOWED_LANGUAGES:-}
       TRANSCRIPTION_TIMESTAMP_MODE: ${TRANSCRIPTION_TIMESTAMP_MODE:-none}
@@ -183,6 +211,8 @@ services:
       TRANSCRIPTION_RESPONSE_FORMAT: ${TRANSCRIPTION_RESPONSE_FORMAT:-json}
       TRANSCRIPTION_SPEAKER_REQUIRED: ${TRANSCRIPTION_SPEAKER_REQUIRED:-false}
       TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES: ${TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES:-20000000}
+      # Custom gateways such as Actsis can opt in to full-file uploads; 0 keeps chunking.
+      TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: ${TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES:-0}
       TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES: ${TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES:-15000000}
       TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS: ${TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS:-600}
       TRANSCRIPTION_OPENAI_MAX_CHUNKS: ${TRANSCRIPTION_OPENAI_MAX_CHUNKS:-1024}
@@ -225,6 +255,15 @@ services:
       MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI:-http://localhost:8000/api/v1/integrations/microsoft/callback}
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
       BOT_WORKER_URL: ${BOT_WORKER_URL:-http://worker-bot:8002}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-openai}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-https://ai.actsis.internal/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-768}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_MAX_BATCH: ${EMBEDDING_MAX_BATCH:-32}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      QDRANT_COLLECTION_PREFIX: ${QDRANT_COLLECTION_PREFIX:-meeting_embeddings}
+      INDEXING_ENABLED: ${INDEXING_ENABLED:-true}
       POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
       POSTHOG_HOST: ${POSTHOG_HOST:-https://us.i.posthog.com}
       SENTRY_DSN: ${SENTRY_DSN:-}
@@ -416,6 +455,21 @@ services:
 
   # Visual breakdown worker. Supports local Ollama or explicit OpenAI cloud inference.
   # Enable the profile and VISION_ENABLED explicitly; the default remains disabled.
+  # Vector store for embeddings (Qdrant). Enable with the local profile.
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    profiles: [local]
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/6333 && echo ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   zabt-vision-worker:
     image: zabt-vision-worker:latest
     restart: unless-stopped
@@ -461,3 +515,4 @@ volumes:
   postgres_data:
   minio_data:
   worker_model_cache:
+  qdrant_data:

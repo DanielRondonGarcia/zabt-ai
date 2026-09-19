@@ -43,6 +43,20 @@ class SummaryTemplate(SQLModel, table=True):
     layout_hint: Optional[str] = Field(default=None)  # "cards", "table", "columns", "list"
 
 
+class Group(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str = Field(index=True)
+    description: Optional[str] = Field(default=None)
+    owner_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    # Relationship to meetings
+    meetings: List["Meeting"] = Relationship(
+        back_populates="group",
+        sa_relationship_kwargs={"passive_deletes": True},
+    )
+
+
 class SummaryTemplateRead(SQLModel):
     id: int
     name: str
@@ -59,6 +73,25 @@ class SummaryTemplateListItem(SQLModel):
     name: str
     template_type: str
     is_system_default: bool
+
+
+class GroupRead(SQLModel):
+    id: int
+    name: str
+    description: Optional[str]
+    owner_id: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class GroupCreate(SQLModel):
+    name: str
+    description: Optional[str] = None
+
+
+class GroupUpdate(SQLModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
 
 
 class LanguageEntry(SQLModel, table=True):
@@ -141,6 +174,9 @@ class Meeting(MeetingBase, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     owner_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
     owner: Optional[User] = Relationship(back_populates="meetings")
+    # Group assignment - nullable FK to Group
+    group_id: Optional[int] = Field(default=None, foreign_key="group.id", index=True)
+    group: Optional[Group] = Relationship(back_populates="meetings")
     created_at: datetime = Field(default_factory=datetime.utcnow)
     status: str = Field(default="pending_upload") # pending_upload, queued, processing, completed, failed
     sub_status: Optional[str] = None
@@ -267,6 +303,7 @@ class SpeakerBreakdown(SQLModel):
 class MeetingRead(MeetingBase):
     id: int
     owner_id: int
+    group_id: Optional[int] = None
     created_at: datetime
     status: str
     sub_status: Optional[str] = None

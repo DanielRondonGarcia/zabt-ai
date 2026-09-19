@@ -211,3 +211,9 @@ kong/ssl/
 .atl/
 .codegraph/
 .playwright-mcp/
+
+# Local agent/runtime artifacts and ad-hoc workspace captures
+.pi/
+NUL
+orca-paste-*.png
+untitled.md

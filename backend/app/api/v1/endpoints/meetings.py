@@ -3,27 +3,34 @@
 from collections.abc import Mapping
 from datetime import datetime
 from typing import List, Any, Literal
+from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import Response
-from sqlmodel import Session
+from sqlmodel import Session, select as sqlmodel_select
+
+from app.db.engine import engine
 
 from app.api import deps
 from app.models import (
     Meeting, MeetingCreate, MeetingRead, MeetingSummaryUpdate, User,
-    TranscriptSegmentRead, TranscriptWordRead, SpeakerBreakdown,
+    TranscriptSegment, TranscriptSegmentRead, TranscriptWordRead, SpeakerBreakdown,
+    VisualSegment,
     TranscriptionType,
     EmailShareCreate, EmailShareRead, IntegrationProvider,
+    MeetingProcessingAuditRead,
 )
 from app.services import analytics
 from app.services.languages import catalog as lang_catalog
 from app.services.languages import preferences as lang_prefs
 from app.services.meeting import meeting_service
 from app.services.meeting_intelligence import intelligence_service
+from app.services.meeting_processing_audit import meeting_processing_audit
 from app.services.notifications import notify
 from app.services.pdf_export import pdf_export_service
 from app.services.storage import storage
 from app.services.email_share import email_share_service
 from app.services.integration import integration_service
+from app.services.group import group_service
 
 router = APIRouter()
 
@@ -161,6 +168,7 @@ def _build_meeting_response(meeting: Meeting) -> MeetingRead:
         structured_output_status=meeting.structured_output_status,
         highlights=[h.model_dump() for h in highlights_list],
         layout_hint=layout_hint,
+        group_id=meeting.group_id,
         audio_url=audio_url,
         media_type=_normalize_media_type(meeting.visual_breakdown_params),
         visual_breakdown_status=meeting.visual_breakdown_status,
@@ -240,6 +248,7 @@ def create_meeting(
         youtube_thumbnail_url=meeting.youtube_thumbnail_url,
         youtube_channel=meeting.youtube_channel,
         requested_language=meeting.requested_language,
+        group_id=meeting.group_id,
         media_type=_normalize_media_type(meeting.visual_breakdown_params),
         segments=[],
         speakers=None,
@@ -277,6 +286,22 @@ def read_meeting(
     if meeting.owner_id != current_user.id:
         raise HTTPException(status_code=400, detail="Not enough permissions")
     return _build_meeting_response(meeting)
+
+
+@router.get("/{meeting_id}/processing-audit", response_model=MeetingProcessingAuditRead)
+def read_meeting_processing_audit(
+    meeting_id: int,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Return the owner-scoped durable processing audit for a meeting."""
+    meeting = meeting_service.get_meeting(meeting_id)
+    if meeting is None or meeting.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return meeting_processing_audit.list_for_meeting(
+        meeting_id=meeting_id,
+        owner_id=current_user.id,
+    )
+
 
 @router.get("/{meeting_id}/export/pdf")
 def export_meeting_pdf(
@@ -520,6 +545,7 @@ def ingest_youtube_url(
         youtube_duration_seconds=meeting.youtube_duration_seconds,
         youtube_thumbnail_url=meeting.youtube_thumbnail_url,
         youtube_channel=meeting.youtube_channel,
+        group_id=meeting.group_id,
         segments=[],
         speakers=None,
     )
@@ -618,6 +644,64 @@ def re_transcribe_meeting(
             "Failed to capture meeting_re_transcribed", exc_info=True
         )
 
+    dispatch_transcription_job(meeting.id)
+    return _build_meeting_response(meeting)
+
+
+@router.post("/{meeting_id}/reprocess", response_model=MeetingRead)
+def reprocess_failed_meeting(
+    meeting_id: int,
+    db: Session = Depends(deps.get_db),
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Re-run the stored media pipeline for a failed meeting."""
+    meeting = db.get(Meeting, meeting_id)
+    if meeting is None or meeting.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+
+    if meeting.status != "failed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only failed meetings can be reprocessed.",
+        )
+    if not meeting.file_path or not meeting.file_path.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Meeting has no stored media file to reprocess.",
+        )
+
+    meeting.status = "queued"
+    meeting.sub_status = None
+    meeting.processing_heartbeat_at = datetime.utcnow()
+    meeting.transcript_text = None
+    meeting.summary_text = None
+    meeting.original_summary_text = None
+    meeting.summary_edited = False
+    meeting.action_items_text = None
+    meeting.structured_output = None
+    meeting.structured_output_status = "pending"
+    meeting.transliterated_text = None
+    meeting.visual_breakdown_status = None
+    meeting.visual_breakdown_error = None
+    meeting.visual_breakdown_completed_at = None
+    meeting.visual_raw_output_s3_key = None
+    meeting.visual_breakdown_model = None
+    meeting.visual_breakdown_params = None
+
+    for segment in db.exec(
+        sqlmodel_select(TranscriptSegment).where(TranscriptSegment.meeting_id == meeting_id)
+    ).all():
+        db.delete(segment)
+    for visual_segment in db.exec(
+        sqlmodel_select(VisualSegment).where(VisualSegment.meeting_id == meeting_id)
+    ).all():
+        db.delete(visual_segment)
+
+    db.add(meeting)
+    db.commit()
+    db.refresh(meeting)
+
+    meeting_processing_audit.create_run(meeting.id, trigger="reprocess")
     dispatch_transcription_job(meeting.id)
     return _build_meeting_response(meeting)
 
@@ -855,3 +939,62 @@ def get_visual_segments(
             for seg in aligned
         ],
     )
+
+
+# ── Group assignment endpoint ─────────────────────────────────────────────
+
+
+class AssignGroupPayload(BaseModel):
+    """Payload for assigning a group to a meeting."""
+    group_id: int | None
+
+
+def _enqueue_group_assignment_indexing(
+    meeting_id: int,
+    old_group_id: int | None,
+    new_group_id: int | None,
+) -> None:
+    """Dispatch idempotent vector indexing/cleanup after assignment commits."""
+    if old_group_id != new_group_id and old_group_id is not None:
+        from app.worker import delete_meeting_vectors
+
+        delete_meeting_vectors.delay(meeting_id)
+    if new_group_id is not None:
+        from app.worker import stage_embedding
+
+        stage_embedding.delay(meeting_id)
+
+
+@router.patch("/{meeting_id}/assign-group", response_model=MeetingRead)
+def assign_group_to_meeting(
+    meeting_id: int,
+    payload: AssignGroupPayload,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Assign or unassign a group to a meeting."""
+    meeting = meeting_service.get_meeting(meeting_id)
+    if not meeting:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if meeting.owner_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not enough permissions")
+
+    group_id = None
+    if payload.group_id is not None:
+        group = group_service.get_accessible(payload.group_id, current_user.id)
+        group_id = group.id
+
+    with Session(engine) as session:
+        meeting_for_update = session.get(Meeting, meeting_id)
+        if meeting_for_update is None:
+            raise HTTPException(status_code=404, detail="Meeting not found")
+        if meeting_for_update.owner_id != current_user.id:
+            raise HTTPException(status_code=403, detail="Not enough permissions")
+
+        old_group_id = meeting_for_update.group_id
+        meeting_for_update.group_id = group_id
+        session.add(meeting_for_update)
+        session.commit()
+        session.refresh(meeting_for_update)
+
+        _enqueue_group_assignment_indexing(meeting_id, old_group_id, group_id)
+        return _build_meeting_response(meeting_for_update)
