@@ -8,7 +8,12 @@ import httpx
 import pytest
 
 from app.services.embeddings.canonicalize import canonicalize_text, flatten_structured_output
-from app.services.embeddings.chunk import build_meeting_chunks, point_id_for
+from app.services.embeddings.chunk import (
+    CONTENT_CHUNK_OVERLAP_WORDS,
+    CONTENT_CHUNK_WORDS,
+    build_meeting_chunks,
+    point_id_for,
+)
 from app.services.embeddings.ollama import OllamaEmbeddingProvider
 from app.services.embeddings.openai import OpenAIEmbeddingProvider
 from app.services.vector_store import EmbeddingPoint, QdrantVectorStoreClient
@@ -29,10 +34,51 @@ def test_chunking_uses_overlap_and_stable_ids():
     )
 
     transcript_chunks = [chunk for chunk in chunks if chunk.kind == "transcript"]
-    assert [chunk.chunk_index for chunk in transcript_chunks] == [0, 1, 2]
-    assert transcript_chunks[0].text.split()[-200:] == transcript_chunks[1].text.split()[:200]
+    assert [chunk.chunk_index for chunk in transcript_chunks] == list(range(len(transcript_chunks)))
+    assert all(len(chunk.text.split()) <= CONTENT_CHUNK_WORDS for chunk in transcript_chunks)
+    assert transcript_chunks[0].text.split()[-CONTENT_CHUNK_OVERLAP_WORDS:] == transcript_chunks[1].text.split()[
+        :CONTENT_CHUNK_OVERLAP_WORDS
+    ]
     assert chunks[0].id == str(uuid5(NAMESPACE_OID, "123:summary:0"))
-    assert point_id_for(123, "transcript", 2) == str(uuid5(NAMESPACE_OID, "123:transcript:2"))
+    assert point_id_for(123, "transcript", transcript_chunks[-1].chunk_index) == str(
+        uuid5(NAMESPACE_OID, f"123:transcript:{transcript_chunks[-1].chunk_index}")
+    )
+
+
+def test_long_summary_and_structured_output_use_conservative_windows():
+    summary = " ".join(f"summary{i}" for i in range(CONTENT_CHUNK_WORDS + 1))
+    structured = {"notes": " ".join(f"structured{i}" for i in range(CONTENT_CHUNK_WORDS + 1))}
+
+    chunks = build_meeting_chunks(
+        meeting_id=123,
+        summary_text=summary,
+        structured_output=structured,
+        structured_output_status="completed",
+    )
+
+    for kind in ("summary", "structured"):
+        kind_chunks = [chunk for chunk in chunks if chunk.kind == kind]
+        assert len(kind_chunks) == 2
+        assert all(len(chunk.text.split()) <= CONTENT_CHUNK_WORDS for chunk in kind_chunks)
+        assert kind_chunks[0].text.split()[-CONTENT_CHUNK_OVERLAP_WORDS:] == kind_chunks[1].text.split()[
+            :CONTENT_CHUNK_OVERLAP_WORDS
+        ]
+        assert [chunk.chunk_index for chunk in kind_chunks] == [0, 1]
+        assert [chunk.chunk_count for chunk in kind_chunks] == [2, 2]
+
+
+def test_short_summary_and_structured_output_keep_single_chunk_contract():
+    chunks = build_meeting_chunks(
+        meeting_id=123,
+        summary_text="short summary",
+        structured_output={"status": "ready"},
+        structured_output_status="completed",
+    )
+
+    assert [(chunk.kind, chunk.chunk_index, chunk.chunk_count, chunk.text) for chunk in chunks] == [
+        ("summary", 0, 1, "short summary"),
+        ("structured", 0, 1, "status: ready"),
+    ]
 
 
 class _FakeResponse:
@@ -51,6 +97,7 @@ class _FakeResponse:
 
 class _FakeHttpClient:
     last_request = None
+    requests = []
 
     def __init__(self, *args, **kwargs):
         pass
@@ -63,22 +110,74 @@ class _FakeHttpClient:
 
     def post(self, url, json, headers, timeout):
         self.__class__.last_request = (url, json, headers, timeout)
+        self.__class__.requests.append((url, json, headers, timeout))
         return _FakeResponse({"data": [{"embedding": [0.1, 0.2, 0.3]} for _ in json["input"]]})
 
 
-def test_ollama_provider_enforces_configured_dimension_and_batch(monkeypatch):
-    monkeypatch.setattr("app.services.embeddings.ollama.httpx.Client", _FakeHttpClient)
+class _OrderedHttpClient(_FakeHttpClient):
+    def post(self, url, json, headers, timeout):
+        self.__class__.last_request = (url, json, headers, timeout)
+        self.__class__.requests.append((url, json, headers, timeout))
+        return _FakeResponse(
+            {
+                "data": [
+                    {"embedding": [float(ord(text)), 0.2, 0.3]}
+                    for text in json["input"]
+                ]
+            }
+        )
+
+
+def test_ollama_provider_batches_inputs_and_preserves_response_order(monkeypatch):
+    monkeypatch.setattr("app.services.embeddings.ollama.httpx.Client", _OrderedHttpClient)
+    monkeypatch.setattr("app.services.embeddings.ollama.settings.EMBEDDING_BASE_URL", "http://ollama.test/v1")
+    monkeypatch.setattr("app.services.embeddings.ollama.settings.EMBEDDING_MODEL", "nomic")
+    monkeypatch.setattr("app.services.embeddings.ollama.settings.EMBEDDING_DIMENSION", 3)
+    monkeypatch.setattr("app.services.embeddings.ollama.settings.EMBEDDING_MAX_BATCH", 2)
+    _FakeHttpClient.requests = []
+    provider = OllamaEmbeddingProvider()
+
+    assert provider.dimension == 3
+    assert provider.embed(["a", "b", "c", "d", "e"]) == [
+        [97.0, 0.2, 0.3],
+        [98.0, 0.2, 0.3],
+        [99.0, 0.2, 0.3],
+        [100.0, 0.2, 0.3],
+        [101.0, 0.2, 0.3],
+    ]
+    assert [_request[1]["input"] for _request in _OrderedHttpClient.requests] == [
+        ["a", "b"],
+        ["c", "d"],
+        ["e"],
+    ]
+    assert _OrderedHttpClient.last_request[0] == "http://ollama.test/v1/embeddings"
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"data": []}, "count mismatch"),
+        ({"data": [{"embedding": [0.1, 0.2]}]}, "dimension mismatch"),
+    ],
+)
+def test_ollama_provider_validates_each_batch_count_and_dimension(monkeypatch, payload, message):
+    class InvalidResponseHttpClient(_FakeHttpClient):
+        calls = 0
+
+        def post(self, url, json, headers, timeout):
+            type(self).calls += 1
+            if type(self).calls == 2:
+                return _FakeResponse(payload)
+            return _FakeResponse({"data": [{"embedding": [0.1, 0.2, 0.3]} for _ in json["input"]]})
+
+    monkeypatch.setattr("app.services.embeddings.ollama.httpx.Client", InvalidResponseHttpClient)
     monkeypatch.setattr("app.services.embeddings.ollama.settings.EMBEDDING_BASE_URL", "http://ollama.test/v1")
     monkeypatch.setattr("app.services.embeddings.ollama.settings.EMBEDDING_MODEL", "nomic")
     monkeypatch.setattr("app.services.embeddings.ollama.settings.EMBEDDING_DIMENSION", 3)
     monkeypatch.setattr("app.services.embeddings.ollama.settings.EMBEDDING_MAX_BATCH", 1)
-    provider = OllamaEmbeddingProvider()
 
-    assert provider.dimension == 3
-    assert provider.embed(["hello"]) == [[0.1, 0.2, 0.3]]
-    assert _FakeHttpClient.last_request[0] == "http://ollama.test/v1/embeddings"
-    with pytest.raises(ValueError, match="Batch size"):
-        provider.embed(["a", "b"])
+    with pytest.raises(ValueError, match=message):
+        OllamaEmbeddingProvider().embed(["a", "b"])
 
 
 def test_openai_provider_requires_key_and_dimension(monkeypatch):
@@ -110,6 +209,53 @@ def test_openai_provider_uses_actsis_key_for_custom_endpoint(monkeypatch):
     assert provider.embed(["hello"]) == [[0.1, 0.2, 0.3]]
     assert _FakeHttpClient.last_request[0] == "https://ai.actsis.internal/v1/embeddings"
     assert _FakeHttpClient.last_request[2]["Authorization"] == "Bearer actsis-test-key"
+
+
+def test_openai_provider_batches_inputs_and_preserves_response_order(monkeypatch):
+    monkeypatch.setattr("app.services.embeddings.openai.httpx.Client", _OrderedHttpClient)
+    monkeypatch.setattr("app.services.embeddings.openai.settings.EMBEDDING_BASE_URL", "https://ai.actsis.internal/v1")
+    monkeypatch.setattr("app.services.embeddings.openai.settings.EMBEDDING_MODEL", "nomic-embed")
+    monkeypatch.setattr("app.services.embeddings.openai.settings.EMBEDDING_API_KEY", "actsis-test-key")
+    monkeypatch.setattr("app.services.embeddings.openai.settings.EMBEDDING_DIMENSION", 3)
+    monkeypatch.setattr("app.services.embeddings.openai.settings.EMBEDDING_MAX_BATCH", 2)
+    _FakeHttpClient.requests = []
+
+    provider = OpenAIEmbeddingProvider()
+
+    assert provider.embed(["a", "b", "c"]) == [
+        [97.0, 0.2, 0.3],
+        [98.0, 0.2, 0.3],
+        [99.0, 0.2, 0.3],
+    ]
+    assert [_request[1]["input"] for _request in _OrderedHttpClient.requests] == [["a", "b"], ["c"]]
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    [
+        ({"data": []}, "count mismatch"),
+        ({"data": [{"embedding": [0.1, 0.2]}]}, "dimension mismatch"),
+    ],
+)
+def test_openai_provider_validates_each_batch_count_and_dimension(monkeypatch, payload, message):
+    class InvalidResponseHttpClient(_FakeHttpClient):
+        calls = 0
+
+        def post(self, url, json, headers, timeout):
+            type(self).calls += 1
+            if type(self).calls == 2:
+                return _FakeResponse(payload)
+            return _FakeResponse({"data": [{"embedding": [0.1, 0.2, 0.3]} for _ in json["input"]]})
+
+    monkeypatch.setattr("app.services.embeddings.openai.httpx.Client", InvalidResponseHttpClient)
+    monkeypatch.setattr("app.services.embeddings.openai.settings.EMBEDDING_BASE_URL", "https://ai.actsis.internal/v1")
+    monkeypatch.setattr("app.services.embeddings.openai.settings.EMBEDDING_MODEL", "nomic-embed")
+    monkeypatch.setattr("app.services.embeddings.openai.settings.EMBEDDING_API_KEY", "actsis-test-key")
+    monkeypatch.setattr("app.services.embeddings.openai.settings.EMBEDDING_DIMENSION", 3)
+    monkeypatch.setattr("app.services.embeddings.openai.settings.EMBEDDING_MAX_BATCH", 1)
+
+    with pytest.raises(ValueError, match=message):
+        OpenAIEmbeddingProvider().embed(["a", "b"])
 
 
 class _FakeQdrant:

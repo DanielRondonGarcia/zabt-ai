@@ -12,7 +12,7 @@ Group embeddings are controlled by backend settings and can be disabled independ
 | `EMBEDDING_MODEL` | Embedding model name sent to the provider and stored in Qdrant payloads. |
 | `EMBEDDING_DIMENSION` | Expected vector dimension and Qdrant collection size. Provider responses must match it. |
 | `EMBEDDING_API_KEY` | API key for providers that require one. Do not log this value. |
-| `EMBEDDING_MAX_BATCH` | Maximum provider batch size per embedding request. |
+| `EMBEDDING_MAX_BATCH` | Maximum number of inputs in each provider HTTP request. Provider adapters split larger meeting indexes into sequential requests. |
 | `QDRANT_URL` | Qdrant HTTP endpoint. |
 | `QDRANT_COLLECTION_PREFIX` | Prefix for active embedding collections. |
 
@@ -23,6 +23,19 @@ The active Qdrant collection name is provider- and dimension-scoped:
 ```
 
 Changing provider or dimension intentionally writes to a separate collection.
+
+## Chunking and request batching
+
+Embedding content is split into deterministic windows of 128 whitespace-separated
+words with a 32-word overlap. This is a conservative word-based safety margin,
+not a tokenizer-exact token limit; it leaves headroom for gateways with a
+physical limit of 512 provider tokens. The same bounded windows apply to
+transcripts, transliterations, long summaries, and long structured output.
+
+`EMBEDDING_MAX_BATCH` limits the number of input strings sent in one HTTP request,
+not the number of chunks allowed in one meeting index. The OpenAI-compatible and
+Ollama adapters send larger meeting indexes in sequential batches and concatenate
+the validated responses in input order.
 
 ## Ollama
 

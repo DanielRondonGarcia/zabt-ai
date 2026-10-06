@@ -36,21 +36,26 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         return settings.EMBEDDING_DIMENSION
 
     def embed(self, texts: list[str]) -> list[list[float]]:
-        """Embed texts and fail if the returned vector size differs from config."""
+        """Embed texts in bounded requests and validate every response batch."""
         if not texts:
             return []
-        if len(texts) > self.max_batch:
-            raise ValueError(f"Batch size {len(texts)} exceeds maximum {self.max_batch}")
 
+        embeddings: list[list[float]] = []
         try:
             with httpx.Client(verify=self._tls_context()) as client:
-                response = client.post(
-                    f"{self.base_url}/embeddings",
-                    json={"model": self.model, "input": texts},
-                    headers=self._auth_headers(),
-                    timeout=30.0,
-                )
-                response.raise_for_status()
+                for start in range(0, len(texts), self.max_batch):
+                    batch = texts[start : start + self.max_batch]
+                    response = client.post(
+                        f"{self.base_url}/embeddings",
+                        json={"model": self.model, "input": batch},
+                        headers=self._auth_headers(),
+                        timeout=30.0,
+                    )
+                    response.raise_for_status()
+
+                    batch_embeddings = self._parse_embeddings(response.json(), expected_count=len(batch))
+                    self._assert_dimensions(batch_embeddings)
+                    embeddings.extend(batch_embeddings)
         except httpx.HTTPStatusError as exc:
             raise RuntimeError(
                 f"OpenAI embeddings API returned status {exc.response.status_code}: {exc.response.text}"
@@ -58,8 +63,6 @@ class OpenAIEmbeddingProvider(EmbeddingProvider):
         except httpx.RequestError as exc:
             raise RuntimeError(f"Failed to connect to OpenAI embeddings API: {exc}") from exc
 
-        embeddings = self._parse_embeddings(response.json(), expected_count=len(texts))
-        self._assert_dimensions(embeddings)
         return embeddings
 
     def _parse_embeddings(self, payload: dict, *, expected_count: int) -> list[list[float]]:
