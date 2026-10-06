@@ -44,3 +44,13 @@ class TestBuildConfig:
         config = build_config(user_tier=UserTier.PRO)
 
         assert isinstance(config, TranscriptionConfig)
+
+    @patch("app.services.transcription.factory.settings")
+    def test_carries_optional_chunking_strategy_from_settings(self, mock_settings):
+        mock_settings.DIARIZATION_MIN_SPEAKERS = 1
+        mock_settings.DIARIZATION_MAX_SPEAKERS = 10
+        mock_settings.TRANSCRIPTION_CHUNKING_STRATEGY = " auto "
+
+        from app.services.transcription.factory import build_config
+
+        assert build_config().chunking_strategy == "auto"

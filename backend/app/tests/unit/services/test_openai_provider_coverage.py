@@ -39,6 +39,7 @@ class Config:
     TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES = 50
     TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS = 60.0
     TRANSCRIPTION_OPENAI_MAX_RETRIES = 2
+    TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS = 600.0
     TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS = 0.25
     TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS = 1.0
     TRANSCRIPTION_FFMPEG_TIMEOUT_SECONDS = 9.0
@@ -159,6 +160,8 @@ def test_configuration_accepts_override_key_and_rejects_invalid_models_and_numbe
         ("TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES", 0),
         ("TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES", 101),
         ("TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS", 0),
+        ("TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS", 0),
+        ("TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS", float("nan")),
         ("TRANSCRIPTION_OPENAI_MAX_RETRIES", -1),
         ("TRANSCRIPTION_OPENAI_MAX_RETRIES", 6),
         ("TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS", -1),
@@ -206,26 +209,92 @@ def test_actsis_gateway_uses_actsis_key_and_parses_diarized_speakers(tmp_path):
         ACTSIS_API_KEY = "actsis-test-key"
         TRANSCRIPTION_BASE_URL = "https://ai.actsis.internal/v1"
         TRANSCRIPTION_CLOUD_DIARIZATION = True
-        TRANSCRIPTION_MODEL = "whisper-1"
+        TRANSCRIPTION_MODEL = "whisper-diarize"
 
     path = _audio_file(tmp_path)
     response = Response(
         text="hola equipo",
         language="es",
         duration=2.0,
-        segments=[Response(start=0.0, end=2.0, text="hola equipo", speaker="SPEAKER_00")],
-        words=[Response(start=0.0, end=2.0, word="hola", speaker="SPEAKER_00")],
+        segments=[
+            Response(
+                start=0.0,
+                end=2.0,
+                text="hola equipo",
+                speaker="SPEAKER_00",
+                words=[
+                    Response(start=0.0, end=0.25, word="hola"),
+                    Response(start=0.3, end=0.55, word="equipo"),
+                    Response(start=0.6, end=0.8, word="uno"),
+                    Response(start=0.85, end=1.05, word="dos"),
+                    Response(start=1.1, end=1.3, word="tres"),
+                    Response(start=1.35, end=1.55, word="cuatro"),
+                    Response(start=1.6, end=1.9, word="cinco"),
+                ],
+            )
+        ],
     )
+    assert not hasattr(response, "words")
     client = FakeClient([response])
     provider = OpenAIFileProvider(ActsisConfig(), client=client)
     result = provider.transcribe(
-        _request(path, model="whisper-1", response_format="diarized_json", speaker_required=True)
+        _request(
+            path,
+            model="whisper-diarize",
+            response_format="diarized_json",
+            speaker_required=True,
+            chunking_strategy="auto",
+        )
     )
 
     assert provider.base_url == "https://ai.actsis.internal/v1"
+    assert provider.capabilities.cloud_diarization is True
     assert result.segments[0].speaker == "SPEAKER_00"
+    assert len(result.segments[0].words) == 7
+    assert [(word.word, word.start, word.end) for word in result.segments[0].words] == [
+        ("hola", 0.0, 0.25),
+        ("equipo", 0.3, 0.55),
+        ("uno", 0.6, 0.8),
+        ("dos", 0.85, 1.05),
+        ("tres", 1.1, 1.3),
+        ("cuatro", 1.35, 1.55),
+        ("cinco", 1.6, 1.9),
+    ]
+    assert {word.speaker_label for word in result.segments[0].words} == {"SPEAKER_00"}
     assert result.capability_gaps == ()
+    assert client.audio.transcriptions.calls[0]["params"]["model"] == "whisper-diarize"
     assert client.audio.transcriptions.calls[0]["params"]["response_format"] == "diarized_json"
+    assert client.audio.transcriptions.calls[0]["params"]["chunking_strategy"] == "auto"
+
+
+def test_diarization_model_requires_custom_endpoint_and_explicit_opt_in():
+    class OfficialEnabled(Config):
+        TRANSCRIPTION_MODEL = "whisper-diarize"
+        TRANSCRIPTION_CLOUD_DIARIZATION = True
+
+    with pytest.raises(UnsupportedCapabilityError, match="custom transcription endpoint"):
+        _provider(config=OfficialEnabled())
+
+    class CustomDisabled(Config):
+        TRANSCRIPTION_BASE_URL = "https://ai.actsis.internal/v1"
+        TRANSCRIPTION_MODEL = "whisper-diarize"
+
+    with pytest.raises(UnsupportedCapabilityError, match="TRANSCRIPTION_CLOUD_DIARIZATION=true"):
+        _provider(config=CustomDisabled())
+
+
+def test_generic_custom_model_does_not_claim_cloud_diarization(tmp_path):
+    class GenericCustom(Config):
+        TRANSCRIPTION_BASE_URL = "https://ai.actsis.internal/v1"
+        TRANSCRIPTION_CLOUD_DIARIZATION = True
+        TRANSCRIPTION_MODEL = "whisper-1"
+
+    path = _audio_file(tmp_path)
+    provider = _provider([Response(text="not diarized")], config=GenericCustom())
+    assert provider.capabilities.cloud_diarization is False
+    with pytest.raises(UnsupportedCapabilityError, match="cloud diarization"):
+        provider.transcribe(_request(path, speaker_required=True))
+    assert provider._client.audio.transcriptions.calls == []
 
 
 def test_custom_gateway_does_not_fall_back_to_official_openai_key():
@@ -258,10 +327,10 @@ def test_small_file_transcription_builds_parameters_maps_response_usage_segments
             allowed_languages=frozenset({"en"}),
             response_format="verbose_json",
             model="gpt-4o-mini-transcribe",
+            chunking_strategy="auto",
             metadata={
                 "prompt": "domain words",
                 "temperature": 0,
-                "chunking_strategy": "auto",
                 "include": ["logprobs"],
                 "known_speaker_names": ["Ada"],
                 "known_speaker_references": {"Ada": "s3://ref"},

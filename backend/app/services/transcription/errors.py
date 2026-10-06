@@ -57,6 +57,23 @@ class ProviderRequestError(TranscriptionError):
         self.attempts = attempts
 
 
+class ProviderResponseError(TranscriptionError):
+    """A provider returned a response that violates the requested contract."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        model: str | None = None,
+        response_format: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.model = model
+        self.response_format = response_format
+
+
 class TranscriptionConfigurationError(TranscriptionError, ValueError):
     """The selected provider or one of its settings is invalid."""
 

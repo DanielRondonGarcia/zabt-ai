@@ -288,6 +288,7 @@ class TranscriptWordRead(SQLModel):
     word: str
     start: float
     end: float
+    speaker: Optional[str] = None
 
 class TranscriptSegmentRead(SQLModel):
     start: float

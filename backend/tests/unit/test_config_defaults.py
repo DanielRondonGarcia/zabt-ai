@@ -15,6 +15,8 @@ The ``--noconftest`` flag is required because ``tests/conftest.py`` imports
 requiring a valid DATABASE_URL. That's a pre-existing infrastructure
 quirk unrelated to this test file.
 """
+import pytest
+
 from app.core.config import Settings
 
 
@@ -54,3 +56,22 @@ class TestTranscriptionDefaults:
     def test_openai_timestamp_model_defaults_to_whisper(self):
         default = Settings.model_fields["TRANSCRIPTION_TIMESTAMP_MODEL"].default
         assert default == "whisper-1"
+
+    def test_openai_request_timeout_preserves_generic_default(self):
+        default = Settings.model_fields["TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS"].default
+        assert default == 600.0
+
+    def test_meeting_recovery_grace_preserves_generic_default(self):
+        default = Settings.model_fields["MEETING_RECOVERY_GRACE_SECONDS"].default
+        assert default == 900
+
+    def test_openai_request_timeout_must_be_positive(self):
+        with pytest.raises(ValueError, match="TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS"):
+            Settings.model_validate(
+                {
+                    "AUTH_JWT_SECRET": "valid-auth-secret-value-with-enough-entropy-12345!",
+                    "TRANSCRIPTION_PROVIDER": "openai-file",
+                    "TRANSCRIPTION_API_KEY": "test-key",
+                    "TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS": 0,
+                }
+            )

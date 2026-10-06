@@ -20,6 +20,8 @@ from app.services.meeting_recovery import (
 
 NOW = datetime(2026, 9, 12, 12, 0, 0)
 GRACE_SECONDS = 900
+FULL_CLOUD_REQUEST_TIMEOUT_SECONDS = 7200
+FULL_CLOUD_RECOVERY_GRACE_SECONDS = 9000
 
 
 def _meeting(**overrides):
@@ -114,6 +116,58 @@ def test_recovery_grace_requires_more_than_fifteen_minutes_without_heartbeat():
         stale,
         now=NOW,
         grace_seconds=GRACE_SECONDS,
+    )
+
+
+def test_full_cloud_long_request_claim_and_dispatch_wait_for_recovery_grace():
+    live_request = _meeting(
+        processing_heartbeat_at=NOW - timedelta(seconds=FULL_CLOUD_REQUEST_TIMEOUT_SECONDS),
+    )
+    live_claim = MagicMock(return_value=True)
+    live_dispatchers = _dispatchers()
+
+    live_plan = claim_recovery_plan(
+        live_request,
+        now=NOW,
+        grace_seconds=FULL_CLOUD_RECOVERY_GRACE_SECONDS,
+        acquire_claim=live_claim,
+    )
+
+    assert live_plan is None
+    live_claim.assert_not_called()
+    for dispatcher in live_dispatchers.values():
+        dispatcher.assert_not_called()
+
+    beyond_recovery_window = _meeting(
+        processing_heartbeat_at=NOW - timedelta(seconds=FULL_CLOUD_RECOVERY_GRACE_SECONDS + 1),
+    )
+    stale_claim = MagicMock(return_value=True)
+    stale_dispatchers = _dispatchers()
+
+    stale_plan = claim_recovery_plan(
+        beyond_recovery_window,
+        now=NOW,
+        grace_seconds=FULL_CLOUD_RECOVERY_GRACE_SECONDS,
+        acquire_claim=stale_claim,
+    )
+
+    assert stale_plan is not None
+    stale_claim.assert_called_once_with()
+    _dispatch(beyond_recovery_window.id, stale_plan, stale_dispatchers)
+    stale_dispatchers["full"].assert_called_once_with(beyond_recovery_window.id)
+    stale_dispatchers["youtube"].assert_not_called()
+    stale_dispatchers["stages"].assert_not_called()
+    stale_dispatchers["finalize"].assert_not_called()
+
+    assert not is_stale_meeting(
+        live_request,
+        now=NOW,
+        grace_seconds=FULL_CLOUD_RECOVERY_GRACE_SECONDS,
+    )
+    assert is_stale_meeting(
+        beyond_recovery_window,
+        now=NOW,
+        grace_seconds=FULL_CLOUD_RECOVERY_GRACE_SECONDS,
     )
 
 

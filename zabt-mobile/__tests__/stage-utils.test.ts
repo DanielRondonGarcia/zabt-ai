@@ -79,3 +79,18 @@ describe("completed meeting stage mapping", () => {
     expect(VISUAL_OUTCOME_COPY.fallback.description).toContain("transcript-only");
   });
 });
+
+describe("processing stage mapping", () => {
+  it.each([
+    "preparing_audio",
+    "transcribing_chunk",
+  ] as const)("maps %s to the transcribing stage", (subStatus) => {
+    expect(
+      getUserStage({
+        status: "processing",
+        sub_status: subStatus,
+        visual_breakdown_status: null,
+      })
+    ).toBe("transcribing");
+  });
+});

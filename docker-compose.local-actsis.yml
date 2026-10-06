@@ -1,0 +1,68 @@
+# Shareable local Actsis override — no GPU or provider secret is stored here.
+#
+#   docker compose --env-file .env \
+#     -f docker-compose.yml -f docker-compose.local-actsis.yml \
+#     --profile local up -d
+#
+# The base file keeps generic provider/recovery defaults. This overlay owns the
+# long-running Actsis policy for the local no-GPU test: a 7200-second blocking
+# request, zero provider retries, and a 9000-second stale-recovery grace.
+services:
+  api:
+    ports: !override
+      - "8000:8000"
+    environment:
+      ACTSIS_API_KEY: ${ACTSIS_API_KEY:?ACTSIS_API_KEY must be set in .env}
+      TRANSCRIPTION_PROVIDER: openai-file
+      TRANSCRIPTION_MODEL: whisper-diarize
+      TRANSCRIPTION_BASE_URL: https://ai.actsis.internal/v1
+      TRANSCRIPTION_API_KEY: ${TRANSCRIPTION_API_KEY:-}
+      TRANSCRIPTION_CLOUD_DIARIZATION: "true"
+      TRANSCRIPTION_RESPONSE_FORMAT: diarized_json
+      TRANSCRIPTION_SPEAKER_REQUIRED: "true"
+      TRANSCRIPTION_CHUNKING_STRATEGY: auto
+      TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: "500000000"
+      TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS: "7200"
+      TRANSCRIPTION_OPENAI_MAX_RETRIES: "0"
+      MEETING_RECOVERY_GRACE_SECONDS: "9000"
+
+  worker:
+    environment:
+      ACTSIS_API_KEY: ${ACTSIS_API_KEY:?ACTSIS_API_KEY must be set in .env}
+      TRANSCRIPTION_PROVIDER: openai-file
+      TRANSCRIPTION_MODEL: whisper-diarize
+      TRANSCRIPTION_BASE_URL: https://ai.actsis.internal/v1
+      TRANSCRIPTION_API_KEY: ${TRANSCRIPTION_API_KEY:-}
+      TRANSCRIPTION_CLOUD_DIARIZATION: "true"
+      TRANSCRIPTION_RESPONSE_FORMAT: diarized_json
+      TRANSCRIPTION_SPEAKER_REQUIRED: "true"
+      TRANSCRIPTION_CHUNKING_STRATEGY: auto
+      TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: "500000000"
+      TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS: "7200"
+      TRANSCRIPTION_OPENAI_MAX_RETRIES: "0"
+      MEETING_RECOVERY_GRACE_SECONDS: "9000"
+
+  beat:
+    environment:
+      ACTSIS_API_KEY: ${ACTSIS_API_KEY:?ACTSIS_API_KEY must be set in .env}
+      TRANSCRIPTION_PROVIDER: openai-file
+      TRANSCRIPTION_MODEL: whisper-diarize
+      TRANSCRIPTION_BASE_URL: https://ai.actsis.internal/v1
+      TRANSCRIPTION_API_KEY: ${TRANSCRIPTION_API_KEY:-}
+      TRANSCRIPTION_CLOUD_DIARIZATION: "true"
+      TRANSCRIPTION_RESPONSE_FORMAT: diarized_json
+      TRANSCRIPTION_SPEAKER_REQUIRED: "true"
+      TRANSCRIPTION_CHUNKING_STRATEGY: auto
+      TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: "500000000"
+      TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS: "7200"
+      TRANSCRIPTION_OPENAI_MAX_RETRIES: "0"
+      MEETING_RECOVERY_GRACE_SECONDS: "9000"
+
+  web:
+    ports: !override
+      - "3001:3000"
+
+  # The base local profile includes a GPU worker. Move it to an opt-in profile
+  # so `--profile local` remains reproducible without NVIDIA or pyannote.
+  worker-gpu:
+    profiles: !override [gpu]

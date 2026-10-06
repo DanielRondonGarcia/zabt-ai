@@ -5,8 +5,10 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from app.models import TranscriptionBackend, TranscriptionType
+from app.core.config import Settings
 from app.services.transcription.contracts import (
     AudioSource,
     BatchTranscriptionRequest,
@@ -27,6 +29,25 @@ def _openai_provider(model: str = "gpt-transcribe") -> OpenAIFileProvider:
     )
 
 
+def _settings(**overrides) -> Settings:
+    values = {
+        "AUTH_JWT_SECRET": "unit-test-secret-with-enough-diversity-123456789!",
+        "TRANSCRIPTION_PROVIDER": "openai-file",
+        "TRANSCRIPTION_BACKEND": None,
+        "TRANSCRIPTION_API_KEY": "",
+        "ACTSIS_API_KEY": "",
+        "OPENAI_API_KEY": "",
+        "TRANSCRIPTION_BASE_URL": "https://api.openai.com/v1",
+        "TRANSCRIPTION_MODEL": "gpt-transcribe",
+        "TRANSCRIPTION_RESPONSE_FORMAT": "json",
+        "TRANSCRIPTION_CLOUD_DIARIZATION": False,
+        "TRANSCRIPTION_SPEAKER_REQUIRED": False,
+        "EMBEDDING_PROVIDER": "ollama",
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
 def test_registry_contains_only_first_slice_provider_seams():
     assert set(PROVIDER_BUILDERS) == {"gpu-local", "runpod", "openai-file"}
 
@@ -38,8 +59,59 @@ def test_registry_requires_both_openai_credentials_without_fallback():
         TRANSCRIPTION_API_KEY="",
         OPENAI_API_KEY="",
     )
-    with pytest.raises(TranscriptionConfigurationError, match="TRANSCRIPTION_API_KEY or OPENAI_API_KEY"):
+    with pytest.raises(
+        TranscriptionConfigurationError,
+        match="TRANSCRIPTION_API_KEY or OPENAI_API_KEY",
+    ):
         get_provider(config)
+
+
+def test_settings_keep_official_and_custom_credentials_isolated():
+    with pytest.raises(ValidationError, match="TRANSCRIPTION_API_KEY or OPENAI_API_KEY"):
+        _settings(ACTSIS_API_KEY="actsis-only")
+
+    with pytest.raises(ValidationError, match="TRANSCRIPTION_API_KEY or ACTSIS_API_KEY"):
+        _settings(
+            TRANSCRIPTION_BASE_URL="https://ai.actsis.internal/v1",
+            OPENAI_API_KEY="openai-only",
+        )
+
+    assert _settings(
+        ACTSIS_API_KEY="actsis-key",
+        OPENAI_API_KEY="openai-key",
+    ).TRANSCRIPTION_BASE_URL == "https://api.openai.com/v1"
+    assert _settings(
+        TRANSCRIPTION_BASE_URL="https://ai.actsis.internal/v1",
+        ACTSIS_API_KEY="actsis-key",
+        OPENAI_API_KEY="openai-key",
+    ).TRANSCRIPTION_BASE_URL == "https://ai.actsis.internal/v1"
+
+
+def test_settings_enforce_diarized_format_and_https_only_when_diarization_is_enabled():
+    assert _settings(
+        TRANSCRIPTION_BASE_URL="http://localhost:8080/v1",
+        ACTSIS_API_KEY="local-test-key",
+    ).TRANSCRIPTION_BASE_URL == "http://localhost:8080/v1"
+
+    with pytest.raises(ValidationError, match="requires TRANSCRIPTION_RESPONSE_FORMAT=diarized_json"):
+        _settings(
+            TRANSCRIPTION_BASE_URL="https://ai.actsis.internal/v1",
+            ACTSIS_API_KEY="actsis-key",
+            TRANSCRIPTION_MODEL="whisper-diarize",
+            TRANSCRIPTION_CLOUD_DIARIZATION=True,
+            TRANSCRIPTION_SPEAKER_REQUIRED=True,
+            TRANSCRIPTION_RESPONSE_FORMAT="json",
+        )
+
+    with pytest.raises(ValidationError, match="custom TRANSCRIPTION_BASE_URL using https://"):
+        _settings(
+            TRANSCRIPTION_BASE_URL="http://ai.actsis.internal/v1",
+            ACTSIS_API_KEY="actsis-key",
+            TRANSCRIPTION_MODEL="whisper-diarize",
+            TRANSCRIPTION_CLOUD_DIARIZATION=True,
+            TRANSCRIPTION_SPEAKER_REQUIRED=True,
+            TRANSCRIPTION_RESPONSE_FORMAT="diarized_json",
+        )
 
 
 def test_registry_builds_fresh_gpu_scopes():
@@ -96,8 +168,9 @@ def test_registry_rejects_speaker_required_before_provider_io():
     assert raised.value.capability == "cloud_diarization"
 
 
-def test_diarized_model_remains_a_future_only_candidate():
+def test_unverified_diarized_model_remains_rejected():
     assert "gpt-4o-transcribe-diarize" not in SUPPORTED_MODELS
+    assert "whisper-diarize" in SUPPORTED_MODELS
     with pytest.raises(UnsupportedCapabilityError) as raised:
         OpenAIFileProvider._validate_model("gpt-4o-transcribe-diarize")
     assert raised.value.capability == "model"

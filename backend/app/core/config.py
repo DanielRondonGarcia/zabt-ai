@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+import math
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 
@@ -102,6 +103,7 @@ class Settings(BaseSettings):
     TRANSCRIPTION_TIMESTAMP_MODEL: str = "whisper-1"
     TRANSCRIPTION_RESPONSE_FORMAT: str = "json"
     TRANSCRIPTION_SPEAKER_REQUIRED: bool = False
+    TRANSCRIPTION_CHUNKING_STRATEGY: Optional[str] = None
     # OpenAI file uploads stay on the existing single-request path below this
     # safe threshold. Larger media is converted to deterministic local MP3
     # chunks before it reaches the provider's 25 MB limit.
@@ -113,6 +115,7 @@ class Settings(BaseSettings):
     TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES: int = 15_000_000
     TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS: float = 600.0
     TRANSCRIPTION_OPENAI_MAX_CHUNKS: int = 1024
+    TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS: float = 600.0
     TRANSCRIPTION_OPENAI_MAX_RETRIES: int = 2
     TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS: float = 1.0
     TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS: float = 8.0
@@ -265,15 +268,13 @@ class Settings(BaseSettings):
         if not transcription_base_url:
             raise ValueError("TRANSCRIPTION_BASE_URL must not be empty")
         if selected == "openai-file":
-            has_provider_key = bool(self.TRANSCRIPTION_API_KEY.strip() or self.ACTSIS_API_KEY.strip())
-            has_shared_key = bool(self.OPENAI_API_KEY.strip())
             if transcription_base_url == "https://api.openai.com/v1":
-                if not (has_provider_key or has_shared_key):
+                if not (self.TRANSCRIPTION_API_KEY.strip() or self.OPENAI_API_KEY.strip()):
                     raise ValueError(
-                        "TRANSCRIPTION_API_KEY, ACTSIS_API_KEY, or OPENAI_API_KEY is required "
+                        "TRANSCRIPTION_API_KEY or OPENAI_API_KEY is required "
                         "for TRANSCRIPTION_PROVIDER=openai-file"
                     )
-            elif not has_provider_key:
+            elif not (self.TRANSCRIPTION_API_KEY.strip() or self.ACTSIS_API_KEY.strip()):
                 raise ValueError(
                     "TRANSCRIPTION_API_KEY or ACTSIS_API_KEY is required for a custom "
                     "TRANSCRIPTION_BASE_URL"
@@ -282,6 +283,25 @@ class Settings(BaseSettings):
             raise ValueError(
                 "TRANSCRIPTION_SPEAKER_REQUIRED requires TRANSCRIPTION_CLOUD_DIARIZATION=true"
             )
+        if selected == "openai-file" and (
+            self.TRANSCRIPTION_SPEAKER_REQUIRED
+            or self.TRANSCRIPTION_MODEL.strip() == "whisper-diarize"
+        ) and self.TRANSCRIPTION_RESPONSE_FORMAT != "diarized_json":
+            raise ValueError(
+                "TRANSCRIPTION_SPEAKER_REQUIRED or TRANSCRIPTION_MODEL=whisper-diarize "
+                "requires TRANSCRIPTION_RESPONSE_FORMAT=diarized_json"
+            )
+        if selected == "openai-file" and (
+            self.TRANSCRIPTION_CLOUD_DIARIZATION
+            or self.TRANSCRIPTION_MODEL.strip() == "whisper-diarize"
+        ):
+            if (
+                transcription_base_url == "https://api.openai.com/v1"
+                or not transcription_base_url.casefold().startswith("https://")
+            ):
+                raise ValueError(
+                    "Cloud diarization requires a custom TRANSCRIPTION_BASE_URL using https://"
+                )
         if selected == "runpod" and (not self.RUNPOD_API_KEY.strip() or not self.RUNPOD_ENDPOINT_ID.strip()):
             raise ValueError(
                 "RUNPOD_API_KEY and RUNPOD_ENDPOINT_ID are required for "
@@ -302,6 +322,13 @@ class Settings(BaseSettings):
             )
         if self.TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS <= 0:
             raise ValueError("TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS must be greater than zero")
+        if (
+            not math.isfinite(self.TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS)
+            or self.TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS <= 0
+        ):
+            raise ValueError(
+                "TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS must be greater than zero"
+            )
         if not 0 <= self.TRANSCRIPTION_OPENAI_MAX_RETRIES <= 5:
             raise ValueError("TRANSCRIPTION_OPENAI_MAX_RETRIES must be between 0 and 5")
         if self.TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS < 0:

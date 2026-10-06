@@ -126,6 +126,7 @@ class BatchTranscriptionRequest:
     speaker_required: bool = False
     response_format: str | None = None
     model: str | None = None
+    chunking_strategy: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:

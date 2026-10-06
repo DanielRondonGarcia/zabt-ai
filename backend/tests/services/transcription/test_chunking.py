@@ -11,6 +11,7 @@ from app.services.transcription import chunks
 from app.services.transcription.chunks import (
     AudioChunk,
     ChunkTranscription,
+    extract_audio_file,
     extract_audio_chunks,
     merge_chunk_results,
     plan_chunk_ranges,
@@ -33,6 +34,29 @@ def test_plan_chunk_ranges_is_ordered_and_bounded():
 
     with pytest.raises(TranscriptionPreparationError, match="exceeding the configured limit"):
         plan_chunk_ranges(100, 10, max_chunks=9)
+
+
+def test_extract_audio_file_uses_mono_16khz_mp3_command(tmp_path, monkeypatch):
+    source = tmp_path / "meeting.mp4"
+    source.write_bytes(b"synthetic-media")
+    output = tmp_path / "normalized" / "audio.mp3"
+    commands = []
+
+    monkeypatch.setattr(chunks.shutil, "which", lambda name: name)
+
+    def runner(command, **kwargs):
+        commands.append((command, kwargs))
+        output.write_bytes(b"normalized-audio")
+        return CompletedProcess(command, 0, stdout="", stderr="")
+
+    assert extract_audio_file(source, output, command_runner=runner) == output
+    assert output.read_bytes() == b"normalized-audio"
+    command = commands[0][0]
+    assert command[command.index("-i") + 1] == str(source)
+    assert "-vn" in command
+    assert command[command.index("-ac") + 1] == "1"
+    assert command[command.index("-ar") + 1] == "16000"
+    assert command[command.index("-b:a") + 1] == "32k"
 
 
 def test_extract_audio_chunks_uses_ffprobe_and_deterministic_mono_mp3_commands(tmp_path, monkeypatch):
@@ -196,6 +220,91 @@ def test_merge_chunk_results_offsets_timing_deduplicates_boundary_and_aggregates
         {"type": "duration", "seconds": 2},
     ]
     assert merged.capability_gaps == ("speakers",)
+
+
+def test_merge_chunk_results_preserves_adjacent_speakers_with_identical_boundary_text(tmp_path):
+    first_chunk = AudioChunk(1, tmp_path / "chunk_000001.mp3", 0, 2, "mp3", "audio/mpeg")
+    second_chunk = AudioChunk(2, tmp_path / "chunk_000002.mp3", 2, 2, "mp3", "audio/mpeg")
+
+    def diarized_result(speaker, word_speaker):
+        return TranscriptionResult(
+            text="repeat",
+            language="en",
+            segments=[
+                ResultSegment(
+                    start=1.0,
+                    end=2.0,
+                    text="repeat",
+                    speaker=speaker,
+                    words=[WordTimestamp("repeat", 1.5, 2.0, speaker_label=word_speaker)],
+                )
+            ],
+            provider_name="openai-file",
+            recognition_method="openai-audio-transcriptions",
+            audio_duration_seconds=2,
+            estimated_cost=None,
+            model="whisper-diarize",
+        )
+
+    merged = merge_chunk_results(
+        [
+            ChunkTranscription(first_chunk, diarized_result("SPEAKER_00", "SPEAKER_00")),
+            ChunkTranscription(second_chunk, diarized_result("SPEAKER_01", "SPEAKER_01")),
+        ],
+        audio_duration_seconds=4,
+    )
+
+    assert merged.text == "repeat repeat"
+    assert [(segment.text, segment.speaker) for segment in merged.segments] == [
+        ("repeat", "SPEAKER_00"),
+        ("repeat", "SPEAKER_01"),
+    ]
+    assert [
+        (word.word, word.speaker_label)
+        for segment in merged.segments
+        for word in segment.words
+    ] == [
+        ("repeat", "SPEAKER_00"),
+        ("repeat", "SPEAKER_01"),
+    ]
+
+
+def test_merge_chunk_results_keeps_identical_words_when_only_segment_speakers_differ(tmp_path):
+    first_chunk = AudioChunk(1, tmp_path / "chunk_000001.mp3", 0, 2, "mp3", "audio/mpeg")
+    second_chunk = AudioChunk(2, tmp_path / "chunk_000002.mp3", 2, 2, "mp3", "audio/mpeg")
+
+    def diarized_result(speaker):
+        return TranscriptionResult(
+            text="repeat",
+            language="en",
+            segments=[
+                ResultSegment(
+                    start=1.0,
+                    end=2.0,
+                    text="repeat",
+                    speaker=speaker,
+                    words=[WordTimestamp("repeat", 1.5, 2.0)],
+                )
+            ],
+            provider_name="openai-file",
+            recognition_method="openai-audio-transcriptions",
+            audio_duration_seconds=2,
+            estimated_cost=None,
+            model="whisper-diarize",
+        )
+
+    merged = merge_chunk_results(
+        [
+            ChunkTranscription(first_chunk, diarized_result("SPEAKER_00")),
+            ChunkTranscription(second_chunk, diarized_result("SPEAKER_01")),
+        ],
+        audio_duration_seconds=4,
+    )
+
+    assert [word.word for segment in merged.segments for word in segment.words] == [
+        "repeat",
+        "repeat",
+    ]
 
 
 def test_merge_chunk_results_creates_coarse_segments_for_text_only_chunks(tmp_path):

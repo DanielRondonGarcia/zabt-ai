@@ -62,6 +62,7 @@ class ScopedGpuProvider:
             response_format=request.response_format,
             speaker_required=request.speaker_required,
             model=request.model,
+            chunking_strategy=request.chunking_strategy,
         )
         return self.process_audio(str(source.local_path or ""), config, on_status_change, on_heartbeat)
 

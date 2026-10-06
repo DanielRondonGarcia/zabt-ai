@@ -49,7 +49,7 @@ const ROMAN_SPEAKER_COLORS: Record<string, string> = {
 const romanSpeakerColor = (s: string) =>
   ROMAN_SPEAKER_COLORS[s] ?? "bg-stone-200 text-stone-500";
 const romanSpeakerLabel = (s: string) => {
-  if (s === "SPEAKER_UNKNOWN") return "Unknown Speaker";
+  if (s === "SPEAKER_UNKNOWN") return "Unidentified speaker";
   const n = s.split("_")[1];
   return n !== undefined ? `Speaker ${parseInt(n) + 1}` : s;
 };

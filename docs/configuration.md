@@ -10,6 +10,27 @@ and notes which are required. Values marked **REQUIRED** must be set for a worki
 |----------|---------|-------|
 | `COMPOSE_PROFILES` | `local` | `local` = bundled db+minio+gpu+web. Add `bot`/`vision` for add-ons. Empty for the cloud split. |
 
+### Local Actsis without a GPU
+
+The base Compose file keeps generic transcription and recovery fallbacks for the local GPU,
+OpenAI-compatible, and RunPod paths: `600` seconds per request, `2` provider retries, and a
+`900`-second stale-recovery grace. Use the dedicated overlay when the local run should use the
+HTTPS Actsis diarization path without starting the GPU worker:
+
+```bash
+docker compose --env-file .env \
+  -f docker-compose.yml -f docker-compose.local-actsis.yml \
+  --profile local up -d
+```
+
+The overlay sources `ACTSIS_API_KEY` from the untracked `.env` and sets
+`whisper-diarize`/`diarized_json`, required cloud speakers, `chunking_strategy=auto`, a
+500000000-byte direct-upload threshold, a `7200`-second request timeout, zero provider retries,
+and a `9000`-second recovery grace for API, worker, and beat. The grace is intentionally greater
+than the blocking request timeout, so Beat does not claim or dispatch a live request at the timeout
+boundary. It preserves the local API `http://localhost:8000` and web `http://localhost:3001` ports;
+the base GPU worker is moved to an opt-in `gpu` profile and is not started by this command.
+
 ## Database
 
 | Variable | Default | Notes |
@@ -94,12 +115,14 @@ intentionally unavailable without a configured delivery provider.
 
 ## Transcription
 
-Transcription provider selection, model, and options are independent from the summary and vision
-endpoint settings. Copy `.env.example` to `.env`, choose one provider, and pass the same
-`TRANSCRIPTION_*` values to the API and worker. For `openai-file`, `TRANSCRIPTION_API_KEY` is an
-optional override; when it is empty, the provider uses `OPENAI_API_KEY`. The audio client always
-uses the official OpenAI endpoint and never inherits `OPENAI_BASE_URL`. Provider errors are
-surfaced explicitly; the registry never silently switches to another provider.
+Transcription provider selection, model, endpoint, and options are independent from the summary and
+vision settings. Copy `.env.example` to `.env`, choose one provider, and pass the same
+`TRANSCRIPTION_*` values to the API and worker. Ensure Beat receives the same
+`MEETING_RECOVERY_GRACE_SECONDS` value. For `openai-file`, credential fallback is endpoint-specific:
+the official OpenAI endpoint uses `TRANSCRIPTION_API_KEY` then `OPENAI_API_KEY`;
+a custom endpoint uses `TRANSCRIPTION_API_KEY` then `ACTSIS_API_KEY`. `OPENAI_BASE_URL` never
+controls audio transcription. Provider errors are surfaced explicitly; the registry never silently
+switches to another provider.
 
 ### Provider selection and file options
 
@@ -107,20 +130,26 @@ surfaced explicitly; the registry never silently switches to another provider.
 |----------|---------|-------|
 | `TRANSCRIPTION_PROVIDER` | `gpu-local` | `gpu-local`, `runpod`, or `openai-file`. This is the canonical selector. |
 | `TRANSCRIPTION_BACKEND` | — | Compatibility alias for `gpu-local`/`runpod` only. Do not set it to a different value from `TRANSCRIPTION_PROVIDER`. |
-| `TRANSCRIPTION_MODEL` | `gpt-transcribe` | OpenAI file candidates are `gpt-transcribe` and `gpt-4o-mini-transcribe`; model choice is explicit and configurable. GPU/RunPod model selection remains in their worker settings. |
-| `TRANSCRIPTION_API_KEY` | — | Optional credential override for `openai-file`; when empty, `OPENAI_API_KEY` is used. The audio client still uses the official OpenAI endpoint, not `OPENAI_BASE_URL`. Never put a credential in the repository. |
+| `TRANSCRIPTION_BASE_URL` | `https://api.openai.com/v1` | Audio endpoint for `openai-file`. Custom endpoints are explicit; enabled cloud diarization requires a custom `https://` endpoint. |
+| `TRANSCRIPTION_MODEL` | `gpt-transcribe` | OpenAI file candidates are `gpt-transcribe` and `gpt-4o-mini-transcribe`. Custom Actsis diarization uses `whisper-diarize`; GPU/RunPod model selection remains in their worker settings. |
+| `TRANSCRIPTION_API_KEY` | — | Optional credential override for `openai-file`. Empty falls back to `OPENAI_API_KEY` at the official endpoint or `ACTSIS_API_KEY` at a custom endpoint. Never put a credential in the repository. |
+| `ACTSIS_API_KEY` | — | Fallback credential only for a custom `TRANSCRIPTION_BASE_URL`; it is never used as the official OpenAI fallback. |
+| `TRANSCRIPTION_CLOUD_DIARIZATION` | `false` | Must be `true` for speaker-required cloud transcription. `whisper-diarize` also requires a custom HTTPS endpoint. |
 | `TRANSCRIPTION_LANGUAGE` | — | Optional language sent to the selected provider. |
 | `TRANSCRIPTION_ALLOWED_LANGUAGES` | — | Optional comma-separated Whisper/provider language hints. |
 | `TRANSCRIPTION_TIMESTAMP_MODE` | `none` | `none`, `segment`, or `word`. `word` enables word highlighting and the optional timestamp pass. |
 | `TRANSCRIPTION_TIMESTAMP_MODEL` | `whisper-1` | Model used only by the optional timestamp pass. The primary `TRANSCRIPTION_MODEL` remains the text/summary model. |
-| `TRANSCRIPTION_RESPONSE_FORMAT` | `json` | Format for the primary text request. It may remain `json`; the separate timestamp request always uses `verbose_json`. |
-| `TRANSCRIPTION_SPEAKER_REQUIRED` | `false` | The first-slice providers do not advertise cloud diarization, so `true` is rejected before audio submission. Missing optional speakers remain `SPEAKER_UNKNOWN`. |
+| `TRANSCRIPTION_RESPONSE_FORMAT` | `json` | Primary format: `json`, `verbose_json`, or `diarized_json`. `diarized_json` is required for speaker-required or `whisper-diarize` requests; timestamp passes use `verbose_json`. |
+| `TRANSCRIPTION_SPEAKER_REQUIRED` | `false` | Requires `TRANSCRIPTION_CLOUD_DIARIZATION=true` for `openai-file`; enabled cloud diarization rejects unlabeled segments instead of inventing speakers. |
+| `TRANSCRIPTION_CHUNKING_STRATEGY` | — | Optional provider chunking hint. Actsis diarization uses `auto`. |
 | `TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES` | `20000000` | Safe threshold for retaining the existing one-request path; must remain below OpenAI's 25 MB file limit. |
 | `TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES` | `15000000` | Post-FFmpeg chunk-size guard; a larger generated chunk fails with an actionable preparation error. |
 | `TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS` | `600` | Target duration for deterministic mono 16 kHz MP3 chunks. |
 | `TRANSCRIPTION_OPENAI_MAX_CHUNKS` | `1024` | Bounded protection against unexpectedly long media. |
-| `TRANSCRIPTION_OPENAI_MAX_RETRIES` | `2` | Additional attempts for transient OpenAI connection, 408, 429, and 5xx failures; the SDK's automatic retries are disabled. |
+| `TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS` | `600` | Generic blocking request timeout, passed to both the OpenAI SDK and its httpx transport. Full-cloud Actsis defaults to `7200`. |
+| `TRANSCRIPTION_OPENAI_MAX_RETRIES` | `2` | Additional attempts for transient connection, 408, 429, and 5xx failures; full-cloud Actsis defaults to `0` to avoid repeating a long request. |
 | `TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS` / `TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS` | `1` / `8` | Bounded exponential retry delay in seconds. |
+| `MEETING_RECOVERY_GRACE_SECONDS` | `900` | Stale recovery grace after the last heartbeat. Keep it above the maximum blocking provider request plus an operational margin; full-cloud and local Actsis runtime overrides use `9000` when the request timeout is `7200`. |
 | `TRANSCRIPTION_FFMPEG_TIMEOUT_SECONDS` | `900` | Timeout for each FFmpeg/ffprobe preparation command. |
 
 Examples:
@@ -129,7 +158,7 @@ Examples:
 # Default local GPU path; the existing RunPod wire contract remains available.
 TRANSCRIPTION_PROVIDER=gpu-local
 # TRANSCRIPTION_PROVIDER=runpod
-# TRANSCRIPTION_API_KEY=  # optional override; empty uses OPENAI_API_KEY
+# TRANSCRIPTION_API_KEY=  # optional; fallback depends on TRANSCRIPTION_BASE_URL
 
 # Explicit general OpenAI file transcription (not medical or realtime).
 # TRANSCRIPTION_PROVIDER=openai-file
@@ -141,10 +170,25 @@ TRANSCRIPTION_PROVIDER=gpu-local
 # TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES=20000000
 # TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES=15000000
 # TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS=600
+
+# Custom HTTPS Actsis diarization. TRANSCRIPTION_API_KEY may override ACTSIS_API_KEY.
+# TRANSCRIPTION_PROVIDER=openai-file
+# TRANSCRIPTION_BASE_URL=https://ai.actsis.internal/v1
+# ACTSIS_API_KEY=<actsis-key>
+# TRANSCRIPTION_API_KEY=
+# TRANSCRIPTION_MODEL=whisper-diarize
+# TRANSCRIPTION_CLOUD_DIARIZATION=true
+# TRANSCRIPTION_RESPONSE_FORMAT=diarized_json
+# TRANSCRIPTION_SPEAKER_REQUIRED=true
+# TRANSCRIPTION_CHUNKING_STRATEGY=auto
+# TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS=7200
+# TRANSCRIPTION_OPENAI_MAX_RETRIES=0
+# MEETING_RECOVERY_GRACE_SECONDS=9000
 ```
 
 `openai-file` submits a local supported audio/media file (including WAV/MP3/MP4 and other documented
-suffixes) through the official file-transcription API. Files at or below the safe single-request threshold retain the existing
+suffixes) to `TRANSCRIPTION_BASE_URL`. The official OpenAI endpoint is the default; custom endpoints
+such as Actsis are explicit. Files at or below the safe single-request threshold retain the existing
 path. Larger files are decoded locally with the FFmpeg/ffprobe toolchain, converted to mono 16 kHz
 MP3, split into deterministic chunks, validated before upload, transcribed sequentially, and
 merged with absolute offsets. Temporary chunks are deleted on success or failure; chunk names are
@@ -155,14 +199,15 @@ twice: the configured primary model (normally `gpt-transcribe`) supplies canonic
 then `whisper-1` supplies playback timing with `verbose_json`. This adds one OpenAI request and
 its associated latency/cost per file/chunk; a failed timestamp pass preserves primary text and
 records a capability gap instead of claiming synchronized words. It is a general batch provider:
-realtime is not exposed, cloud medical parity is not claimed, and `gpt-4o-transcribe-diarize` is a
-future-only candidate until a separate capability contract is verified. The shared credential-gated
-fixture lives under `backend/tests/fixtures/transcription/`; it never stores private audio.
+realtime is not exposed and cloud medical parity is not claimed. Actsis `whisper-diarize` is the
+explicit custom-HTTPS cloud-diarization path and requires `diarized_json` plus speaker labels. The
+shared credential-gated fixture lives under `backend/tests/fixtures/transcription/`; it never stores
+private audio.
 
 Ollama remains supported for the separate visual/LLM paths where their settings say so, but it is
-not registered as an audio transcription provider. Generic OpenAI-compatible `base_url` audio is
-also not assumed: `OPENAI_BASE_URL` configures summarization only, and an unverified audio provider
-selection is rejected rather than routed through another endpoint.
+not registered as an audio transcription provider. Audio endpoints must be selected explicitly with
+`TRANSCRIPTION_BASE_URL`; an unverified provider selection is rejected rather than silently routed
+through `OPENAI_BASE_URL`.
 
 ### Local, RunPod, and medical settings
 

@@ -53,6 +53,8 @@ export function getUserStage(meeting: Pick<Meeting, "status" | "sub_status">): U
       return "uploaded";
     case "uploading":
     case "transcribing":
+    case "preparing_audio":
+    case "transcribing_chunk":
       return "transcribing";
     case "aligning":
       return "aligning";

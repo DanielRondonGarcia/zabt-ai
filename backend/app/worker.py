@@ -443,6 +443,7 @@ def stage_transcribe(meeting_id: int) -> int:
                 speaker_required=config.speaker_required,
                 response_format=config.response_format,
                 model=config.model,
+                chunking_strategy=config.chunking_strategy,
             )
             result = provider.transcribe(
                 request,

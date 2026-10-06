@@ -25,7 +25,7 @@ const getSpeakerColor = (speaker: string) =>
     SPEAKER_COLORS[speaker] ?? "bg-stone-200 text-stone-500";
 
 const getSpeakerLabel = (speaker: string) => {
-    if (speaker === "SPEAKER_UNKNOWN") return "Unknown Speaker";
+    if (speaker === "SPEAKER_UNKNOWN") return "Unidentified speaker";
     const num = speaker.split("_")[1];
     return num !== undefined ? `Speaker ${parseInt(num) + 1}` : speaker;
 };

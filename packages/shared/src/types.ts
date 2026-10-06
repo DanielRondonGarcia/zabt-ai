@@ -6,6 +6,7 @@ export interface TranscriptWord {
   word: string;
   start: number;
   end: number;
+  speaker?: string | null;
 }
 
 export interface TranscriptSegment {

@@ -34,6 +34,11 @@ def build_config(user_tier: UserTier | None = None, language: str | None = None,
     configured_language = getattr(settings, "TRANSCRIPTION_LANGUAGE", None)
     response_format = getattr(settings, "TRANSCRIPTION_RESPONSE_FORMAT", None)
     model = getattr(settings, "TRANSCRIPTION_MODEL", None)
+    chunking_strategy = getattr(settings, "TRANSCRIPTION_CHUNKING_STRATEGY", None)
+    if isinstance(chunking_strategy, str):
+        chunking_strategy = chunking_strategy.strip() or None
+    else:
+        chunking_strategy = None
     return TranscriptionConfig(
         min_speakers=settings.DIARIZATION_MIN_SPEAKERS,
         max_speakers=settings.DIARIZATION_MAX_SPEAKERS,
@@ -43,6 +48,7 @@ def build_config(user_tier: UserTier | None = None, language: str | None = None,
         response_format=response_format if isinstance(response_format, str) else None,
         speaker_required=bool(getattr(settings, "TRANSCRIPTION_SPEAKER_REQUIRED", False)),
         model=model if isinstance(model, str) else None,
+        chunking_strategy=chunking_strategy,
     )
 
 

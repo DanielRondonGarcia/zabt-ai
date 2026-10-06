@@ -95,7 +95,12 @@ def _build_meeting_response(meeting: Meeting) -> MeetingRead:
 
     for seg in meeting.segments:
         words = [
-            TranscriptWordRead(word=w["word"], start=w["start"], end=w["end"])
+            TranscriptWordRead(
+                word=w["word"],
+                start=w["start"],
+                end=w["end"],
+                speaker=w.get("speaker") or w.get("speaker_label"),
+            )
             for w in (seg.words or [])
         ]
         segments.append(TranscriptSegmentRead(

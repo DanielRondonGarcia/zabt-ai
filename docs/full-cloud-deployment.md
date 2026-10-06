@@ -75,11 +75,23 @@ not started.
 
 ## Actsis transcription boundary
 
-Actsis transcription in this topology is intentionally non-diarized. The Compose configuration
-sets `TRANSCRIPTION_RESPONSE_FORMAT=json`, `TRANSCRIPTION_CLOUD_DIARIZATION=false`, and
-`TRANSCRIPTION_SPEAKER_REQUIRED=false`. Do not configure `diarized_json` or claim speaker
-diarization from the Actsis path; use a separate explicitly authorized provider topology if that
-capability becomes available.
+This topology explicitly uses the verified Actsis diarization model over HTTPS. Compose selects
+`TRANSCRIPTION_MODEL=whisper-diarize`, `TRANSCRIPTION_RESPONSE_FORMAT=diarized_json`,
+`TRANSCRIPTION_CLOUD_DIARIZATION=true`, `TRANSCRIPTION_SPEAKER_REQUIRED=true`, and
+`TRANSCRIPTION_CHUNKING_STRATEGY=auto`. The provider accepts this model only for a custom endpoint
+with cloud diarization enabled; official OpenAI and generic compatible models keep their existing
+non-diarized defaults.
+
+Use `https://ai.actsis.internal/v1` (or another explicitly provisioned HTTPS Actsis endpoint) in
+the deployment env file. Do not use the HTTP URL, add a local GPU/pyannote worker, or add
+`HF_TOKEN` to this no-GPU topology.
+
+The full-cloud profile uses a `7200`-second request timeout, zero provider retries, and a
+`9000`-second stale-recovery grace. The grace must remain above the blocking request timeout so
+Beat does not claim or dispatch a live Actsis request at the timeout boundary. For the equivalent
+no-GPU local topology and its `:8000` API / `:3001` web ports, use
+`docker-compose.local-actsis.yml` together with the base Compose file instead of changing the base
+generic `600`/`2`/`900` fallbacks.
 
 The same Actsis key isolation applies to embeddings: custom Actsis endpoints use `ACTSIS_API_KEY`
 unless a dedicated embedding or transcription key is supplied. `ACTSIS_CA_BUNDLE` is optional;

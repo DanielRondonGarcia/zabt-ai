@@ -9,6 +9,8 @@ separate capability that is not exposed by this provider.
 
 from __future__ import annotations
 
+import logging
+import math
 import shutil
 import ssl
 import tempfile
@@ -24,6 +26,7 @@ from app.models import TranscriptionType
 from app.services.transcription.chunks import (
     AudioChunkSet,
     ChunkTranscription,
+    extract_audio_file,
     extract_audio_chunks,
     merge_chunk_results,
 )
@@ -37,6 +40,7 @@ from app.services.transcription.contracts import (
 from app.services.transcription.errors import (
     InvalidAudioSourceError,
     ProviderRequestError,
+    ProviderResponseError,
     TranscriptionConfigurationError,
     TranscriptionError,
     UnsupportedCapabilityError,
@@ -55,23 +59,33 @@ from app.services.transcription.types import (
 )
 
 
-SUPPORTED_MODELS = frozenset({"gpt-transcribe", "gpt-4o-mini-transcribe", "whisper-1"})
+SUPPORTED_MODELS = frozenset({
+    "gpt-transcribe",
+    "gpt-4o-mini-transcribe",
+    "whisper-1",
+    "whisper-diarize",
+})
+CUSTOM_CLOUD_DIARIZATION_MODEL = "whisper-diarize"
 SUPPORTED_TIMESTAMP_MODELS = frozenset({"whisper-1"})
 SUPPORTED_AUDIO_FORMATS = frozenset({
     "flac", "mp3", "mp4", "mpeg", "mpga", "m4a", "ogg", "wav", "webm",
 })
+ACTSIS_VIDEO_FORMATS = frozenset({"avi", "mkv", "mov", "mp4", "mp4v", "mpeg", "webm"})
 SUPPORTED_RESPONSE_FORMATS = frozenset({"json", "verbose_json", "diarized_json"})
 OPENAI_AUDIO_BASE_URL = "https://api.openai.com/v1"
 OPENAI_FILE_SIZE_LIMIT_BYTES = 25_000_000
 DEFAULT_SINGLE_REQUEST_MAX_BYTES = 20_000_000
 DEFAULT_CHUNK_MAX_BYTES = 15_000_000
 DEFAULT_CHUNK_DURATION_SECONDS = 600.0
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 600.0
 DEFAULT_MAX_RETRIES = 2
 DEFAULT_RETRY_BACKOFF_SECONDS = 1.0
 DEFAULT_RETRY_MAX_BACKOFF_SECONDS = 8.0
 DEFAULT_FFMPEG_TIMEOUT_SECONDS = 900.0
 DEFAULT_MAX_CHUNKS = 1024
 DEFAULT_TIMESTAMP_MODEL = "whisper-1"
+
+logger = logging.getLogger(__name__)
 
 OPENAI_FILE_CAPABILITIES = ProviderCapabilities(
     batch=True,
@@ -83,7 +97,7 @@ OPENAI_FILE_CAPABILITIES = ProviderCapabilities(
     duration=True,
     cloud_diarization=False,
     audio_formats=SUPPORTED_AUDIO_FORMATS,
-    response_formats=SUPPORTED_RESPONSE_FORMATS,
+    response_formats=frozenset({"json", "verbose_json"}),
 )
 
 
@@ -124,9 +138,10 @@ def _resolve_api_key(config: Any) -> str:
     """Resolve a provider key without leaking the official key to custom gateways."""
 
     base_url = str(getattr(config, "TRANSCRIPTION_BASE_URL", OPENAI_AUDIO_BASE_URL) or OPENAI_AUDIO_BASE_URL).rstrip("/")
-    settings = ("TRANSCRIPTION_API_KEY", "ACTSIS_API_KEY")
     if base_url == OPENAI_AUDIO_BASE_URL:
-        settings = (*settings, "OPENAI_API_KEY")
+        settings = ("TRANSCRIPTION_API_KEY", "OPENAI_API_KEY")
+    else:
+        settings = ("TRANSCRIPTION_API_KEY", "ACTSIS_API_KEY")
     for setting in settings:
         value = str(getattr(config, setting, "") or "").strip()
         if value:
@@ -212,19 +227,54 @@ def _usage_metadata(response: Any) -> UsageMetadata | None:
 
 def _word_timestamps(response: Any) -> list[WordTimestamp]:
     words: list[WordTimestamp] = []
-    for item in _get(response, "words", []) or []:
+    top_level_indexes: dict[tuple[str, float, float], list[int]] = {}
+
+    def parse_word(item: Any, *, fallback_speaker: Any = None) -> WordTimestamp | None:
         start = _number(_get(item, "start"))
         end = _number(_get(item, "end"))
         if start is None or end is None:
-            continue
-        words.append(
-            WordTimestamp(
-                word=str(_get(item, "word", "")),
-                start=start,
-                end=end,
-                speaker_label=_get(item, "speaker") or _get(item, "speaker_label"),
-            )
+            return None
+        return WordTimestamp(
+            word=str(_get(item, "word", "")),
+            start=start,
+            end=end,
+            speaker_label=(
+                _get(item, "speaker")
+                or _get(item, "speaker_label")
+                or fallback_speaker
+            ),
         )
+
+    for item in _get(response, "words", []) or []:
+        candidate = parse_word(item)
+        if candidate is None:
+            continue
+        key = (candidate.word.strip().casefold(), candidate.start, candidate.end)
+        top_level_indexes.setdefault(key, []).append(len(words))
+        words.append(candidate)
+    for segment in _get(response, "segments", []) or []:
+        segment_speaker = _speaker_label(segment)
+        for item in _get(segment, "words", []) or []:
+            candidate = parse_word(item, fallback_speaker=segment_speaker)
+            if candidate is None:
+                continue
+            key = (candidate.word.strip().casefold(), candidate.start, candidate.end)
+            matching_indexes = top_level_indexes.get(key)
+            if not matching_indexes:
+                words.append(candidate)
+                continue
+            existing_index = next(
+                (
+                    index
+                    for index in matching_indexes
+                    if _is_missing_speaker(words[index].speaker_label)
+                ),
+                matching_indexes[0],
+            )
+            if _is_missing_speaker(words[existing_index].speaker_label) and not _is_missing_speaker(
+                candidate.speaker_label
+            ):
+                words[existing_index] = candidate
     return words
 
 
@@ -236,12 +286,13 @@ def _segments(response: Any, words: list[WordTimestamp]) -> list[ResultSegment]:
         if start is None or end is None:
             continue
         segment_words = [word for word in words if word.end > start and word.start < end]
+        speaker = _speaker_label(item)
         segments.append(
             ResultSegment(
                 start=start,
                 end=end,
                 text=str(_get(item, "text", "")).strip(),
-                speaker=_get(item, "speaker") or "SPEAKER_UNKNOWN",
+                speaker=speaker if not _is_missing_speaker(speaker) else "SPEAKER_UNKNOWN",
                 words=segment_words,
             )
         )
@@ -257,6 +308,85 @@ def _segments(response: Any, words: list[WordTimestamp]) -> list[ResultSegment]:
             )
         )
     return segments
+
+
+def _speaker_labels_required(
+    request: BatchTranscriptionRequest,
+    *,
+    model: str | None,
+    response_format: str | None,
+) -> bool:
+    return (
+        request.speaker_required
+        or model == CUSTOM_CLOUD_DIARIZATION_MODEL
+        or response_format == "diarized_json"
+    )
+
+
+def _is_missing_speaker(speaker: Any) -> bool:
+    if not isinstance(speaker, str):
+        return True
+    normalized = speaker.strip()
+    return not normalized or normalized.casefold() == "speaker_unknown"
+
+
+def _speaker_label(item: Any) -> Any:
+    """Prefer an explicit speaker label without inventing a fallback."""
+
+    speaker = _get(item, "speaker")
+    if not _is_missing_speaker(speaker):
+        return speaker
+    speaker_label = _get(item, "speaker_label")
+    if not _is_missing_speaker(speaker_label):
+        return speaker_label
+    if isinstance(speaker, str) and speaker.strip().casefold() == "speaker_unknown":
+        return speaker
+    return None
+
+
+def _validate_strict_response_segments(
+    response: Any,
+    *,
+    provider: str,
+    model: str,
+    response_format: str,
+) -> None:
+    """Reject malformed timing while allowing degraded speaker attribution.
+
+    Actsis may return a valid segment without diarization metadata. The segment
+    mapper normalizes that case to ``SPEAKER_UNKNOWN``; timing remains strict so
+    impossible ranges are never persisted.
+    """
+
+    raw_segments = _get(response, "segments")
+    if raw_segments is None or (isinstance(raw_segments, (list, tuple)) and not raw_segments):
+        return
+    if not isinstance(raw_segments, (list, tuple)):
+        invalid = True
+    else:
+        invalid = False
+        for item in raw_segments:
+            start = _number(_get(item, "start"))
+            end = _number(_get(item, "end"))
+            invalid = (
+                start is None
+                or end is None
+                or not math.isfinite(start)
+                or not math.isfinite(end)
+                or start < 0
+                or end <= start
+            )
+            if invalid:
+                break
+    if invalid:
+        raise ProviderResponseError(
+            "OpenAI-compatible provider returned malformed segments; "
+            "segments must be a list or tuple and every segment must have valid start/end timing "
+            "with finite, non-negative values and end greater than start",
+            provider=provider,
+            model=model,
+            response_format=response_format,
+        )
 
 
 def _provider_usage_record(
@@ -311,29 +441,23 @@ class OpenAIFileProvider:
             getattr(config, "TRANSCRIPTION_BASE_URL", OPENAI_AUDIO_BASE_URL)
             or OPENAI_AUDIO_BASE_URL
         ).rstrip("/")
+        self._custom_endpoint = self.base_url != OPENAI_AUDIO_BASE_URL
+        self._cloud_diarization_enabled = bool(
+            getattr(config, "TRANSCRIPTION_CLOUD_DIARIZATION", False)
+        )
         if not api_key:
-            key_hint = "TRANSCRIPTION_API_KEY or ACTSIS_API_KEY"
             if self.base_url == OPENAI_AUDIO_BASE_URL:
-                key_hint += " or OPENAI_API_KEY"
+                key_hint = "TRANSCRIPTION_API_KEY or OPENAI_API_KEY"
+            else:
+                key_hint = "TRANSCRIPTION_API_KEY or ACTSIS_API_KEY"
             raise TranscriptionConfigurationError(
                 f"{key_hint} is required for provider 'openai-file'",
                 setting="TRANSCRIPTION_API_KEY",
-            )
-        self.model = str(getattr(config, "TRANSCRIPTION_MODEL", "gpt-transcribe") or "").strip()
-        self._validate_model(self.model)
-        cloud_diarization = bool(getattr(config, "TRANSCRIPTION_CLOUD_DIARIZATION", False))
-        response_formats = SUPPORTED_RESPONSE_FORMATS if cloud_diarization else frozenset({"json", "verbose_json"})
-        self.capabilities = ProviderCapabilities(
-            batch=True,
-            medical=False,
-            segments=True,
-            words=True,
-            speakers=cloud_diarization,
-            duration=True,
-            cloud_diarization=cloud_diarization,
-            audio_formats=SUPPORTED_AUDIO_FORMATS,
-            response_formats=response_formats,
         )
+        self.model = str(getattr(config, "TRANSCRIPTION_MODEL", "gpt-transcribe") or "").strip()
+        self._validate_selected_model(self.model)
+        self._validate_diarization_endpoint(self.model)
+        self.capabilities = self._capabilities_for_model(self.model)
         self.timestamp_model = str(
             getattr(config, "TRANSCRIPTION_TIMESTAMP_MODEL", DEFAULT_TIMESTAMP_MODEL)
             or ""
@@ -368,6 +492,11 @@ class OpenAIFileProvider:
             "TRANSCRIPTION_OPENAI_MAX_RETRIES",
             DEFAULT_MAX_RETRIES,
         )
+        self._request_timeout_seconds = _config_float(
+            config,
+            "TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS",
+            DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        )
         self._retry_backoff_seconds = _config_float(
             config,
             "TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS",
@@ -391,11 +520,16 @@ class OpenAIFileProvider:
         if client is not None:
             self._client = client
         else:
+            request_timeout = self._request_timeout_seconds
             self._client = OpenAI(
                 api_key=api_key,
                 base_url=self.base_url,
+                timeout=request_timeout,
                 max_retries=0,
-                http_client=httpx.Client(verify=self._tls_context(config)),
+                http_client=httpx.Client(
+                    verify=self._tls_context(config),
+                    timeout=request_timeout,
+                ),
             )
         self._closed = False
 
@@ -429,6 +563,11 @@ class OpenAIFileProvider:
             raise TranscriptionConfigurationError(
                 "TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS must be greater than zero",
                 setting="TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS",
+            )
+        if not math.isfinite(self._request_timeout_seconds) or self._request_timeout_seconds <= 0:
+            raise TranscriptionConfigurationError(
+                "TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS must be greater than zero",
+                setting="TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS",
             )
         if not 0 <= self._max_retries <= 5:
             raise TranscriptionConfigurationError(
@@ -465,21 +604,85 @@ class OpenAIFileProvider:
                 "model",
                 OpenAIFileProvider.provider_name,
                 model,
-                "openai-file supports gpt-transcribe, gpt-4o-mini-transcribe, and whisper-1",
+                "openai-file supports gpt-transcribe, gpt-4o-mini-transcribe, whisper-1, "
+                "and whisper-diarize when custom cloud diarization is explicitly enabled",
             )
 
+    def _validate_selected_model(self, model: str) -> None:
+        self._validate_model(model)
+        if model != CUSTOM_CLOUD_DIARIZATION_MODEL:
+            return
+        if not self._custom_endpoint:
+            raise UnsupportedCapabilityError(
+                "model",
+                self.provider_name,
+                model,
+                "whisper-diarize is supported only for a custom transcription endpoint",
+            )
+        if not self._cloud_diarization_enabled:
+            raise UnsupportedCapabilityError(
+                "cloud_diarization",
+                self.provider_name,
+                model,
+                "whisper-diarize requires TRANSCRIPTION_CLOUD_DIARIZATION=true",
+            )
+
+    def _validate_diarization_endpoint(self, model: str) -> None:
+        if not (self._cloud_diarization_enabled or model == CUSTOM_CLOUD_DIARIZATION_MODEL):
+            return
+        if not self._custom_endpoint or not self.base_url.casefold().startswith("https://"):
+            raise TranscriptionConfigurationError(
+                "Cloud diarization requires a custom TRANSCRIPTION_BASE_URL using https://",
+                setting="TRANSCRIPTION_BASE_URL",
+            )
+
+    def _capabilities_for_model(self, model: str) -> ProviderCapabilities:
+        cloud_diarization = (
+            model == CUSTOM_CLOUD_DIARIZATION_MODEL
+            and self._custom_endpoint
+            and self._cloud_diarization_enabled
+        )
+        return ProviderCapabilities(
+            batch=True,
+            medical=False,
+            segments=True,
+            words=True,
+            speakers=cloud_diarization,
+            duration=True,
+            cloud_diarization=cloud_diarization,
+            audio_formats=(
+                SUPPORTED_AUDIO_FORMATS | ACTSIS_VIDEO_FORMATS
+                if cloud_diarization
+                else SUPPORTED_AUDIO_FORMATS
+            ),
+            response_formats=(
+                SUPPORTED_RESPONSE_FORMATS
+                if cloud_diarization
+                else OPENAI_FILE_CAPABILITIES.response_formats
+            ),
+        )
+
     def _validate_request(self, request: BatchTranscriptionRequest, model: str, response_format: str) -> None:
+        self._validate_selected_model(model)
         validate_batch_request(
             request,
-            self.capabilities,
+            self._capabilities_for_model(model),
             provider=self.provider_name,
             model=model,
         )
-        self._validate_model(model)
-        if response_format not in SUPPORTED_RESPONSE_FORMATS:
-            raise UnsupportedCapabilityError("response_format", self.provider_name, model)
         if request.transcription_type == TranscriptionType.MEDICAL:
             raise UnsupportedCapabilityError("medical", self.provider_name, model)
+        if (
+            (request.speaker_required or model == CUSTOM_CLOUD_DIARIZATION_MODEL)
+            and response_format != "diarized_json"
+        ):
+            raise UnsupportedCapabilityError(
+                "response_format",
+                self.provider_name,
+                model,
+                "speaker_required=True or model='whisper-diarize' requires "
+                "response_format='diarized_json'",
+            )
 
     def _build_primary_params(
         self,
@@ -498,13 +701,17 @@ class OpenAIFileProvider:
         for name in (
             "prompt",
             "temperature",
-            "chunking_strategy",
             "include",
             "known_speaker_names",
             "known_speaker_references",
         ):
             if name in request.metadata and request.metadata[name] is not None:
                 params[name] = request.metadata[name]
+        chunking_strategy = request.chunking_strategy
+        if chunking_strategy is None:
+            chunking_strategy = request.metadata.get("chunking_strategy")
+        if chunking_strategy is not None:
+            params["chunking_strategy"] = chunking_strategy
         return params
 
     def _build_timestamp_params(
@@ -559,7 +766,10 @@ class OpenAIFileProvider:
             )
         path = Path(source.local_path)
         suffix = path.suffix.lower().lstrip(".")
-        if suffix not in SUPPORTED_AUDIO_FORMATS:
+        if (
+            suffix not in SUPPORTED_AUDIO_FORMATS
+            and not self._should_normalize_video(model, suffix)
+        ):
             raise InvalidAudioSourceError(
                 f"Unsupported audio format '.{suffix or 'unknown'}' for provider 'openai-file'"
             )
@@ -578,44 +788,71 @@ class OpenAIFileProvider:
             submitted_language=submitted_language,
         )
 
+        normalized_workspace: Path | None = None
         try:
-            file_size = path.stat().st_size
-        except OSError as exc:
-            raise InvalidAudioSourceError(f"Unable to inspect audio file: {path}") from exc
-
-        direct_upload = self._should_direct_upload(file_size)
-        if file_size <= self._single_request_max_bytes or direct_upload:
-            try:
-                return self._transcribe_single_file(
+            source_path = path
+            if self._should_normalize_video(model, suffix):
+                if on_status_change:
+                    on_status_change("preparing_audio")
+                _notify_heartbeat(on_heartbeat)
+                normalized_workspace = Path(tempfile.mkdtemp(prefix="zabt-openai-normalize-"))
+                source_path = extract_audio_file(
                     path,
-                    request,
-                    params,
-                    model=model,
-                    response_format=response_format,
-                    submitted_language=submitted_language,
-                    on_status_change=on_status_change,
-                    on_heartbeat=on_heartbeat,
+                    normalized_workspace / "normalized.mp3",
+                    command_timeout_seconds=self._ffmpeg_timeout_seconds,
                 )
-            except ProviderRequestError as exc:
-                if not direct_upload or not _is_request_size_rejection(exc):
-                    raise
 
-        return self._transcribe_chunks(
-            path,
-            request,
-            params,
-            model=model,
-            response_format=response_format,
-            submitted_language=submitted_language,
-            on_status_change=on_status_change,
-            on_heartbeat=on_heartbeat,
-        )
+            try:
+                file_size = source_path.stat().st_size
+            except OSError as exc:
+                raise InvalidAudioSourceError(
+                    f"Unable to inspect audio file: {source_path}"
+                ) from exc
+
+            direct_upload = self._should_direct_upload(file_size)
+            if file_size <= self._single_request_max_bytes or direct_upload:
+                try:
+                    return self._transcribe_single_file(
+                        source_path,
+                        request,
+                        params,
+                        model=model,
+                        response_format=response_format,
+                        submitted_language=submitted_language,
+                        on_status_change=on_status_change,
+                        on_heartbeat=on_heartbeat,
+                    )
+                except ProviderRequestError as exc:
+                    if not direct_upload or not _is_request_size_rejection(exc):
+                        raise
+
+            return self._transcribe_chunks(
+                source_path,
+                request,
+                params,
+                model=model,
+                response_format=response_format,
+                submitted_language=submitted_language,
+                on_status_change=on_status_change,
+                on_heartbeat=on_heartbeat,
+            )
+        finally:
+            if normalized_workspace is not None:
+                shutil.rmtree(normalized_workspace, ignore_errors=True)
 
     def _should_direct_upload(self, file_size: int) -> bool:
         return (
             self.base_url != OPENAI_AUDIO_BASE_URL
             and self._direct_upload_max_bytes > 0
             and file_size <= self._direct_upload_max_bytes
+        )
+
+    def _should_normalize_video(self, model: str, suffix: str) -> bool:
+        return (
+            model == CUSTOM_CLOUD_DIARIZATION_MODEL
+            and self._custom_endpoint
+            and self._cloud_diarization_enabled
+            and suffix in ACTSIS_VIDEO_FORMATS
         )
 
     def _transcribe_single_file(
@@ -750,6 +987,7 @@ class OpenAIFileProvider:
     ) -> Any:
         for attempt in range(self._max_retries + 1):
             _notify_heartbeat(on_heartbeat)
+            attempt_started = time.monotonic()
             try:
                 response = self._request_file_once(path, params)
             except InvalidAudioSourceError:
@@ -757,8 +995,19 @@ class OpenAIFileProvider:
             except TranscriptionError:
                 raise
             except Exception as exc:
+                elapsed_seconds = time.monotonic() - attempt_started
                 status_code = _status_code(exc)
                 transient = _is_transient_provider_error(exc)
+                status_text = f" status_code={status_code}" if status_code is not None else ""
+                logger.info(
+                    "OpenAI %s attempt %d/%d failed in %.3fs (error_type=%s%s)",
+                    operation,
+                    attempt + 1,
+                    self._max_retries + 1,
+                    elapsed_seconds,
+                    type(exc).__name__,
+                    status_text,
+                )
                 if not transient or attempt >= self._max_retries:
                     attempt_count = attempt + 1
                     status_text = f" HTTP {status_code}" if status_code is not None else ""
@@ -778,6 +1027,13 @@ class OpenAIFileProvider:
                 if delay:
                     self._sleep(delay)
             else:
+                logger.info(
+                    "OpenAI %s attempt %d/%d succeeded in %.3fs",
+                    operation,
+                    attempt + 1,
+                    self._max_retries + 1,
+                    time.monotonic() - attempt_started,
+                )
                 _notify_heartbeat(on_heartbeat)
                 return response
 
@@ -806,9 +1062,21 @@ class OpenAIFileProvider:
         if duration is None and usage and usage.unit == "seconds":
             duration = _number(usage.total_units)
         text = response if isinstance(response, str) else str(_get(response, "text", "") or "")
+        speaker_labels_required = _speaker_labels_required(
+            request,
+            model=model,
+            response_format=response_format,
+        )
+        if usage_role == "primary" and speaker_labels_required:
+            _validate_strict_response_segments(
+                response,
+                provider=self.provider_name,
+                model=model,
+                response_format=response_format,
+            )
         words = _word_timestamps(response)
         segments = _segments(response, words)
-        if not segments:
+        if not segments and not speaker_labels_required:
             coarse_segment = coarse_text_segment(
                 text,
                 start=0.0,
@@ -817,7 +1085,21 @@ class OpenAIFileProvider:
             if coarse_segment is not None:
                 segments = [coarse_segment]
         language = str(_get(response, "language") or submitted_language or "unknown")
-        speaker_labels = {segment.speaker for segment in segments if segment.speaker != "SPEAKER_UNKNOWN"}
+        speaker_labels = {
+            segment.speaker for segment in segments if not _is_missing_speaker(segment.speaker)
+        }
+        missing_speaker_count = sum(
+            1 for segment in segments if _is_missing_speaker(segment.speaker)
+        )
+        if usage_role == "primary" and speaker_labels_required and (
+            not _get(response, "segments") or not segments
+        ):
+            raise ProviderResponseError(
+                "OpenAI-compatible provider returned no segments for an enabled diarization request",
+                provider=self.provider_name,
+                model=model,
+                response_format=response_format,
+            )
         gaps: list[str] = []
         if not segments:
             gaps.append("segments")
@@ -825,10 +1107,33 @@ class OpenAIFileProvider:
             gaps.append("words")
         if not speaker_labels:
             gaps.append("speakers")
+        elif speaker_labels_required and missing_speaker_count:
+            gaps.append("speakers")
         if duration is None:
             gaps.append("duration")
         if request.allowed_languages and not submitted_language:
             gaps.append("allowed_languages")
+
+        metadata = {
+            "provider": self.provider_name,
+            "model": model,
+            "response_format": response_format,
+            "timestamp_mode": request.timestamp_mode.value,
+            "requested_language": request.language,
+            "submitted_language": submitted_language,
+            "allowed_languages": sorted(request.allowed_languages or ()),
+            "usage": usage.raw if usage else None,
+            "provider_usages": [
+                _provider_usage_record(
+                    provider=self.provider_name,
+                    model=model,
+                    role=usage_role,
+                    usage=usage,
+                )
+            ],
+        }
+        if speaker_labels_required:
+            metadata["missing_speaker_count"] = missing_speaker_count
 
         return TranscriptionResult(
             text=text,
@@ -840,24 +1145,7 @@ class OpenAIFileProvider:
             estimated_cost=None,
             model=model,
             usage=usage,
-            metadata={
-                "provider": self.provider_name,
-                "model": model,
-                "response_format": response_format,
-                "timestamp_mode": request.timestamp_mode.value,
-                "requested_language": request.language,
-                "submitted_language": submitted_language,
-                "allowed_languages": sorted(request.allowed_languages or ()),
-                "usage": usage.raw if usage else None,
-                "provider_usages": [
-                    _provider_usage_record(
-                        provider=self.provider_name,
-                        model=model,
-                        role=usage_role,
-                        usage=usage,
-                    )
-                ],
-            },
+            metadata=metadata,
             capability_gaps=tuple(gaps),
         )
 
@@ -909,6 +1197,22 @@ class OpenAIFileProvider:
             if not has_requested_timestamps:
                 raise _TimestampPassUnavailable(
                     f"whisper-1 returned no {timestamp_mode} timestamps"
+                )
+            if _speaker_labels_required(
+                request,
+                model=primary_result.model,
+                response_format=primary_result.metadata.get("response_format"),
+            ) and any(
+                _is_missing_speaker(segment.speaker) for segment in timestamp_result.segments
+            ):
+                return self._timestamp_failure_result(
+                    primary_result,
+                    request,
+                    gap=gap,
+                    error=_TimestampPassUnavailable(
+                        "whisper-1 returned unlabeled segments; preserving primary diarized segments"
+                    ),
+                    status="skipped",
                 )
         except Exception as exc:
             return self._timestamp_failure_result(
@@ -975,6 +1279,7 @@ class OpenAIFileProvider:
         *,
         gap: str,
         error: BaseException,
+        status: str = "failed",
     ) -> TranscriptionResult:
         detail = _error_detail(error)
         attempts = getattr(error, "attempts", 0)
@@ -994,7 +1299,7 @@ class OpenAIFileProvider:
             "model": self.timestamp_model,
             "response_format": "verbose_json",
             "timestamp_granularities": [request.timestamp_mode.value],
-            "status": "failed",
+            "status": status,
             "usage": None,
             "error": error_record,
         }
@@ -1004,7 +1309,7 @@ class OpenAIFileProvider:
                 model=self.timestamp_model,
                 role="timestamps",
                 usage=None,
-                status="failed",
+                status=status,
                 error=error_record,
             )
         ]
@@ -1042,6 +1347,7 @@ class OpenAIFileProvider:
             speaker_required=config.speaker_required,
             response_format=config.response_format,
             model=config.model,
+            chunking_strategy=config.chunking_strategy,
         )
         return self.transcribe(
             request,

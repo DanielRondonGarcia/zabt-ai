@@ -104,6 +104,7 @@ def transcribe(
         speaker_required=tx_config.speaker_required,
         response_format=tx_config.response_format,
         model=tx_config.model,
+        chunking_strategy=tx_config.chunking_strategy,
     )
 
     # Run transcription with progress indicator

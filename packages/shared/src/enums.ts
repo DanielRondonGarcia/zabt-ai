@@ -15,8 +15,10 @@ export type MeetingSubStatus =
   | "downloading_youtube"
   | "validating"
   | "extracting_audio"
+  | "preparing_audio"
   | "uploading"
   | "transcribing"
+  | "transcribing_chunk"
   | "aligning"
   | "diarizing"
   | "parsing"
@@ -79,8 +81,10 @@ export const MEETING_SUB_STATUSES: readonly MeetingSubStatus[] = [
   "downloading_youtube",
   "validating",
   "extracting_audio",
+  "preparing_audio",
   "uploading",
   "transcribing",
+  "transcribing_chunk",
   "aligning",
   "diarizing",
   "parsing",

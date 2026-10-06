@@ -103,6 +103,72 @@ def plan_chunk_ranges(
     )
 
 
+def extract_audio_file(
+    source_path: str | Path,
+    output_path: str | Path,
+    *,
+    command_runner: CommandRunner | None = None,
+    ffmpeg_binary: str = "ffmpeg",
+    command_timeout_seconds: float = 900.0,
+) -> Path:
+    """Extract one temporary mono 16 kHz MP3 for a provider request."""
+
+    source = Path(source_path)
+    output = Path(output_path)
+    if not source.is_file():
+        raise TranscriptionPreparationError(
+            f"Media source does not exist: {source}",
+            code="media_source_missing",
+        )
+
+    ffmpeg_path = shutil.which(ffmpeg_binary)
+    if not ffmpeg_path:
+        raise FFmpegUnavailableError(
+            "FFmpeg is required to normalize video before cloud transcription. "
+            "Install the ffmpeg package in the worker image."
+        )
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        str(source),
+        "-vn",
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-c:a",
+        "libmp3lame",
+        "-b:a",
+        "32k",
+        "-map_metadata",
+        "-1",
+        str(output),
+    ]
+    _run_command(
+        command,
+        runner=command_runner or subprocess.run,
+        timeout_seconds=command_timeout_seconds,
+        action="normalize media to audio",
+    )
+    if not output.is_file():
+        raise TranscriptionPreparationError(
+            f"FFmpeg did not produce expected audio file {output.name!r}.",
+            code="audio_output_missing",
+        )
+    if output.stat().st_size <= 0:
+        raise TranscriptionPreparationError(
+            f"FFmpeg produced an empty audio file {output.name!r}.",
+            code="empty_audio_output",
+        )
+    return output
+
+
 def extract_audio_chunks(
     source_path: str | Path,
     workspace: str | Path,
@@ -242,9 +308,9 @@ def merge_chunk_results(
 
     ordered = sorted(chunk_results, key=lambda item: item.chunk.index)
     first = ordered[0].result
-    text = _merge_text_parts(item.result.text for item in ordered)
     segments: list[ResultSegment] = []
     words: list[WordTimestamp] = []
+    word_contexts: list[tuple[WordTimestamp, str | None]] = []
     for item in ordered:
         offset = item.chunk.source_offset_seconds
         source_segments: Sequence[ResultSegment] = item.result.segments
@@ -261,11 +327,26 @@ def merge_chunk_results(
                 _shift_word(word, offset)
                 for word in segment.words
             ]
-            unique_words = [word for word in shifted_words if not _is_duplicate_word(words, word)]
+            unique_words = [
+                word
+                for word in shifted_words
+                if not _is_duplicate_word(
+                    word_contexts,
+                    word,
+                    segment_speaker=segment.speaker,
+                )
+            ]
             shifted_start = segment.start + offset
             shifted_end = segment.end + offset
             segment_text = segment.text
-            if segments and shifted_start <= segments[-1].end + _BOUNDARY_TIME_TOLERANCE_SECONDS:
+            same_speaker_boundary = (
+                bool(segments)
+                and segments[-1].speaker == segment.speaker
+            )
+            if (
+                same_speaker_boundary
+                and shifted_start <= segments[-1].end + _BOUNDARY_TIME_TOLERANCE_SECONDS
+            ):
                 segment_text = _remove_boundary_text(segments[-1].text, segment_text)
                 if segment.text.strip() and not segment_text:
                     continue
@@ -279,7 +360,15 @@ def merge_chunk_results(
             if _is_duplicate_segment(segments, shifted):
                 continue
             words.extend(unique_words)
+            word_contexts.extend((word, segment.speaker) for word in unique_words)
             segments.append(shifted)
+
+    retained_text_parts = [
+        (segment.text, segment.speaker)
+        for segment in segments
+        if segment.text.strip()
+    ]
+    text = _merge_text_parts(retained_text_parts or (item.result.text for item in ordered))
 
     if audio_duration_seconds is None:
         durations = [item.result.audio_duration_seconds for item in ordered]
@@ -415,14 +504,30 @@ def _shift_word(word: WordTimestamp, offset: float) -> WordTimestamp:
     )
 
 
-def _is_duplicate_word(previous: Sequence[WordTimestamp], candidate: WordTimestamp) -> bool:
+def _is_duplicate_word(
+    previous: Sequence[tuple[WordTimestamp, str | None]],
+    candidate: WordTimestamp,
+    *,
+    segment_speaker: str | None,
+) -> bool:
     if not previous:
         return False
-    prior = previous[-1]
+    prior, prior_segment_speaker = previous[-1]
     return (
         _token_signature(prior.word) == _token_signature(candidate.word)
+        and _effective_word_speaker(prior, prior_segment_speaker)
+        == _effective_word_speaker(candidate, segment_speaker)
         and candidate.start <= prior.end + _BOUNDARY_TIME_TOLERANCE_SECONDS
     )
+
+
+def _effective_word_speaker(
+    word: WordTimestamp,
+    segment_speaker: str | None,
+) -> str | None:
+    if isinstance(word.speaker_label, str) and word.speaker_label.strip():
+        return word.speaker_label
+    return segment_speaker
 
 
 def _is_duplicate_segment(previous: Sequence[ResultSegment], candidate: ResultSegment) -> bool:
@@ -431,25 +536,37 @@ def _is_duplicate_segment(previous: Sequence[ResultSegment], candidate: ResultSe
     prior = previous[-1]
     return (
         _token_sequence_signature(prior.text) == _token_sequence_signature(candidate.text)
+        and prior.speaker == candidate.speaker
         and candidate.start <= prior.end + _BOUNDARY_TIME_TOLERANCE_SECONDS
     )
 
 
-def _merge_text_parts(parts: Sequence[str] | Any) -> str:
+def _merge_text_parts(parts: Sequence[str | tuple[str, str | None]] | Any) -> str:
     merged = ""
+    previous_speaker: str | None = None
     for raw_part in parts:
-        part = str(raw_part or "").strip()
+        if isinstance(raw_part, tuple) and len(raw_part) == 2:
+            raw_text, speaker = raw_part
+        else:
+            raw_text, speaker = raw_part, None
+        part = str(raw_text or "").strip()
         if not part:
             continue
         if not merged:
             merged = part
+            previous_speaker = speaker
             continue
         previous_tokens = merged.split()
         current_tokens = part.split()
-        overlap = _longest_boundary_overlap(previous_tokens, current_tokens)
+        overlap = (
+            _longest_boundary_overlap(previous_tokens, current_tokens)
+            if speaker == previous_speaker
+            else 0
+        )
         remainder = current_tokens[overlap:]
         if remainder:
             merged = f"{merged.rstrip()} {' '.join(remainder)}"
+            previous_speaker = speaker
     return merged
 
 
