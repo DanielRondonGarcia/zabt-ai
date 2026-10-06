@@ -5,13 +5,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
 import pytest
 
 from app.api import deps
-from app.models import User
+from app.models import (
+    AIChatConversationDetail,
+    AIChatConversationSummary,
+    AIChatMessageRead,
+    AIChatSourceRead,
+    User,
+)
 
 
 @pytest.fixture(name="test_client")
@@ -53,11 +60,26 @@ def test_ai_chat_endpoint_validates_and_delegates_to_service(
     calls = []
 
     class FakeService:
-        def chat(self, *, group_id: int, user_id: int, message: str, limit: int):
+        def chat(
+            self,
+            *,
+            group_id: int,
+            user_id: int,
+            message: str,
+            limit: int,
+            conversation_id: int | None = None,
+        ):
             calls.append(
-                {"group_id": group_id, "user_id": user_id, "message": message, "limit": limit}
+                {
+                    "group_id": group_id,
+                    "user_id": user_id,
+                    "message": message,
+                    "limit": limit,
+                    "conversation_id": conversation_id,
+                }
             )
             return {
+                "conversation_id": conversation_id or 77,
                 "group_id": group_id,
                 "answer": "answer",
                 "sources": [
@@ -78,12 +100,20 @@ def test_ai_chat_endpoint_validates_and_delegates_to_service(
         "/ai-chat/",
         json={"group_id": 12, "message": "  What changed?  ", "limit": 3},
     )
+    follow_up = test_client.post(
+        "/ai-chat/",
+        json={"group_id": 12, "message": "More?", "conversation_id": 77},
+    )
 
     assert response.status_code == 200, response.text
+    assert follow_up.status_code == 200, follow_up.text
     assert calls == [
-        {"group_id": 12, "user_id": 5, "message": "What changed?", "limit": 3}
+        {"group_id": 12, "user_id": 5, "message": "What changed?", "limit": 3, "conversation_id": None},
+        {"group_id": 12, "user_id": 5, "message": "More?", "limit": 8, "conversation_id": 77},
     ]
+    assert follow_up.json()["conversation_id"] == 77
     assert response.json() == {
+        "conversation_id": 77,
         "group_id": 12,
         "answer": "answer",
         "sources": [
@@ -106,6 +136,7 @@ def test_ai_chat_endpoint_validates_and_delegates_to_service(
         {"group_id": 1, "message": "x", "limit": 0},
         {"group_id": 1, "message": "x", "limit": 21},
         {"group_id": 1, "message": "x" * 4001},
+        {"group_id": 1, "message": "x", "conversation_id": 0},
     ],
 )
 def test_ai_chat_endpoint_rejects_invalid_payload(
@@ -132,8 +163,8 @@ def test_foreign_group_403_is_preserved_without_llm_work(
     calls = []
 
     class FakeService:
-        def chat(self, *, group_id: int, user_id: int, message: str, limit: int):
-            calls.append((group_id, user_id, message, limit))
+        def chat(self, *, group_id: int, user_id: int, message: str, limit: int, conversation_id=None):
+            calls.append((group_id, user_id, message, limit, conversation_id))
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
     monkeypatch.setattr(ai_chat, "ai_chat_service", FakeService())
@@ -144,7 +175,30 @@ def test_foreign_group_403_is_preserved_without_llm_work(
 
     assert response.status_code == 403, response.text
     assert response.json() == {"detail": "Forbidden"}
-    assert calls == [(99, 5, "private", 8)]
+    assert calls == [(99, 5, "private", 8, None)]
+
+
+def test_conversation_group_mismatch_409_is_preserved(
+    test_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from app.api.v1.endpoints import ai_chat
+
+    class FakeService:
+        def chat(self, **kwargs):
+            assert kwargs["conversation_id"] == 4
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Conversation belongs to a different group.",
+            )
+
+    monkeypatch.setattr(ai_chat, "ai_chat_service", FakeService())
+
+    response = test_client.post(
+        "/ai-chat/", json={"group_id": 2, "message": "cross", "conversation_id": 4}
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json() == {"detail": "Conversation belongs to a different group."}
 
 
 def test_llm_failure_returns_stable_503(
@@ -165,3 +219,131 @@ def test_llm_failure_returns_stable_503(
 
     assert response.status_code == 503, response.text
     assert response.json() == {"detail": "chat unavailable"}
+
+
+# ── Conversation endpoints ────────────────────────────────────────────────────
+
+
+class FakeConversationService:
+    """Records calls and serves canned conversation data for the endpoint layer."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple] = []
+        self.summary = AIChatConversationSummary(
+            id=3,
+            group_id=12,
+            title="What changed?",
+            created_at=datetime(2026, 10, 6, 12, 0, 0),
+            updated_at=datetime(2026, 10, 6, 12, 5, 0),
+            message_count=2,
+        )
+
+    def list_for_group(self, *, owner_id: int, group_id: int):
+        self.calls.append(("list", owner_id, group_id))
+        return [self.summary]
+
+    def get_detail(self, conversation_id: int, owner_id: int):
+        self.calls.append(("get", conversation_id, owner_id))
+        if conversation_id == 404:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+        if conversation_id == 403:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+        return AIChatConversationDetail(
+            **self.summary.model_dump(),
+            messages=[
+                AIChatMessageRead(
+                    id=1,
+                    role="user",
+                    content="What changed?",
+                    sources=[],
+                    evidence_status=None,
+                    created_at=datetime(2026, 10, 6, 12, 0, 0),
+                ),
+                AIChatMessageRead(
+                    id=2,
+                    role="assistant",
+                    content="A decision was made.",
+                    sources=[
+                        AIChatSourceRead(meeting_id=9, kind="summary", chunk_index=1, score=0.88, text="src")
+                    ],
+                    evidence_status="available",
+                    created_at=datetime(2026, 10, 6, 12, 5, 0),
+                ),
+            ],
+        )
+
+    def delete(self, conversation_id: int, owner_id: int) -> None:
+        self.calls.append(("delete", conversation_id, owner_id))
+        if conversation_id == 403:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+
+
+@pytest.fixture(name="conversations")
+def fixture_conversations(monkeypatch: pytest.MonkeyPatch) -> FakeConversationService:
+    from app.api.v1.endpoints import ai_chat
+
+    fake = FakeConversationService()
+    monkeypatch.setattr(ai_chat, "ai_chat_conversation_service", fake)
+    return fake
+
+
+def test_list_conversations_requires_group_and_scopes_to_current_user(
+    test_client: TestClient, conversations: FakeConversationService
+) -> None:
+    response = test_client.get("/ai-chat/conversations", params={"group_id": 12})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == [
+        {
+            "id": 3,
+            "group_id": 12,
+            "title": "What changed?",
+            "created_at": "2026-10-06T12:00:00",
+            "updated_at": "2026-10-06T12:05:00",
+            "message_count": 2,
+        }
+    ]
+    assert conversations.calls == [("list", 5, 12)]
+    assert test_client.get("/ai-chat/conversations").status_code == 422
+    assert test_client.get("/ai-chat/conversations", params={"group_id": 0}).status_code == 422
+
+
+def test_get_conversation_returns_ordered_messages_with_evidence_status(
+    test_client: TestClient, conversations: FakeConversationService
+) -> None:
+    response = test_client.get("/ai-chat/conversations/3")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["id"] == 3 and body["message_count"] == 2
+    assert [m["role"] for m in body["messages"]] == ["user", "assistant"]
+    assert body["messages"][0]["evidence_status"] is None
+    assert body["messages"][1]["evidence_status"] == "available"
+    assert body["messages"][1]["sources"] == [
+        {"meeting_id": 9, "kind": "summary", "chunk_index": 1, "score": 0.88, "text": "src"}
+    ]
+    assert conversations.calls == [("get", 3, 5)]
+
+
+@pytest.mark.parametrize(("conversation_id", "expected"), [(404, 404), (403, 403)])
+def test_get_conversation_preserves_ownership_errors(
+    test_client: TestClient,
+    conversations: FakeConversationService,
+    conversation_id: int,
+    expected: int,
+) -> None:
+    response = test_client.get(f"/ai-chat/conversations/{conversation_id}")
+
+    assert response.status_code == expected, response.text
+
+
+def test_delete_conversation_returns_204_and_preserves_403(
+    test_client: TestClient, conversations: FakeConversationService
+) -> None:
+    deleted = test_client.delete("/ai-chat/conversations/3")
+    forbidden = test_client.delete("/ai-chat/conversations/403")
+
+    assert deleted.status_code == 204, deleted.text
+    assert deleted.content == b""
+    assert forbidden.status_code == 403, forbidden.text
+    assert conversations.calls == [("delete", 3, 5), ("delete", 403, 5)]

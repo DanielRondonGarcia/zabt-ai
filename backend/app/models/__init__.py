@@ -82,6 +82,15 @@ from app.models.processing_audit import (
     MeetingProcessingRunRead,
 )
 
+from app.models.ai_chat import (
+    AIChatConversation,
+    AIChatConversationDetail,
+    AIChatConversationSummary,
+    AIChatMessage,
+    AIChatMessageRead,
+    AIChatSourceRead,
+)
+
 __all__ = [
     # base
     "TranscriptionType",
@@ -145,4 +154,11 @@ __all__ = [
     "MeetingProcessingEventRead",
     "MeetingProcessingRun",
     "MeetingProcessingRunRead",
+    # ai chat conversations
+    "AIChatConversation",
+    "AIChatConversationDetail",
+    "AIChatConversationSummary",
+    "AIChatMessage",
+    "AIChatMessageRead",
+    "AIChatSourceRead",
 ]
