@@ -178,10 +178,36 @@ export interface AIChatSource {
 export type AIChatEvidenceStatus = "available" | "insufficient" | "not_required";
 
 export interface AIChatResponse {
+  conversation_id: number;
   group_id: number;
   answer: string;
   sources: AIChatSource[];
   evidence_status: AIChatEvidenceStatus;
+}
+
+export type AIChatMessageRole = "user" | "assistant";
+
+export interface AIChatMessage {
+  id: number;
+  role: AIChatMessageRole;
+  content: string;
+  sources: AIChatSource[];
+  evidence_status: AIChatEvidenceStatus | null;
+  created_at: string;
+}
+
+export interface AIChatConversationSummary {
+  id: number;
+  group_id: number;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  message_count: number;
+}
+
+export interface AIChatConversationDetail extends AIChatConversationSummary {
+  /** Ordered oldest-first by the API. */
+  messages: AIChatMessage[];
 }
 
 export interface GroupReindexResponse {
@@ -193,7 +219,13 @@ export interface AskAiChatPayload {
   groupId: number;
   message: string;
   limit?: number;
+  /** Omit to start a new conversation; the response carries the created id. */
+  conversationId?: number;
 }
+
+/** Returns the HTTP status of a failed API call, or `undefined` for network/unknown errors. */
+export const getApiErrorStatus = (error: unknown): number | undefined =>
+  axios.isAxiosError(error) ? error.response?.status : undefined;
 
 export const getGroups = async (): Promise<GroupSummary[]> => {
   const { data } = await apiClient.get<GroupSummary[]>("/groups/");
@@ -237,13 +269,37 @@ export const askAiChat = async ({
   groupId,
   message,
   limit,
+  conversationId,
 }: AskAiChatPayload): Promise<AIChatResponse> => {
   const { data } = await apiClient.post<AIChatResponse>("/ai-chat/", {
     group_id: groupId,
     message,
     ...(limit !== undefined ? { limit } : {}),
+    ...(conversationId !== undefined ? { conversation_id: conversationId } : {}),
   });
   return data;
+};
+
+export const listAiChatConversations = async (
+  groupId: number,
+): Promise<AIChatConversationSummary[]> => {
+  const { data } = await apiClient.get<AIChatConversationSummary[]>("/ai-chat/conversations", {
+    params: { group_id: groupId },
+  });
+  return data;
+};
+
+export const getAiChatConversation = async (
+  conversationId: number,
+): Promise<AIChatConversationDetail> => {
+  const { data } = await apiClient.get<AIChatConversationDetail>(
+    `/ai-chat/conversations/${conversationId}`,
+  );
+  return data;
+};
+
+export const deleteAiChatConversation = async (conversationId: number): Promise<void> => {
+  await apiClient.delete(`/ai-chat/conversations/${conversationId}`);
 };
 
 // ── Styles ────────────────────────────────────────────────────────────────────
