@@ -2,6 +2,7 @@
 // Copyright (C) 2025-2026 Afeef Janjua
 "use client";
 
+import { useState } from "react";
 import type { MeetingProcessingAudit, MeetingProcessingEvent, MeetingProcessingRun } from "@/app/lib/api";
 import { CheckCircle2, Circle, Clock3, XCircle } from "lucide-react";
 
@@ -136,25 +137,72 @@ function AuditRun({ run }: { run: MeetingProcessingRun }) {
   );
 }
 
+function AuditSummary({ runCount, latestStatus }: { runCount: number; latestStatus: string | null }) {
+  return (
+    <summary className="cursor-pointer rounded-lg px-1 py-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:ring-offset-2 focus-visible:ring-offset-card">
+      <span className="flex flex-wrap items-start justify-between gap-3">
+        <span className="min-w-0 flex-1">
+          <span role="heading" aria-level={2} className="block text-lg font-semibold text-foreground">
+            Processing audit
+          </span>
+          <span className="mt-1 block text-sm text-muted-foreground">
+            Safe audit events for this meeting&apos;s processing runs.
+          </span>
+        </span>
+        <span className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+          <span className="rounded-4xl border border-border bg-muted/50 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+            {runCount} {runCount === 1 ? "run" : "runs"}
+          </span>
+          {latestStatus && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              Latest
+              <StatusPill status={latestStatus} />
+            </span>
+          )}
+        </span>
+      </span>
+    </summary>
+  );
+}
+
 export function MeetingProcessingAuditCard({ audit, loading = false }: MeetingProcessingAuditProps) {
+  const [isAuditOpen, setIsAuditOpen] = useState(false);
+  const runs = audit?.runs ?? [];
+  const latestRun = runs[0] ?? null;
+
   return (
     <aside className="rounded-lg border border-border bg-card p-5">
-      <div className="mb-4 flex items-start justify-between gap-3">
-        <div>
-          <h2 className="text-lg font-semibold text-foreground">Processing audit</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            Safe audit events for this meeting&apos;s processing runs.
-          </p>
-        </div>
-      </div>
-      {loading && !audit ? (
-        <p className="text-sm text-muted-foreground">Loading processing audit…</p>
-      ) : !audit || audit.runs.length === 0 ? (
-        <p className="text-sm text-muted-foreground">No processing audit events have been recorded yet.</p>
+      {runs.length === 0 ? (
+        <>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-lg font-semibold text-foreground">Processing audit</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Safe audit events for this meeting&apos;s processing runs.
+              </p>
+            </div>
+            <span className="shrink-0 rounded-4xl border border-border bg-muted/50 px-2.5 py-1 text-xs font-medium text-muted-foreground">
+              0 runs
+            </span>
+          </div>
+          {loading && !audit ? (
+            <p className="mt-4 text-sm text-muted-foreground">Loading processing audit…</p>
+          ) : (
+            <p className="mt-4 text-sm text-muted-foreground">No processing audit events have been recorded yet.</p>
+          )}
+        </>
       ) : (
-        <div className="space-y-3">
-          {audit.runs.map((run) => <AuditRun key={run.id} run={run} />)}
-        </div>
+        <details
+          open={isAuditOpen}
+          onToggle={(event) => setIsAuditOpen(event.currentTarget.open)}
+        >
+          <AuditSummary runCount={runs.length} latestStatus={latestRun?.status ?? null} />
+          <div className="mt-4 max-h-[28rem] overflow-y-auto overscroll-contain pr-2">
+            <div className="space-y-3">
+              {runs.map((run) => <AuditRun key={run.id} run={run} />)}
+            </div>
+          </div>
+        </details>
       )}
     </aside>
   );
