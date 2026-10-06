@@ -175,10 +175,18 @@ export interface AIChatSource {
   text: string;
 }
 
+export type AIChatEvidenceStatus = "available" | "insufficient" | "not_required";
+
 export interface AIChatResponse {
   group_id: number;
   answer: string;
   sources: AIChatSource[];
+  evidence_status: AIChatEvidenceStatus;
+}
+
+export interface GroupReindexResponse {
+  status: "accepted";
+  task_id: string;
 }
 
 export interface AskAiChatPayload {
@@ -207,6 +215,11 @@ export const updateGroup = async (
 
 export const deleteGroup = async (groupId: number): Promise<void> => {
   await apiClient.delete(`/groups/${groupId}`);
+};
+
+export const reindexGroup = async (groupId: number): Promise<GroupReindexResponse> => {
+  const { data } = await apiClient.post<GroupReindexResponse>(`/groups/${groupId}/reindex`);
+  return data;
 };
 
 export const assignMeetingGroup = async (

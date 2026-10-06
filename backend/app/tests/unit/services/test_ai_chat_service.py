@@ -203,7 +203,12 @@ def test_chat_preserves_sources_and_builds_bounded_evidence_prompt() -> None:
     assert retrieval.calls == [
         {"group_id": 7, "user_id": 5, "query": "What happened?", "limit": 2}
     ]
-    assert response == {"group_id": 7, "answer": "Evidence-backed answer", "sources": sources}
+    assert response == {
+        "group_id": 7,
+        "answer": "Evidence-backed answer",
+        "sources": sources,
+        "evidence_status": "available",
+    }
     assert len(client.calls) == 1
     call = client.calls[0]
     assert call["model"] == "test-model"
@@ -233,24 +238,50 @@ def test_greetings_do_not_surface_irrelevant_retrieved_sources() -> None:
 
     response = service.chat(group_id=1, user_id=118, message="Hola", limit=8)
 
-    assert response == {"group_id": 1, "answer": "Evidence-backed answer", "sources": []}
+    assert response == {
+        "group_id": 1,
+        "answer": "Evidence-backed answer",
+        "sources": [],
+        "evidence_status": "not_required",
+    }
     assert "Conversational message" in client.calls[0]["messages"][1]["content"]
 
 
-def test_empty_retrieval_returns_deterministic_no_evidence_without_llm_call() -> None:
+@pytest.mark.parametrize(
+    ("message", "expected_answer"),
+    [
+        ("Any updates?", "I do not have enough meeting evidence to answer that question."),
+        (
+            "de que se habló en la reunión?",
+            "No tengo suficiente evidencia de las reuniones para responder esa pregunta.",
+        ),
+        (
+            "de que se hablo en la reunion?",
+            "No tengo suficiente evidencia de las reuniones para responder esa pregunta.",
+        ),
+        (
+            "que paso?",
+            "No tengo suficiente evidencia de las reuniones para responder esa pregunta.",
+        ),
+    ],
+)
+def test_empty_retrieval_returns_language_appropriate_no_evidence_without_llm_call(
+    message: str, expected_answer: str
+) -> None:
     retrieval = FakeRetrieval([])
     client = FakeClient()
     service = AIChatService(retrieval_service=retrieval, client=client, model="test-model")
 
-    response = service.chat(group_id=9, user_id=1, message="Any updates?", limit=8)
+    response = service.chat(group_id=9, user_id=1, message=message, limit=8)
 
     assert response == {
         "group_id": 9,
-        "answer": "I do not have enough meeting evidence to answer that question.",
+        "answer": expected_answer,
         "sources": [],
+        "evidence_status": "insufficient",
     }
     assert retrieval.calls == [
-        {"group_id": 9, "user_id": 1, "query": "Any updates?", "limit": 8}
+        {"group_id": 9, "user_id": 1, "query": message, "limit": 8}
     ]
     assert client.calls == []
 

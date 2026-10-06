@@ -12,11 +12,21 @@ import {
   ExternalLink,
   Loader2,
   MessageSquare,
+  RefreshCw,
   Search,
   Users,
 } from "lucide-react";
 
-import { askAiChat, getGroups, type AIChatSource, type GroupSummary } from "@/app/lib/api";
+import {
+  askAiChat,
+  getGroups,
+  reindexGroup,
+  type AIChatResponse,
+  type AIChatSource,
+  type GroupSummary,
+} from "@/app/lib/api";
+
+type ReindexState = "idle" | "loading" | "success" | "error";
 
 type ChatTurn = {
   id: number;
@@ -24,6 +34,9 @@ type ChatTurn = {
   question: string;
   answer: string;
   sources: AIChatSource[];
+  evidence_status: AIChatResponse["evidence_status"] | null;
+  reindexState: ReindexState;
+  reindexFeedback: string | null;
   error?: string;
 };
 
@@ -89,6 +102,9 @@ export default function AIChatPage() {
           question: trimmed,
           answer: response.answer.trim(),
           sources: response.sources,
+          evidence_status: response.evidence_status,
+          reindexState: "idle",
+          reindexFeedback: null,
         },
       ]);
       setMessage("");
@@ -103,11 +119,45 @@ export default function AIChatPage() {
           question: trimmed,
           answer: "",
           sources: [],
+          evidence_status: null,
+          reindexState: "idle",
+          reindexFeedback: null,
           error,
         },
       ]);
     } finally {
       setIsAsking(false);
+    }
+  };
+
+  const queueGroupReindex = async (turnId: number, groupId: number) => {
+    setHistory((current) => current.map((turn) => (
+      turn.id === turnId
+        ? { ...turn, reindexState: "loading", reindexFeedback: "Refreshing the group index…" }
+        : turn
+    )));
+
+    try {
+      await reindexGroup(groupId);
+      setHistory((current) => current.map((turn) => (
+        turn.id === turnId
+          ? {
+              ...turn,
+              reindexState: "success",
+              reindexFeedback: "The group index refresh was queued. Ask again after it completes.",
+            }
+          : turn
+      )));
+    } catch {
+      setHistory((current) => current.map((turn) => (
+        turn.id === turnId
+          ? {
+              ...turn,
+              reindexState: "error",
+              reindexFeedback: "We could not queue the group index refresh. Please try again.",
+            }
+          : turn
+      )));
     }
   };
 
@@ -233,7 +283,7 @@ export default function AIChatPage() {
               <article key={turn.id} className="space-y-3 rounded-lg border border-stone-200 bg-stone-50 p-4">
                 <div>
                   <p className="text-xs font-medium uppercase tracking-wide text-stone-400">You asked</p>
-                  <p className="mt-1 text-sm text-stone-800">{turn.question}</p>
+                  <p className="mt-1 break-words text-sm text-stone-800">{turn.question}</p>
                 </div>
 
                 {turn.error ? (
@@ -246,9 +296,44 @@ export default function AIChatPage() {
                 ) : (
                   <div>
                     <p className="text-xs font-medium uppercase tracking-wide text-stone-400">Zabt answered</p>
-                    <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-stone-800">
+                    <p className="mt-1 break-words whitespace-pre-wrap text-sm leading-6 text-stone-800">
                       {turn.answer || "Zabt did not return an answer for that question."}
                     </p>
+                  </div>
+                )}
+
+                {turn.evidence_status === "insufficient" && (
+                  <div className="rounded-lg border border-dashed border-primary/30 bg-primary/5 p-4">
+                    <p className="text-sm font-medium text-stone-800">No matching meeting evidence was found.</p>
+                    <p className="mt-1 text-sm text-stone-600">
+                      The selected group index may need refreshing. Queue a refresh, then ask your question again.
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => void queueGroupReindex(turn.id, turn.groupId)}
+                      disabled={turn.reindexState === "loading" || turn.reindexState === "success"}
+                      className="mt-3 inline-flex items-center justify-center gap-2 rounded-lg border border-primary/30 bg-white px-3 py-2 text-sm font-medium text-stone-800 transition-colors hover:bg-primary/5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {turn.reindexState === "loading" ? (
+                        <Loader2 aria-hidden="true" className="h-4 w-4 animate-spin text-primary" />
+                      ) : (
+                        <RefreshCw aria-hidden="true" className="h-4 w-4 text-primary" />
+                      )}
+                      {turn.reindexState === "loading"
+                        ? "Refreshing index…"
+                        : turn.reindexState === "success"
+                          ? "Index refresh queued"
+                          : "Refresh group index"}
+                    </button>
+                    {turn.reindexFeedback && (
+                      <p
+                        role={turn.reindexState === "error" ? "alert" : "status"}
+                        aria-live="polite"
+                        className={`mt-2 text-sm ${turn.reindexState === "error" ? "text-primary" : "text-stone-600"}`}
+                      >
+                        {turn.reindexFeedback}
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -272,7 +357,7 @@ export default function AIChatPage() {
                                   <ExternalLink aria-hidden="true" className="h-3 w-3" />
                                 </span>
                               </span>
-                              <span className="block text-stone-700">{source.text}</span>
+                              <span className="block break-words text-stone-700">{source.text}</span>
                             </Link>
                           </li>
                         ))}

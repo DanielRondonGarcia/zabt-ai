@@ -69,6 +69,7 @@ def test_ai_chat_endpoint_validates_and_delegates_to_service(
                         "text": "source text",
                     }
                 ],
+                "evidence_status": "available",
             }
 
     monkeypatch.setattr(ai_chat, "ai_chat_service", FakeService())
@@ -94,6 +95,7 @@ def test_ai_chat_endpoint_validates_and_delegates_to_service(
                 "text": "source text",
             }
         ],
+        "evidence_status": "available",
     }
 
 

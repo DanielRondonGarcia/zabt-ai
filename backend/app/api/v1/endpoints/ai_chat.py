@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.api import deps
 from app.models import User
-from app.services.ai_chat import ai_chat_service
+from app.services.ai_chat import EvidenceStatus, ai_chat_service
 
 router = APIRouter()
 
@@ -42,6 +42,7 @@ class AIChatResponse(BaseModel):
     group_id: int
     answer: str
     sources: list[AIChatSource]
+    evidence_status: EvidenceStatus
 
 
 @router.post("/", response_model=AIChatResponse)

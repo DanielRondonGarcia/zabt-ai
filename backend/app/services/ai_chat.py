@@ -4,7 +4,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+import re
+from typing import Any, Literal
 
 from fastapi import HTTPException, status
 from langfuse.openai import OpenAI
@@ -17,8 +18,10 @@ logger = get_logger(__name__)
 
 _CHAT_UNAVAILABLE = "chat unavailable"
 _NO_EVIDENCE_ANSWER = "I do not have enough meeting evidence to answer that question."
+_NO_EVIDENCE_ANSWER_SPANISH = "No tengo suficiente evidencia de las reuniones para responder esa pregunta."
 _MAX_EVIDENCE_CHARS = 6000
 _MAX_SNIPPET_CHARS = 1200
+EvidenceStatus = Literal["available", "insufficient", "not_required"]
 _CASUAL_MESSAGES = frozenset({
     "hola",
     "buenas",
@@ -31,6 +34,32 @@ _CASUAL_MESSAGES = frozenset({
     "gracias",
     "muchas gracias",
     "thanks",
+})
+_SPANISH_MARKERS = frozenset({
+    "buenas",
+    "como",
+    "con",
+    "cual",
+    "de",
+    "del",
+    "dime",
+    "el",
+    "en",
+    "esta",
+    "fue",
+    "hablar",
+    "hablo",
+    "hubo",
+    "la",
+    "las",
+    "los",
+    "que",
+    "paso",
+    "reunion",
+    "reuniones",
+    "se",
+    "sobre",
+    "una",
 })
 
 
@@ -47,6 +76,20 @@ def _is_casual_message(message: str) -> bool:
 
     normalized = " ".join(message.casefold().strip().rstrip(".!?,;:").split())
     return normalized in _CASUAL_MESSAGES
+
+
+def _is_probably_spanish(message: str) -> bool:
+    """Use a small deterministic heuristic for localized no-evidence responses."""
+
+    normalized = " ".join(message.casefold().strip().split())
+    if any(character in normalized for character in "áéíóúñ¿¡"):
+        return True
+    words = re.findall(r"[a-záéíóúñü]+", normalized)
+    return sum(word in _SPANISH_MARKERS for word in words) >= 2
+
+
+def _no_evidence_answer(message: str) -> str:
+    return _NO_EVIDENCE_ANSWER_SPANISH if _is_probably_spanish(message) else _NO_EVIDENCE_ANSWER
 
 
 _client = build_ai_chat_client()
@@ -86,7 +129,12 @@ class AIChatService:
         casual = _is_casual_message(message)
         sources = [] if casual else retrieved_sources
         if not sources and not casual:
-            return {"group_id": group_id, "answer": _NO_EVIDENCE_ANSWER, "sources": []}
+            return {
+                "group_id": group_id,
+                "answer": _no_evidence_answer(message),
+                "sources": [],
+                "evidence_status": "insufficient",
+            }
 
         try:
             response = self.client.chat.completions.create(
@@ -111,6 +159,7 @@ class AIChatService:
             "group_id": group_id,
             "answer": answer or _NO_EVIDENCE_ANSWER,
             "sources": sources,
+            "evidence_status": "not_required" if casual else "available",
         }
 
     def _build_user_prompt(self, message: str, sources: list[dict[str, Any]]) -> str:
