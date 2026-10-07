@@ -58,6 +58,7 @@ class MeetingService(BaseService):
                 Meeting.file_path,
                 Meeting.duration_seconds,
                 Meeting.owner_id,
+                Meeting.group_id,
                 Meeting.created_at,
                 Meeting.status,
                 Meeting.sub_status,

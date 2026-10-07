@@ -37,6 +37,7 @@ class MeetingStore:
         self.next_meeting_id = 1
         self.next_segment_id = 1
         self.exec_queue: list[list[object]] = []
+        self.statements: list[object] = []
         self.deleted_visual_for: list[int] = []
         self.deleted_meeting_ids: list[int] = []
         self.added: list[object] = []
@@ -99,6 +100,7 @@ class FakeMeetingSession:
         return self.store.get(model, obj_id)
 
     def exec(self, statement):
+        self.store.statements.append(statement)
         text = str(statement)
         if "DELETE FROM visualsegment" in text:
             # SQLAlchemy Delete keeps criteria internal; tests assert that deletion was requested.
@@ -166,6 +168,20 @@ def test_get_meetings_returns_session_rows(service: MeetingService, store: Meeti
     store.exec_queue.append([newer])
 
     assert service.get_meetings(owner_id=1) == [newer]
+
+
+def test_get_meetings_lightweight_projection_includes_group_id(
+    service: MeetingService, store: MeetingStore
+) -> None:
+    grouped = store.add_meeting(title="Grouped", owner_id=1, group_id=42)
+    store.exec_queue.append([grouped])
+
+    rows = service.get_meetings(owner_id=1)
+
+    assert rows == [grouped]
+    assert rows[0].group_id == 42
+    selected_keys = {column.key for column in store.statements[-1].selected_columns}
+    assert "group_id" in selected_keys
 
 
 def test_status_transcription_type_substatus_heartbeat_and_completion(
