@@ -19,7 +19,7 @@ Give users a larger, owner-scoped group view at `/groups/{id}` where they can in
 
 - `frontend-2/app/lib/api.ts` — adds the typed `getGroup` helper; existing typed meeting and assignment helpers remain unchanged.
 - `frontend-2/app/(dashboard)/groups/page.tsx` — adds explicit group navigation and supports opening an edit dialog from the detail-page query state.
-- `frontend-2/app/(dashboard)/groups/[id]/page.tsx` — new client-side group detail, meeting assignment management, filtering, feedback, and responsive panels.
+- `frontend-2/app/(dashboard)/groups/[id]/page.tsx` — client-side group detail, meeting assignment management, filtering, feedback, responsive panels, and a full-width bottom action bar that keeps the Add meetings panel readable on desktop.
 - `backend/app/services/meeting.py` — includes `Meeting.group_id` in the lightweight owner-scoped meeting projection.
 - `backend/app/tests/unit/services/test_meeting_coverage.py` — regression coverage asserts the selected projection columns and returned grouped meeting value.
 - `odd/tasks/groups-detail-management.md` — objective, acceptance criteria, affected files, and verification evidence.
@@ -33,6 +33,7 @@ Give users a larger, owner-scoped group view at `/groups/{id}` where they can in
 - `cd backend && uv run pytest app/tests/unit/services/test_meeting_coverage.py -q` — passed: 29 tests; 2 existing deprecation warnings.
 - `cd backend && uv run python -m compileall -q app` — passed.
 - `cd frontend-2 && npx tsc --noEmit` — passed after the backend corrective patch; no frontend files changed.
+- UI polish verification — passed: `npx tsc --noEmit`, `npm run build`, and `git diff --check` after widening the desktop grid and restructuring `MeetingRow` actions.
 - `git diff --check` — passed; Git reported only the repository's existing LF-to-CRLF working-copy warnings.
 - Runtime smoke: rebuilt `api` and `web`; the API reported `b7c8d9e0f1a2 (head)`, the real owner-scoped meeting projection returned `grouped_meetings=[(602, 2)]`, and `http://localhost:3001/groups` plus `/groups/2` returned HTTP 200. No assignment mutation was performed during the smoke test.
 

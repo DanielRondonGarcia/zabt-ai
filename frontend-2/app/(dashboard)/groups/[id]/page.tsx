@@ -121,79 +121,77 @@ function MeetingRow({
 
   return (
     <article className="min-w-0 rounded-lg border border-border bg-background p-4">
-      <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="min-w-0 space-y-2">
-          <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-            <h3 className="min-w-0 break-words text-base font-semibold text-foreground">
-              {meeting.title}
-            </h3>
-            <div className="flex shrink-0 flex-wrap items-center gap-2">
-              <StatusBadge status={meeting.status} subStatus={meeting.sub_status} />
-              {visibleSubStatus && (
-                <span className="max-w-full break-words rounded-4xl border border-border px-2 py-0.5 text-xs text-muted-foreground">
-                  {visibleSubStatus}
-                </span>
-              )}
-            </div>
+      <div className="min-w-0 space-y-2">
+        <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start">
+          <h3 className="min-w-0 flex-1 break-words line-clamp-2 text-base font-semibold text-foreground">
+            {meeting.title}
+          </h3>
+          <div className="flex shrink-0 flex-wrap items-center gap-2">
+            <StatusBadge status={meeting.status} subStatus={meeting.sub_status} />
+            {visibleSubStatus && (
+              <span className="max-w-full break-words rounded-4xl border border-border px-2 py-0.5 text-xs text-muted-foreground">
+                {visibleSubStatus}
+              </span>
+            )}
           </div>
-
-          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-            <span className="inline-flex min-w-0 items-center gap-1.5">
-              <CalendarDays className="size-3.5 shrink-0" aria-hidden="true" />
-              <span>{formatDate(meeting.created_at)}</span>
-            </span>
-            <span className="inline-flex min-w-0 items-center gap-1.5">
-              <Clock3 className="size-3.5 shrink-0" aria-hidden="true" />
-              <span>{formatDuration(meeting.duration_seconds)}</span>
-            </span>
-            <span className="inline-flex min-w-0 items-center gap-1.5 break-words">
-              {meeting.source_type === "youtube" ? (
-                <Video className="size-3.5 shrink-0" aria-hidden="true" />
-              ) : (
-                <FileAudio className="size-3.5 shrink-0" aria-hidden="true" />
-              )}
-              <span className="break-words">{formatSource(meeting)}</span>
-            </span>
-          </div>
-
-          {currentGroupName && (
-            <p className="break-words text-xs text-muted-foreground">
-              Currently in <span className="font-medium text-foreground">{currentGroupName}</span>
-            </p>
-          )}
-
-          {rowError && (
-            <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              <span className="min-w-0 flex-1 break-words">{rowError.message}</span>
-              <button
-                type="button"
-                onClick={onRetry}
-                disabled={saving}
-                className="rounded-lg px-2 py-1 font-medium underline underline-offset-2 outline-none hover:bg-destructive/10 focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
-              >
-                Try again
-              </button>
-            </div>
-          )}
         </div>
 
-        <div className="flex shrink-0 flex-wrap items-center gap-2 sm:flex-col sm:items-stretch">
-          <Link href={`/meetings/${meeting.id}`} className={`${linkActionClass} text-primary hover:text-primary`}>
-            Open meeting
-            <ArrowRight className="size-3.5" aria-hidden="true" />
-          </Link>
-          <Button
-            type="button"
-            size="sm"
-            variant={isRemoveAction ? "outline" : "default"}
-            className={isRemoveAction ? "text-destructive hover:text-destructive" : undefined}
-            onClick={() => onAssign(meeting, actionTarget)}
-            disabled={saving || meeting.group_id === actionTarget}
-            loading={saving}
-          >
-            {actionLabel}
-          </Button>
+        <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <span className="inline-flex min-w-0 items-center gap-1.5">
+            <CalendarDays className="size-3.5 shrink-0" aria-hidden="true" />
+            <span>{formatDate(meeting.created_at)}</span>
+          </span>
+          <span className="inline-flex min-w-0 items-center gap-1.5">
+            <Clock3 className="size-3.5 shrink-0" aria-hidden="true" />
+            <span>{formatDuration(meeting.duration_seconds)}</span>
+          </span>
+          <span className="inline-flex min-w-0 items-center gap-1.5 break-words">
+            {meeting.source_type === "youtube" ? (
+              <Video className="size-3.5 shrink-0" aria-hidden="true" />
+            ) : (
+              <FileAudio className="size-3.5 shrink-0" aria-hidden="true" />
+            )}
+            <span className="break-words">{formatSource(meeting)}</span>
+          </span>
         </div>
+
+        {currentGroupName && (
+          <p className="break-words text-xs text-muted-foreground">
+            Currently in <span className="font-medium text-foreground">{currentGroupName}</span>
+          </p>
+        )}
+
+        {rowError && (
+          <div role="alert" className="flex flex-wrap items-center gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+            <span className="min-w-0 flex-1 break-words">{rowError.message}</span>
+            <button
+              type="button"
+              onClick={onRetry}
+              disabled={saving}
+              className="rounded-lg px-2 py-1 font-medium underline underline-offset-2 outline-none hover:bg-destructive/10 focus-visible:ring-2 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Try again
+            </button>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-4 flex flex-wrap items-center justify-end gap-2 border-t border-border pt-3">
+        <Link href={`/meetings/${meeting.id}`} className={`${linkActionClass} text-primary hover:text-primary`}>
+          Open meeting
+          <ArrowRight className="size-3.5" aria-hidden="true" />
+        </Link>
+        <Button
+          type="button"
+          size="sm"
+          variant={isRemoveAction ? "outline" : "default"}
+          className={isRemoveAction ? "text-destructive hover:text-destructive" : undefined}
+          onClick={() => onAssign(meeting, actionTarget)}
+          disabled={saving || meeting.group_id === actionTarget}
+          loading={saving}
+        >
+          {actionLabel}
+        </Button>
       </div>
     </article>
   );
@@ -446,7 +444,7 @@ export default function GroupDetailPage({
         {saveFeedback}
       </div>
 
-      <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1.35fr)_minmax(18rem,0.85fr)]">
+      <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
         <section aria-labelledby="assigned-meetings-heading" className="min-w-0 rounded-lg border border-border bg-card p-4 sm:p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div className="min-w-0">
