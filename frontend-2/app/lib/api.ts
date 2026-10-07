@@ -153,29 +153,59 @@ export const login = async (email: string, password: string): Promise<void> => {
 
 export interface MicrosoftOidcStatus {
   configured: boolean;
-  tenant: string;
-  oidc_redirect_uri: string;
-  graph_redirect_uri: string;
-  oidc_scopes: string[];
+  client_id: string | null;
+  tenant: string | null;
+  redirect_uri: string | null;
+  scopes: string[];
+  enabled: boolean;
   graph_configured: boolean;
   token_storage_configured: boolean;
 }
 
-export const getMicrosoftOidcLoginUrl = (next = "/"): string => {
-  const safeNext = next.startsWith("/") && !next.startsWith("//") ? next : "/";
-  const params = new URLSearchParams({ next: safeNext });
-  return `${API_URL}/auth/microsoft/start?${params.toString()}`;
-};
+export interface MicrosoftOidcConfiguration extends MicrosoftOidcStatus {
+  can_manage: boolean;
+  is_admin: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+  updated_by: number | null;
+}
 
-export const getMicrosoftOidcLinkUrl = (next = "/integrations"): string => {
-  const safeNext = next.startsWith("/") && !next.startsWith("//") ? next : "/integrations";
-  const params = new URLSearchParams({ next: safeNext });
-  return `${API_URL}/auth/microsoft/link/start?${params.toString()}`;
-};
+export interface MicrosoftOidcConfigurationUpdate {
+  client_id: string;
+  tenant: string;
+  redirect_uri: string;
+  enabled?: boolean;
+}
 
 export const getMicrosoftOidcStatus = async (): Promise<MicrosoftOidcStatus> => {
   const { data } = await authClient.get<MicrosoftOidcStatus>("/auth/microsoft/status");
   return data;
+};
+
+export const getMicrosoftOidcConfiguration = async (): Promise<MicrosoftOidcConfiguration> => {
+  const { data } = await apiClient.get<MicrosoftOidcConfiguration>("/auth/microsoft/config");
+  return data;
+};
+
+export const updateMicrosoftOidcConfiguration = async (
+  configuration: MicrosoftOidcConfigurationUpdate,
+): Promise<MicrosoftOidcConfiguration> => {
+  const { data } = await apiClient.put<MicrosoftOidcConfiguration>(
+    "/auth/microsoft/config",
+    { ...configuration, enabled: configuration.enabled ?? true },
+  );
+  return data;
+};
+
+export const exchangeMicrosoftOidcToken = async (idToken: string): Promise<LocalAuthResponse> => {
+  const { data } = await authClient.post<LocalAuthResponse>("/auth/microsoft/oidc/exchange", {
+    id_token: idToken,
+  });
+  return data;
+};
+
+export const linkMicrosoftOidcToken = async (idToken: string): Promise<void> => {
+  await apiClient.post("/auth/microsoft/oidc/link", { id_token: idToken });
 };
 
 // ── Groups and AI chat ────────────────────────────────────────────────────────
