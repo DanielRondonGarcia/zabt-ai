@@ -87,3 +87,28 @@ Harden the existing Microsoft Graph Calendar/email delegated OAuth connection wi
 ### Rollback boundary
 
 Revert only the `graph_connect` state purpose, Graph client PKCE parameters, delegated Graph endpoint hardening, readiness status fields, Graph UI disable/message changes, tests, and this second-work-unit documentation section. Keep the first-unit OIDC login/link flow, external identity migration, local authentication, and Graph token storage/calendar/email runtime behavior intact.
+
+## Configuration-discovery UI correction
+
+### Evidence
+
+- `frontend-2/app/(dashboard)/integrations/page.tsx` now provides a visible **How to configure Microsoft** dialog trigger in the Entra/Graph configuration area, emphasized while OIDC, Graph, or token-storage status is unavailable.
+- The dialog explains that deployment operators configure server `.env` or secret-manager values, never browser-side secrets, and lists `MICROSOFT_CLIENT_ID`, `MICROSOFT_CLIENT_SECRET`, `MICROSOFT_TENANT_ID`, `MICROSOFT_OIDC_REDIRECT_URI`, `MICROSOFT_REDIRECT_URI`, and `TOKEN_ENCRYPTION_KEY` without exposing their values.
+- The dialog displays API-reported OIDC and Graph callback URLs, shows the local-development OIDC fallback derived from `NEXT_PUBLIC_API_URL` only when the API reports no OIDC URL, and provides non-secret URL copy actions plus a safe link to the official Microsoft Entra app-registration portal.
+- **Recheck configuration** calls `getMicrosoftOidcStatus` again and reports loading, success, and error states while preserving the existing Graph Connect disabled behavior when readiness is unknown or incomplete.
+- OIDC sign-in and delegated Graph connection remain separate capabilities; OIDC scopes are documented as `openid profile email`, while Graph scopes remain server-controlled.
+
+Secrets and encryption keys remain deployment-managed. The browser receives only non-sensitive status fields and callback URLs; it never receives `MICROSOFT_CLIENT_SECRET` or `TOKEN_ENCRYPTION_KEY` values.
+
+### Verification
+
+- `cd frontend-2 && npx tsc --noEmit` — passed.
+- `cd frontend-2 && npm run build` — passed; Next reported the existing multiple-lockfile workspace-root warning.
+- Direct focused lint `cd frontend-2 && npm run lint -- "app/(dashboard)/integrations/page.tsx"` — blocked before ESLint analysis by the existing `TypeError: expand is not a function` minimatch/brace-expansion dependency mismatch.
+- Known focused lint shim — passed with 0 errors using the temporary preload that redirects only the minimatch 3 `brace-expansion` lookup to the compatible export outside the repository.
+- `git diff --check` — passed; Git reported only existing LF-to-CRLF working-copy warnings.
+- No credentials were exposed, Docker was not restarted, and no commit or push was performed.
+
+### Rollback boundary
+
+Revert only the configuration-discovery dialog, callback URL copy/link actions, status recheck feedback, related semantic styling, and this documentation section. Keep the existing Entra link action, Graph Connect disabled behavior, backend status contract, and all deployment-managed secret handling unchanged.
