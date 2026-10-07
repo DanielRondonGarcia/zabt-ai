@@ -17,6 +17,14 @@ Microsoft Graph OAuth, and the read-only MCP work.
 - The migration adds indexed `user.is_admin` with a false default and grants
   administrator status to the earliest existing user (`MIN(user.id)`) as the
   bootstrap administrator. Later configuration writes require `is_admin`.
+- If the migration ran before any usable operator account was present, an
+  authenticated active user receives a one-time setup claim while no global
+  OIDC configuration row exists. The first save acquires the PostgreSQL
+  transaction advisory lock (or deterministic SQLite/test fallback), rechecks
+  row existence, promotes that winning user to `is_admin`, and commits the
+  promotion plus public OIDC configuration atomically. Once the row exists,
+  non-admin users receive read-only status and `403` on writes; a concurrent
+  loser cannot overwrite the winning configuration.
 - The browser uses `@azure/msal-browser` with Microsoft Entra public-client
   authorization code + PKCE and the `openid profile email` scopes. It creates
   the MSAL application from the public runtime configuration, calls
@@ -106,7 +114,7 @@ Microsoft Graph OAuth, and the read-only MCP work.
 
 ## Verification
 
-- `cd backend && $env:AUTH_COOKIE_SECURE='false'; uv run pytest --confcutdir=tests/unit tests/unit/test_microsoft_graph.py app/tests/unit/services/test_microsoft_graph_coverage.py app/tests/unit/services/test_integration_coverage.py app/tests/unit/services/test_auth_coverage.py tests/unit/test_local_auth.py tests/unit/test_local_auth_router.py tests/unit/test_external_identity.py tests/unit/test_microsoft_oidc.py tests/unit/test_microsoft_auth.py tests/unit/test_microsoft_oidc_config.py tests/unit/test_microsoft_oidc_migration.py tests/unit/test_config_defaults.py -q` — passed, 167 tests and one existing Pydantic deprecation warning, including positive/negative provider caching, same-origin redirect, no-store, and advisory-lock regressions.
+- `cd backend && $env:AUTH_COOKIE_SECURE='false'; uv run pytest --confcutdir=tests/unit tests/unit/test_microsoft_graph.py app/tests/unit/services/test_microsoft_graph_coverage.py app/tests/unit/services/test_integration_coverage.py app/tests/unit/services/test_auth_coverage.py tests/unit/test_local_auth.py tests/unit/test_local_auth_router.py tests/unit/test_external_identity.py tests/unit/test_microsoft_oidc.py tests/unit/test_microsoft_auth.py tests/unit/test_microsoft_oidc_config.py tests/unit/test_microsoft_oidc_migration.py tests/unit/test_config_defaults.py -q` — passed, 169 tests and one existing Pydantic deprecation warning, including positive/negative provider caching, same-origin redirect, no-store, advisory-lock, and one-time setup-claim regressions.
 - `cd backend && uv run python -m compileall -q app` — passed.
 - `cd backend && uv run alembic upgrade d9e0f1a2b3c4:head --sql` — passed; emitted the `is_admin` bootstrap update and `microsoftoidcconfiguration` DDL.
 - `cd backend && uv run alembic heads` — passed with `e0f1a2b3c4d5 (head)`.

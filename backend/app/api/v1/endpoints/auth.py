@@ -209,7 +209,7 @@ def _configuration_response(
     configuration = get_microsoft_oidc_configuration(db)
     return MicrosoftOidcConfigurationResponse(
         **_status_response(db).model_dump(),
-        can_manage=bool(current_user.is_admin),
+        can_manage=bool(current_user.is_admin or configuration is None),
         is_admin=bool(current_user.is_admin),
         created_at=configuration.created_at if configuration else None,
         updated_at=configuration.updated_at if configuration else None,
@@ -315,11 +315,6 @@ def update_microsoft_oidc_configuration(
     """Save the singleton public OIDC configuration for an administrator."""
 
     request_origin = security.validate_request_origin(request)
-    if not current_user.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Administrator access is required",
-        )
     if current_user.id is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -327,16 +322,32 @@ def update_microsoft_oidc_configuration(
         )
 
     try:
-        upsert_microsoft_oidc_configuration(
-            db,
-            client_id=payload.client_id,
-            tenant=payload.tenant_value,
-            redirect_uri=payload.redirect_uri,
-            enabled=payload.enabled,
-            updated_by=current_user.id,
-            spa_origin=request_origin,
-        )
-        db.commit()
+        # The same transaction-scoped guard used by first local registration
+        # serializes setup claims and makes the existence check authoritative.
+        with auth_service._first_admin_bootstrap_lock(db):
+            configuration = get_microsoft_oidc_configuration(db)
+            if configuration is not None and not current_user.is_admin:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Administrator access is required",
+                )
+            if configuration is None:
+                current_user.is_admin = True
+                db.add(current_user)
+
+            upsert_microsoft_oidc_configuration(
+                db,
+                client_id=payload.client_id,
+                tenant=payload.tenant_value,
+                redirect_uri=payload.redirect_uri,
+                enabled=payload.enabled,
+                updated_by=current_user.id,
+                spa_origin=request_origin,
+            )
+            db.commit()
+    except HTTPException:
+        db.rollback()
+        raise
     except MicrosoftOidcConfigurationValidationError as exc:
         db.rollback()
         raise HTTPException(

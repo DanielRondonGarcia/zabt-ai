@@ -248,7 +248,7 @@ def test_admin_configuration_get_and_put_return_no_secret(
     admin = make_user(is_admin=True)
     configuration = make_configuration()
     updated = make_configuration(updated_by=admin.id, tenant_id="organizations")
-    db = FakeDb(exec_rows=[[configuration], [configuration], [updated], [updated]])
+    db = FakeDb(exec_rows=[[configuration], [configuration], [updated], [updated], [updated]])
     monkeypatch.setattr(auth_endpoint, "is_token_storage_configured", lambda: True)
     monkeypatch.setattr(auth_endpoint, "_graph_configuration_configured", lambda: True)
     monkeypatch.setattr(
@@ -290,13 +290,65 @@ def test_admin_configuration_get_and_put_return_no_secret(
     assert upsert_kwargs["spa_origin"] == "http://localhost:3001"
 
 
-def test_non_admin_cannot_update_global_configuration(monkeypatch: pytest.MonkeyPatch):
+def test_non_admin_can_view_and_claim_global_configuration_when_absent(
+    monkeypatch: pytest.MonkeyPatch,
+):
     user = make_user(is_admin=False)
-    db = FakeDb()
+    saved = make_configuration(updated_by=user.id)
     monkeypatch.setattr(
         auth_endpoint.security,
         "validate_request_origin",
         lambda request: "http://localhost:3001",
+    )
+
+    view_response = auth_endpoint.microsoft_oidc_configuration(
+        Response(),
+        user,
+        FakeDb(exec_rows=[[], []]),
+    )
+    assert view_response.can_manage is True
+    assert view_response.is_admin is False
+
+    db = FakeDb(exec_rows=[[]])
+    upsert_kwargs = {}
+
+    def fake_upsert(*args, **kwargs):
+        upsert_kwargs.update(kwargs)
+        return saved
+
+    monkeypatch.setattr(auth_endpoint, "upsert_microsoft_oidc_configuration", fake_upsert)
+    auth_endpoint.update_microsoft_oidc_configuration(
+        auth_endpoint.MicrosoftOidcConfigurationUpdate(
+            client_id=CLIENT_ID,
+            tenant="common",
+            redirect_uri="http://localhost:3001/login",
+        ),
+        make_request(),
+        Response(),
+        user,
+        db,
+    )
+
+    assert user.is_admin is True
+    assert db.commits == 1
+    assert upsert_kwargs["updated_by"] == user.id
+
+
+def test_non_admin_cannot_claim_or_overwrite_after_configuration_exists(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    user = make_user(is_admin=False)
+    configuration = make_configuration()
+    db = FakeDb(exec_rows=[[configuration]])
+    monkeypatch.setattr(
+        auth_endpoint.security,
+        "validate_request_origin",
+        lambda request: "http://localhost:3001",
+    )
+    monkeypatch.setattr(
+        auth_endpoint,
+        "upsert_microsoft_oidc_configuration",
+        lambda *args, **kwargs: pytest.fail("a non-admin must not overwrite configuration"),
     )
 
     with pytest.raises(Exception) as error:
@@ -314,6 +366,20 @@ def test_non_admin_cannot_update_global_configuration(monkeypatch: pytest.Monkey
 
     assert error.value.status_code == 403
     assert db.commits == 0
+    assert user.is_admin is False
+
+
+def test_non_admin_loses_read_only_manage_claim_after_configuration_exists():
+    user = make_user(is_admin=False)
+    configuration = make_configuration()
+    response = auth_endpoint.microsoft_oidc_configuration(
+        Response(),
+        user,
+        FakeDb(exec_rows=[[configuration], [configuration]]),
+    )
+
+    assert response.can_manage is False
+    assert response.is_admin is False
 
 
 class FakeVerifier:
