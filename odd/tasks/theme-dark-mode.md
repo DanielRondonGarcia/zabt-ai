@@ -31,6 +31,7 @@ Replace the fake sidebar plan and credits block with an accessible light/dark th
 - Focused lint shim — passed with no diagnostics using the established temporary preload that redirects only `minimatch@3` to the compatible `brace-expansion` export outside the repository.
 - `git diff --check` — passed; Git reported only the existing LF-to-CRLF working-copy warnings.
 - Theme static/DOM check — passed; persisted light and preferred dark bootstrap cases updated `.dark` and `colorScheme`, source checks confirmed `zabt-theme` persistence and the toggle contract, and the fake sidebar plan copy was absent.
+- Independent dark-mode review — passed after the corrective `.dark .prose` compatibility block; compiled CSS confirms meeting summaries and AI Chat Markdown use readable dark-theme body, heading, code, link, list, quote, caption, and table colors while status accents remain isolated.
 - Corrective patch — added `.dark .prose` semantic Typography variables and scoped descendant overrides for prose text, headings, links, code/pre, quotes, lists, captions, and table borders; added reduced-motion transition fallbacks to the mobile drawer and sidebar chevron.
 - Corrective `cd frontend-2 && npx tsc --noEmit` — passed with no diagnostics.
 - Corrective `cd frontend-2 && npm run build` — passed; all existing routes compiled and prerendered successfully. The same pre-existing multiple-lockfile workspace-root warning was reported.
@@ -39,4 +40,4 @@ Replace the fake sidebar plan and credits block with an accessible light/dark th
 
 ## Delivery
 
-- Uncommitted implementation on `feat/actsis-local-stack`; no commit or remote operation is part of this task.
+- Committed on `feat/actsis-local-stack`: `7b33244 feat(theme): add persisted dashboard dark mode`.
