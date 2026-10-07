@@ -56,6 +56,13 @@ class TestBuildAuthUrl:
         url = graph_client.build_auth_url(state="s")
         assert "/test-tenant-id/" in url
 
+    def test_includes_optional_pkce_challenge(self, graph_client: MicrosoftGraphClient):
+        url = graph_client.build_auth_url(state="s", code_challenge="challenge-value")
+        parsed = parse_qs(urlparse(url).query)
+
+        assert parsed["code_challenge"] == ["challenge-value"]
+        assert parsed["code_challenge_method"] == ["S256"]
+
 
 class TestExchangeCode:
     @pytest.mark.asyncio
@@ -83,6 +90,23 @@ class TestExchangeCode:
         mock_instance.post.assert_called_once()
         call_kwargs = mock_instance.post.call_args
         assert "auth-code-xyz" in str(call_kwargs)
+
+    @pytest.mark.asyncio
+    async def test_sends_optional_pkce_verifier(self, graph_client: MicrosoftGraphClient):
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"access_token": "at-123", "refresh_token": "rt-456"}
+
+        with patch("app.services.microsoft_graph.httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.post.return_value = mock_response
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            await graph_client.exchange_code("auth-code-xyz", code_verifier="verifier-value")
+
+        assert mock_instance.post.call_args.kwargs["data"]["code_verifier"] == "verifier-value"
 
     @pytest.mark.asyncio
     async def test_raises_on_error(self, graph_client: MicrosoftGraphClient):

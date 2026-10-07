@@ -91,6 +91,22 @@ def test_link_state_requires_an_owner_user_id():
         OAuthStateService(FakeRedis()).create_transaction(purpose="oidc_link")
 
 
+def test_graph_connect_state_is_user_bound_and_one_time():
+    service = OAuthStateService(FakeRedis())
+    transaction = service.create_transaction(
+        purpose="graph_connect",
+        user_id=7,
+        next_path="/integrations",
+        nonce="n" * 32,
+        code_verifier="v" * 43,
+    )
+
+    assert transaction.purpose == "graph_connect"
+    assert transaction.user_id == 7
+    assert service.consume(transaction.state) == transaction
+    assert service.consume(transaction.state) is None
+
+
 @pytest.mark.parametrize(
     "next_path",
     [

@@ -24,6 +24,13 @@ const MICROSOFT_LINK_RESULTS: Record<string, string> = {
   link_failed: "Microsoft account could not be linked. Please try again.",
   already_linked: "This Microsoft account is already linked to another Zabt account.",
 };
+const MICROSOFT_GRAPH_ERRORS: Record<string, string> = {
+  cancelled: "Microsoft Graph connection was cancelled.",
+  configuration: "Microsoft Graph connection is not configured for this deployment.",
+  state: "Microsoft Graph connection could not be verified. Please try again.",
+  account: "This Zabt account cannot connect Microsoft Graph.",
+  oauth_failed: "Microsoft Graph connection could not be completed. Please try again.",
+};
 
 export default function IntegrationsPage() {
   const searchParams = useSearchParams();
@@ -75,6 +82,12 @@ export default function IntegrationsPage() {
   const microsoftResultMessage = microsoftResult
     ? MICROSOFT_LINK_RESULTS[microsoftResult] ?? MICROSOFT_LINK_RESULTS.link_failed
     : null;
+  const microsoftGraphError = searchParams.get("microsoft_error");
+  const microsoftGraphErrorMessage = microsoftGraphError
+    ? MICROSOFT_GRAPH_ERRORS[microsoftGraphError] ?? MICROSOFT_GRAPH_ERRORS.oauth_failed
+    : null;
+  const graphConnectDisabled =
+    !microsoftOidcStatus?.graph_configured || !microsoftOidcStatus.token_storage_configured;
 
   return (
     <div className="px-8 py-8 max-w-3xl">
@@ -157,6 +170,26 @@ export default function IntegrationsPage() {
         <p className="mb-4 text-sm text-stone-500">
           Connect Microsoft Graph separately to sync Calendar events and send email from Zabt.
         </p>
+        {microsoftGraphErrorMessage && (
+          <p className="mb-4 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-700" role="status">
+            {microsoftGraphErrorMessage}
+          </p>
+        )}
+        {microsoftOidcStatus && (
+          <div className="mb-4 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-600">
+            <p>
+              Graph delegated OAuth: {microsoftOidcStatus.graph_configured ? "Configured" : "Not configured"}
+            </p>
+            <p>
+              Token storage: {microsoftOidcStatus.token_storage_configured ? "Configured" : "Not configured"}
+            </p>
+            {!microsoftOidcStatus.token_storage_configured && (
+              <p className="mt-1 font-medium text-stone-700">
+                The deployment must set TOKEN_ENCRYPTION_KEY before connecting Graph.
+              </p>
+            )}
+          </div>
+        )}
         <div className="space-y-3">
           {SUPPORTED_PROVIDERS.map((provider) => (
             <IntegrationCard
@@ -164,6 +197,7 @@ export default function IntegrationsPage() {
               provider={provider}
               integration={getIntegration(provider)}
               onStatusChange={load}
+              connectDisabled={graphConnectDisabled}
             />
           ))}
         </div>

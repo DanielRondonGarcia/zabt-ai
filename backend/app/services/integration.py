@@ -15,6 +15,19 @@ from app.services.base import BaseService
 logger = logging.getLogger(__name__)
 
 
+def is_token_storage_configured(key: str | None = None) -> bool:
+    """Return whether the configured token-storage key is a valid Fernet key."""
+
+    candidate = settings.TOKEN_ENCRYPTION_KEY if key is None else key
+    if not isinstance(candidate, str) or not candidate.strip():
+        return False
+    try:
+        Fernet(candidate.encode("utf-8"))
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 class IntegrationService(BaseService):
     def __init__(self, encryption_key: str = ""):
         key = encryption_key or settings.TOKEN_ENCRYPTION_KEY

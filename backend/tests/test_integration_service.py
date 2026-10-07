@@ -5,7 +5,8 @@
 import pytest
 from cryptography.fernet import Fernet, InvalidToken
 
-from app.services.integration import IntegrationService
+from app.services import integration as integration_module
+from app.services.integration import IntegrationService, is_token_storage_configured
 
 # Generate a valid Fernet key for testing
 TEST_ENCRYPTION_KEY = Fernet.generate_key().decode()
@@ -69,3 +70,15 @@ def test_encrypt_unicode_token(service: IntegrationService):
     token = "tökën-with-ünïcödë-chars-🔑"
     encrypted = service.encrypt_token(token)
     assert service.decrypt_token(encrypted) == token
+
+
+def test_token_storage_readiness_requires_a_valid_fernet_key(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(integration_module.settings, "TOKEN_ENCRYPTION_KEY", "")
+    assert is_token_storage_configured() is False
+
+    monkeypatch.setattr(integration_module.settings, "TOKEN_ENCRYPTION_KEY", "not-a-fernet-key")
+    assert is_token_storage_configured() is False
+
+    valid_key = Fernet.generate_key().decode()
+    monkeypatch.setattr(integration_module.settings, "TOKEN_ENCRYPTION_KEY", valid_key)
+    assert is_token_storage_configured() is True

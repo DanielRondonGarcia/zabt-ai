@@ -7,6 +7,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
@@ -517,10 +518,41 @@ async def test_callback_inactive_user_receives_generic_failure_without_cookies(
     assert harness.cookies == []
 
 
+def test_oidc_oversized_code_is_not_reflected_by_fastapi_or_sent_to_provider(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    harness = callback_harness()
+    marker = "OVERSIZED_OIDC_AUTH_CODE_MARKER"
+    monkeypatch.setattr(auth_endpoint, "oauth_state_service", harness.state)
+    monkeypatch.setattr(auth_endpoint, "_microsoft_client", lambda: harness.oidc)
+    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: True)
+
+    def override_db():
+        yield harness.db
+
+    test_app = FastAPI()
+    test_app.include_router(auth_endpoint.router, prefix="/auth")
+    test_app.dependency_overrides[auth_endpoint.get_db] = override_db
+    with TestClient(test_app) as client:
+        response = client.get(
+            "/auth/microsoft/callback",
+            params={"state": harness.state.transaction.state, "code": marker * 200},
+            follow_redirects=False,
+        )
+
+    assert response.status_code == 302
+    assert marker not in response.text
+    assert marker not in response.headers["location"]
+    assert harness.oidc.exchange_calls == 0
+
+
 def test_status_endpoint_returns_only_non_sensitive_configuration(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(settings, "MICROSOFT_CLIENT_ID", "")
+    monkeypatch.setattr(settings, "MICROSOFT_CLIENT_SECRET", "")
     monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", "tenant.example")
     monkeypatch.setattr(settings, "MICROSOFT_OIDC_REDIRECT_URI", "https://api.example/oidc")
     monkeypatch.setattr(settings, "MICROSOFT_REDIRECT_URI", "https://api.example/graph")
+    monkeypatch.setattr(settings, "TOKEN_ENCRYPTION_KEY", "")
     monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: False)
 
     test_app = FastAPI()
@@ -535,4 +567,28 @@ def test_status_endpoint_returns_only_non_sensitive_configuration(monkeypatch: p
     assert payload["oidc_redirect_uri"] == "https://api.example/oidc"
     assert payload["graph_redirect_uri"] == "https://api.example/graph"
     assert payload["oidc_scopes"] == ["openid", "profile", "email"]
+    assert payload["graph_configured"] is False
+    assert payload["token_storage_configured"] is False
     assert "client_secret" not in payload
+
+
+def test_status_endpoint_reports_graph_and_token_storage_readiness_without_values(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    storage_key = Fernet.generate_key().decode()
+    monkeypatch.setattr(settings, "MICROSOFT_CLIENT_ID", "client-id")
+    monkeypatch.setattr(settings, "MICROSOFT_CLIENT_SECRET", "secret-value")
+    monkeypatch.setattr(settings, "MICROSOFT_REDIRECT_URI", "https://api.example/graph")
+    monkeypatch.setattr(settings, "TOKEN_ENCRYPTION_KEY", storage_key)
+    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: False)
+
+    test_app = FastAPI()
+    test_app.include_router(auth_endpoint.router, prefix="/auth")
+    with TestClient(test_app) as client:
+        response = client.get("/auth/microsoft/status")
+
+    payload = response.json()
+    assert payload["graph_configured"] is True
+    assert payload["token_storage_configured"] is True
+    assert "secret-value" not in response.text
+    assert storage_key not in response.text

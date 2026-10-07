@@ -80,6 +80,14 @@ def test_build_auth_url_contains_oauth_parameters_and_scopes(client: MicrosoftGr
     assert params["scope"] == [" ".join(SCOPES)]
 
 
+def test_build_auth_url_includes_optional_pkce_parameters(client: MicrosoftGraphClient) -> None:
+    url = client.build_auth_url("state-123", code_challenge="challenge-value")
+
+    params = parse_qs(urlparse(url).query)
+    assert params["code_challenge"] == ["challenge-value"]
+    assert params["code_challenge_method"] == ["S256"]
+
+
 @pytest.mark.asyncio
 async def test_exchange_code_success_posts_form_without_exposing_secret(client: MicrosoftGraphClient) -> None:
     FakeAsyncClient.responses = [FakeResponse(200, {"access_token": "at", "refresh_token": "rt"})]
@@ -93,6 +101,15 @@ async def test_exchange_code_success_posts_form_without_exposing_secret(client: 
     assert kwargs["data"]["grant_type"] == "authorization_code"
     assert kwargs["data"]["code"] == "code-123"
     assert kwargs["headers"] == {"Content-Type": "application/x-www-form-urlencoded"}
+
+
+@pytest.mark.asyncio
+async def test_exchange_code_sends_optional_pkce_verifier(client: MicrosoftGraphClient) -> None:
+    FakeAsyncClient.responses = [FakeResponse(200, {"access_token": "at", "refresh_token": "rt"})]
+
+    await client.exchange_code("code-123", code_verifier="verifier-value")
+
+    assert FakeAsyncClient.calls[0][2]["data"]["code_verifier"] == "verifier-value"
 
 
 @pytest.mark.asyncio
@@ -242,6 +259,26 @@ async def test_send_email_error_raises_graph_error(client: MicrosoftGraphClient)
 
     assert exc_info.value.status_code == 429
     assert "Failed to send email" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["profile", "calendar", "email"])
+async def test_graph_provider_bodies_never_reach_exception_messages(
+    client: MicrosoftGraphClient,
+    operation: str,
+) -> None:
+    marker = "SENSITIVE_PROVIDER_BODY_MARKER"
+    FakeAsyncClient.responses = [FakeResponse(500, text=marker)]
+
+    with pytest.raises(MicrosoftGraphError) as exc_info:
+        if operation == "profile":
+            await client.get_user_profile("access-token")
+        elif operation == "calendar":
+            await client.fetch_calendar_events("access-token")
+        else:
+            await client.send_email("access-token", "to@example.com", "To", "Subject", "Body")
+
+    assert marker not in str(exc_info.value)
 
 
 def test_date_and_url_helpers_cover_empty_unknown_and_body_extraction(client: MicrosoftGraphClient) -> None:

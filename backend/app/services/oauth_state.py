@@ -22,7 +22,7 @@ OAUTH_STATE_TTL_SECONDS = 600
 _STATE_KEY_PREFIX = "zabt:oauth-state:"
 _STATE_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 _CODE_VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
-_ALLOWED_PURPOSES = frozenset({"oidc_login", "oidc_link"})
+_ALLOWED_PURPOSES = frozenset({"oidc_login", "oidc_link", "graph_connect"})
 
 
 class OAuthStateError(RuntimeError):
@@ -59,6 +59,16 @@ def validate_next_path(next_path: str | None) -> str:
     if parsed.scheme or parsed.netloc or not parsed.path.startswith("/"):
         raise ValueError("Invalid next path")
     return next_path
+
+
+def is_safe_oauth_callback_value(value: str | None, *, max_length: int) -> bool:
+    """Bound opaque callback values without letting validation echo them."""
+
+    if value is None:
+        return True
+    if not isinstance(value, str) or not 0 < len(value) <= max_length:
+        return False
+    return not any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
 
 
 def build_pkce_challenge(code_verifier: str) -> str:
@@ -108,8 +118,8 @@ class OAuthStateService:
     ) -> OAuthStateTransaction:
         if purpose not in _ALLOWED_PURPOSES:
             raise ValueError("Unsupported OAuth state purpose")
-        if purpose == "oidc_link" and user_id is None:
-            raise ValueError("OIDC link state requires a user")
+        if purpose in {"oidc_link", "graph_connect"} and user_id is None:
+            raise ValueError("This OAuth state purpose requires a user")
         if purpose == "oidc_login" and user_id is not None:
             raise ValueError("OIDC login state cannot include a user")
         if user_id is not None and (
@@ -193,8 +203,8 @@ class OAuthStateService:
             isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0
         ):
             raise ValueError("Malformed OAuth state user")
-        if purpose == "oidc_link" and user_id is None:
-            raise ValueError("Malformed OAuth link owner")
+        if purpose in {"oidc_link", "graph_connect"} and user_id is None:
+            raise ValueError("Malformed OAuth owner")
         if purpose == "oidc_login" and user_id is not None:
             raise ValueError("Malformed OAuth login owner")
         return OAuthStateTransaction(

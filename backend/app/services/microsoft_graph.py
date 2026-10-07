@@ -94,7 +94,7 @@ class MicrosoftGraphClient:
     # OAuth helpers
     # ------------------------------------------------------------------
 
-    def build_auth_url(self, state: str) -> str:
+    def build_auth_url(self, state: str, code_challenge: str | None = None) -> str:
         """Build the Microsoft OAuth2 authorization URL."""
         params = {
             "client_id": self.client_id,
@@ -104,10 +104,13 @@ class MicrosoftGraphClient:
             "state": state,
             "response_mode": "query",
         }
+        if code_challenge:
+            params["code_challenge"] = code_challenge
+            params["code_challenge_method"] = "S256"
         base = f"{MICROSOFT_AUTH_BASE}/{self.tenant_id}/oauth2/v2.0/authorize"
         return f"{base}?{urlencode(params)}"
 
-    async def exchange_code(self, code: str) -> dict:
+    async def exchange_code(self, code: str, code_verifier: str | None = None) -> dict:
         """Exchange an authorization code for access + refresh tokens."""
         token_url = (
             f"{MICROSOFT_AUTH_BASE}/{self.tenant_id}/oauth2/v2.0/token"
@@ -120,6 +123,8 @@ class MicrosoftGraphClient:
             "grant_type": "authorization_code",
             "scope": " ".join(SCOPES),
         }
+        if code_verifier is not None:
+            data["code_verifier"] = code_verifier
 
         async with httpx.AsyncClient() as client:
             resp = await client.post(
@@ -129,9 +134,9 @@ class MicrosoftGraphClient:
             )
 
         if resp.status_code != 200:
-            logger.error("Token exchange failed: %s", resp.text)
+            logger.error("Token exchange failed with status %s", resp.status_code)
             raise MicrosoftGraphError(
-                f"Token exchange failed: {resp.text}",
+                "Token exchange failed",
                 status_code=resp.status_code,
             )
 
@@ -158,9 +163,9 @@ class MicrosoftGraphClient:
             )
 
         if resp.status_code != 200:
-            logger.error("Token refresh failed: %s", resp.text)
+            logger.error("Token refresh failed with status %s", resp.status_code)
             raise MicrosoftGraphError(
-                f"Token refresh failed: {resp.text}",
+                "Token refresh failed",
                 status_code=resp.status_code,
             )
 
@@ -180,7 +185,7 @@ class MicrosoftGraphClient:
 
         if resp.status_code != 200:
             raise MicrosoftGraphError(
-                f"Failed to fetch user profile: {resp.text}",
+                "Failed to fetch user profile",
                 status_code=resp.status_code,
             )
 
@@ -217,7 +222,7 @@ class MicrosoftGraphClient:
 
         if resp.status_code != 200:
             raise MicrosoftGraphError(
-                f"Failed to fetch calendar events: {resp.text}",
+                "Failed to fetch calendar events",
                 status_code=resp.status_code,
             )
 
@@ -265,7 +270,7 @@ class MicrosoftGraphClient:
 
         if resp.status_code not in (200, 202):
             raise MicrosoftGraphError(
-                f"Failed to send email: {resp.text}",
+                "Failed to send email",
                 status_code=resp.status_code,
             )
 

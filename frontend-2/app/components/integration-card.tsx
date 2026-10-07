@@ -33,9 +33,15 @@ interface IntegrationCardProps {
   provider: string;
   integration: IntegrationRead | null;
   onStatusChange: () => void;
+  connectDisabled?: boolean;
 }
 
-export function IntegrationCard({ provider, integration, onStatusChange }: IntegrationCardProps) {
+export function IntegrationCard({
+  provider,
+  integration,
+  onStatusChange,
+  connectDisabled = false,
+}: IntegrationCardProps) {
   const [loading, setLoading] = useState(false);
   const config = PROVIDERS[provider];
   if (!config) return null;
@@ -90,9 +96,9 @@ export function IntegrationCard({ provider, integration, onStatusChange }: Integ
             Disconnect
           </Button>
         ) : (
-          <Button size="sm" onClick={handleConnect} disabled={loading}>
+          <Button size="sm" onClick={handleConnect} disabled={loading || connectDisabled}>
             {loading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <ExternalLink className="w-4 h-4 mr-2" />}
-            Connect {config.name}
+            {connectDisabled ? "Unavailable" : `Connect ${config.name}`}
           </Button>
         )}
       </div>

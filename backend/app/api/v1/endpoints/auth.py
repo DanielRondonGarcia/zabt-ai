@@ -17,6 +17,7 @@ from app.core import security
 from app.core.config import settings
 from app.models import User, UserTier
 from app.services import auth as auth_service
+from app.services.integration import is_token_storage_configured
 from app.services.microsoft_oidc import (
     OIDC_SCOPES,
     MicrosoftOidcAccountConflictError,
@@ -34,6 +35,7 @@ from app.services.oauth_state import (
     OAuthStateError,
     OAuthStateService,
     build_pkce_challenge,
+    is_safe_oauth_callback_value,
     validate_next_path,
 )
 
@@ -101,13 +103,15 @@ class AuthResponse(BaseModel):
 
 
 class MicrosoftOidcStatus(BaseModel):
-    """Non-sensitive Microsoft sign-in configuration for the web UI."""
+    """Non-sensitive Microsoft OIDC and Graph configuration for the web UI."""
 
     configured: bool
     tenant: str
     oidc_redirect_uri: str
     graph_redirect_uri: str
     oidc_scopes: list[str]
+    graph_configured: bool
+    token_storage_configured: bool
 
 
 def _auth_response(
@@ -195,6 +199,15 @@ def microsoft_oidc_status() -> MicrosoftOidcStatus:
         oidc_redirect_uri=settings.MICROSOFT_OIDC_REDIRECT_URI,
         graph_redirect_uri=settings.MICROSOFT_REDIRECT_URI,
         oidc_scopes=list(OIDC_SCOPES),
+        graph_configured=all(
+            value.strip()
+            for value in (
+                settings.MICROSOFT_CLIENT_ID,
+                settings.MICROSOFT_CLIENT_SECRET,
+                settings.MICROSOFT_REDIRECT_URI,
+            )
+        ),
+        token_storage_configured=is_token_storage_configured(),
     )
 
 
@@ -280,13 +293,13 @@ async def microsoft_oidc_link_start(
 async def microsoft_oidc_callback(
     request: Request,
     db: Session = Depends(get_db),
-    code: str | None = Query(default=None, max_length=4096),
-    state: str | None = Query(default=None, max_length=256),
-    error: str | None = Query(default=None, max_length=128),
+    code: str | None = Query(default=None),
+    state: str | None = Query(default=None),
+    error: str | None = Query(default=None),
 ) -> RedirectResponse:
     """Consume the one-time transaction and finish Entra sign-in."""
 
-    if not state:
+    if not state or not is_safe_oauth_callback_value(state, max_length=256):
         return _login_error_redirect("microsoft_sign_in_failed")
 
     try:
@@ -296,11 +309,19 @@ async def microsoft_oidc_callback(
     if transaction is None or transaction.purpose not in {"oidc_login", "oidc_link"}:
         return _login_error_redirect("microsoft_sign_in_failed")
 
+    if not is_safe_oauth_callback_value(error, max_length=128):
+        if transaction.purpose == "oidc_link":
+            return _microsoft_result_redirect(transaction.next_path, "link_failed")
+        return _login_error_redirect("microsoft_sign_in_failed")
     if error is not None:
         if error == "access_denied":
             if transaction.purpose == "oidc_link":
                 return _microsoft_result_redirect(transaction.next_path, "cancelled")
             return _login_error_redirect("microsoft_cancelled")
+        if transaction.purpose == "oidc_link":
+            return _microsoft_result_redirect(transaction.next_path, "link_failed")
+        return _login_error_redirect("microsoft_sign_in_failed")
+    if not is_safe_oauth_callback_value(code, max_length=4096):
         if transaction.purpose == "oidc_link":
             return _microsoft_result_redirect(transaction.next_path, "link_failed")
         return _login_error_redirect("microsoft_sign_in_failed")

@@ -157,6 +157,8 @@ export interface MicrosoftOidcStatus {
   oidc_redirect_uri: string;
   graph_redirect_uri: string;
   oidc_scopes: string[];
+  graph_configured: boolean;
+  token_storage_configured: boolean;
 }
 
 export const getMicrosoftOidcLoginUrl = (next = "/"): string => {
