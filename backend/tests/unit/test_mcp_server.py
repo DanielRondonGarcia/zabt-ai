@@ -348,6 +348,8 @@ def test_transport_security_is_explicit_and_stateless():
     assert transport_security.enable_dns_rebinding_protection is True
     assert transport_security.allowed_hosts
     assert transport_security.allowed_origins
+    assert "http://localhost:3001" in transport_security.allowed_origins
+    assert "http://127.0.0.1:3001" in transport_security.allowed_origins
     assert mcp_server.MCP_STATELESS_HTTP is True
     assert "*" not in transport_security.allowed_hosts
     assert "*" not in transport_security.allowed_origins

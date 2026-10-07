@@ -126,6 +126,8 @@ _LOCAL_MCP_HOSTS = (
 _LOCAL_MCP_ORIGINS = (
     "http://localhost:3000",
     "http://127.0.0.1:3000",
+    "http://localhost:3001",
+    "http://127.0.0.1:3001",
     "http://testserver",
 )
 _MCP_READ_ANNOTATIONS = ToolAnnotations(

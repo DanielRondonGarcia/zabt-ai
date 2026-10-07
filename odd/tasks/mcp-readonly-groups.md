@@ -56,11 +56,11 @@ existing application lifespan.
 
 The SDK `TransportSecuritySettings` is enabled explicitly. Hosts and origins
 come from the comma-separated `MCP_ALLOWED_HOSTS` and
-`MCP_ALLOWED_ORIGINS` settings. Development uses exact localhost/test-client
-defaults; production rejects wildcard entries and derives a fail-closed host
-from `MCP_PUBLIC_URL` when an explicit host list is not supplied. Production
-deployments should set both allowlists to their reverse-proxy/API and frontend
-origins.
+`MCP_ALLOWED_ORIGINS` settings. Development uses exact localhost defaults for
+web ports 3000 and 3001, plus the test client; production rejects wildcard
+entries and derives a fail-closed host from `MCP_PUBLIC_URL` when an explicit
+host list is not supplied. Production deployments should set both allowlists
+to their reverse-proxy/API and frontend origins.
 
 The transport uses `stateless_http=True`: these tools perform request-scoped
 reads and do not need resumable server-to-client state. The MCP Starlette
@@ -143,7 +143,12 @@ git diff --check
 
 The transport smoke test is in-process only. It exercises initialize,
 `tools/list`, and `tools/call` with a temporary SQLite-backed token and never
-makes a live MCP, Qdrant, MinIO, or embedding-provider call.
+makes a live external MCP call. After rebuilding the local API image, a
+temporary owner token was also exercised against the real local
+`http://127.0.0.1:8000/api/v1/mcp` endpoint: initialize, tools/list, and
+list_groups returned 200 with four tools; search_group_meetings for group 2
+and get_meeting_context for meeting 602 also returned 200. The token was
+revoked immediately after the smoke tests and its raw value was not printed.
 
 ## Rollback boundary
 
@@ -165,3 +170,8 @@ groups, or meeting changes by:
 That rollback removes only the MCP endpoint, token management, and Settings
 surface. It does not remove local JWT/OIDC authentication or group/retrieval
 authorization.
+
+## Delivery
+
+- `a8ec834 feat(mcp): expose owner-scoped read-only group tools`
+- `18344dc feat(mcp): add user token management UI`
