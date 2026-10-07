@@ -34,8 +34,8 @@ Give users a larger, owner-scoped group view at `/groups/{id}` where they can in
 - `cd backend && uv run python -m compileall -q app` — passed.
 - `cd frontend-2 && npx tsc --noEmit` — passed after the backend corrective patch; no frontend files changed.
 - `git diff --check` — passed; Git reported only the repository's existing LF-to-CRLF working-copy warnings.
-- Runtime harness — not run; Docker was not restarted and no runtime mutation was requested.
+- Runtime smoke: rebuilt `api` and `web`; the API reported `b7c8d9e0f1a2 (head)`, the real owner-scoped meeting projection returned `grouped_meetings=[(602, 2)]`, and `http://localhost:3001/groups` plus `/groups/2` returned HTTP 200. No assignment mutation was performed during the smoke test.
 
 ## Delivery
 
-- Changes remain uncommitted on `feat/actsis-local-stack` as requested.
+- Committed on `feat/actsis-local-stack`: `788da99` (meeting projection correction) and `cd25ec8` (Groups detail management UI).
