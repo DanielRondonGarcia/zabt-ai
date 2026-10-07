@@ -242,6 +242,27 @@ export interface GroupReindexResponse {
   task_id: string;
 }
 
+export interface McpTokenMetadata {
+  id: number;
+  label: string;
+  token_prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string;
+  revoked_at: string | null;
+}
+
+export interface McpTokenCreated extends McpTokenMetadata {
+  token: string;
+}
+
+export interface McpStatus {
+  enabled: boolean;
+  endpoint: string;
+  auth_mode: "bearer_token";
+  tools: string[];
+}
+
 export interface AskAiChatPayload {
   groupId: number;
   message: string;
@@ -284,6 +305,31 @@ export const deleteGroup = async (groupId: number): Promise<void> => {
 export const reindexGroup = async (groupId: number): Promise<GroupReindexResponse> => {
   const { data } = await apiClient.post<GroupReindexResponse>(`/groups/${groupId}/reindex`);
   return data;
+};
+
+export const getMcpStatus = async (): Promise<McpStatus> => {
+  const { data } = await apiClient.get<McpStatus>("/mcp/status");
+  return data;
+};
+
+export const getMcpTokens = async (): Promise<McpTokenMetadata[]> => {
+  const { data } = await apiClient.get<McpTokenMetadata[]>("/mcp/tokens");
+  return data;
+};
+
+export const createMcpToken = async (
+  label: string,
+  expiresInDays: number,
+): Promise<McpTokenCreated> => {
+  const { data } = await apiClient.post<McpTokenCreated>("/mcp/tokens", {
+    label,
+    expires_in_days: expiresInDays,
+  });
+  return data;
+};
+
+export const revokeMcpToken = async (tokenId: number): Promise<void> => {
+  await apiClient.delete(`/mcp/tokens/${tokenId}`);
 };
 
 export const assignMeetingGroup = async (

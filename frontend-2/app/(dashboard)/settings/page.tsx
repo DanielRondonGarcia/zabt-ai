@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025-2026 Afeef Janjua
 import { LanguagePreferencesEditor } from "@/app/components/LanguagePreferencesEditor";
+import { McpTokenManager } from "@/app/components/McpTokenManager";
 
 export default function SettingsPage() {
   return (
@@ -10,6 +11,7 @@ export default function SettingsPage() {
         <h2 className="text-lg font-semibold text-stone-800">Transcription languages</h2>
         <LanguagePreferencesEditor />
       </section>
+      <McpTokenManager />
     </div>
   );
 }
