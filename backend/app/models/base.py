@@ -138,6 +138,10 @@ class User(UserBase, table=True):
     )
 
     meetings: List["Meeting"] = Relationship(back_populates="owner")
+    external_identities: List["ExternalIdentity"] = Relationship(
+        back_populates="user",
+        sa_relationship_kwargs={"cascade": "all, delete-orphan"},
+    )
 
 
 class AuthSession(SQLModel, table=True):

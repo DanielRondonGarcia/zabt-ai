@@ -42,6 +42,12 @@ from app.models.integration import (
     IntegrationConnectResponse,
 )
 
+# Re-export external authentication identity models
+from app.models.external_identity import (
+    ExternalIdentityProvider,
+    ExternalIdentity,
+)
+
 # Re-export email share models
 from app.models.email_share import (
     EmailShareStatus,
@@ -128,6 +134,9 @@ __all__ = [
     "Integration",
     "IntegrationRead",
     "IntegrationConnectResponse",
+    # external identities
+    "ExternalIdentityProvider",
+    "ExternalIdentity",
     # email_share
     "EmailShareStatus",
     "EmailShare",

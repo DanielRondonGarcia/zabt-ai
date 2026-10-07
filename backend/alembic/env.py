@@ -14,6 +14,7 @@ from sqlmodel import SQLModel
 from app.models import (  # Import models to register them
     AuthSession,
     CalendarEvent,
+    ExternalIdentity,
     Integration,
     Meeting,
     User,

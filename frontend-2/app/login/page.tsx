@@ -2,21 +2,45 @@
 // Copyright (C) 2025-2026 Afeef Janjua
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
-import { Eye, EyeOff } from "lucide-react";
-import { login } from "@/app/lib/api";
+import { Eye, EyeOff, ShieldCheck } from "lucide-react";
+import {
+  getMicrosoftOidcLoginUrl,
+  getMicrosoftOidcStatus,
+  login,
+} from "@/app/lib/api";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
 
-export default function LoginPage() {
+const MICROSOFT_CALLBACK_ERRORS: Record<string, string> = {
+  microsoft_cancelled: "Microsoft sign-in was cancelled.",
+  microsoft_sign_in_failed: "Microsoft sign-in could not be completed. Please try again.",
+  microsoft_local_account_exists:
+    "Microsoft account already has a local account; sign in locally and link Microsoft from settings.",
+};
+
+function LoginPageContent() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [microsoftConfigured, setMicrosoftConfigured] = useState(false);
+
+  useEffect(() => {
+    getMicrosoftOidcStatus()
+      .then((status) => setMicrosoftConfigured(status.configured))
+      .catch(() => setMicrosoftConfigured(false));
+  }, []);
+
+  const callbackError = searchParams.get("error");
+  const callbackMessage = callbackError
+    ? MICROSOFT_CALLBACK_ERRORS[callbackError] ?? MICROSOFT_CALLBACK_ERRORS.microsoft_sign_in_failed
+    : null;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,9 +123,9 @@ export default function LoginPage() {
             </Link>
           </div>
 
-          {error && (
+          {(error || callbackMessage) && (
             <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-              {error}
+              {error || callbackMessage}
             </p>
           )}
 
@@ -109,6 +133,23 @@ export default function LoginPage() {
             Sign in
           </Button>
         </form>
+
+        {microsoftConfigured && (
+          <>
+            <div className="my-5 flex items-center gap-3 text-xs text-stone-400">
+              <span className="h-px flex-1 bg-stone-200" />
+              <span>or</span>
+              <span className="h-px flex-1 bg-stone-200" />
+            </div>
+            <a
+              href={getMicrosoftOidcLoginUrl("/")}
+              className="inline-flex h-9 w-full items-center justify-center gap-2 rounded-lg border border-stone-300 bg-white px-3 text-sm font-medium text-stone-700 transition-colors hover:bg-stone-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+            >
+              <ShieldCheck size={16} aria-hidden="true" />
+              Continue with Microsoft
+            </a>
+          </>
+        )}
 
         <p className="mt-6 text-sm text-stone-500 text-center">
           Don&apos;t have an account?{" "}
@@ -118,5 +159,21 @@ export default function LoginPage() {
         </p>
       </div>
     </main>
+  );
+}
+
+export default function LoginPage() {
+  return (
+    <Suspense
+      fallback={
+        <main className="min-h-screen flex items-center justify-center bg-stone-50 px-4">
+          <div className="w-full max-w-md rounded-lg border border-stone-200 bg-white p-8 text-center text-sm text-stone-500">
+            Loading sign-in...
+          </div>
+        </main>
+      }
+    >
+      <LoginPageContent />
+    </Suspense>
   );
 }

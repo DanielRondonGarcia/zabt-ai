@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 import math
+import re
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
-from pydantic import PostgresDsn, field_validator, model_validator
+from pydantic import Field, PostgresDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # Single .env at the repo root (one file per project, not per service).
@@ -15,6 +17,11 @@ from pydantic_settings import BaseSettings
 _REPO_ROOT_ENV = Path(__file__).resolve().parent.parent.parent.parent / ".env"
 
 AUTH_JWT_SECRET_MIN_LENGTH = 32
+MICROSOFT_TENANT_ALIASES = frozenset({"common", "organizations", "consumers"})
+MICROSOFT_TENANT_GUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 _KNOWN_INSECURE_AUTH_JWT_SECRETS = frozenset(
     {
         "local-development-only-change-me",
@@ -50,6 +57,22 @@ def validate_auth_jwt_secret(value: str) -> str:
     if len(set(secret)) < 12:
         raise ValueError("AUTH_JWT_SECRET does not contain enough character diversity")
     return secret
+
+
+def validate_microsoft_tenant_id(value: str) -> str:
+    """Allow only Microsoft tenant GUIDs and documented authority aliases."""
+
+    if not isinstance(value, str):
+        raise ValueError("MICROSOFT_TENANT_ID must be a string")
+    tenant_id = value.strip()
+    if tenant_id.casefold() in MICROSOFT_TENANT_ALIASES:
+        return tenant_id.casefold()
+    if MICROSOFT_TENANT_GUID_RE.fullmatch(tenant_id):
+        return tenant_id
+    raise ValueError(
+        "MICROSOFT_TENANT_ID must be a tenant GUID or one of "
+        f"{sorted(MICROSOFT_TENANT_ALIASES)}; domain tenant names require GUID resolution"
+    )
 
 # Some legacy modules (worker.py, api/upload.py, services/styles.py) read
 # directly from os.environ instead of going through this Settings class.
@@ -192,12 +215,46 @@ class Settings(BaseSettings):
     def _validate_auth_jwt_secret(cls, value: str) -> str:
         return validate_auth_jwt_secret(value)
 
+    @field_validator("MICROSOFT_TENANT_ID")
+    @classmethod
+    def _validate_microsoft_tenant_id(cls, value: str) -> str:
+        return validate_microsoft_tenant_id(value)
+
     @model_validator(mode="after")
     def _validate_auth_cookie_settings(self) -> "Settings":
         if self.AUTH_COOKIE_SAMESITE == "none" and not self.AUTH_COOKIE_SECURE:
             raise ValueError("AUTH_COOKIE_SECURE must be true when AUTH_COOKIE_SAMESITE=none")
         if self.AUTH_ENVIRONMENT == "production" and not self.AUTH_COOKIE_SECURE:
             raise ValueError("AUTH_COOKIE_SECURE must be true when AUTH_ENVIRONMENT=production")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_microsoft_oidc_settings(self) -> "Settings":
+        if self.AUTH_ENVIRONMENT != "production":
+            return self
+
+        redirect_uri = self.MICROSOFT_OIDC_REDIRECT_URI.strip()
+        try:
+            parsed = urlsplit(redirect_uri)
+            port = parsed.port
+        except ValueError as exc:
+            raise ValueError(
+                "MICROSOFT_OIDC_REDIRECT_URI must be a public HTTPS URL in production"
+            ) from exc
+        local_hosts = {"localhost", "127.0.0.1", "::1"}
+        if (
+            not redirect_uri
+            or parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.hostname is None
+            or parsed.hostname.casefold() in local_hosts
+            or port is None and parsed.netloc.endswith(":")
+        ):
+            raise ValueError(
+                "MICROSOFT_OIDC_REDIRECT_URI must be a public HTTPS URL in production"
+            )
         return self
 
     @model_validator(mode="after")
@@ -409,6 +466,9 @@ class Settings(BaseSettings):
     MICROSOFT_CLIENT_SECRET: str = ""
     MICROSOFT_TENANT_ID: str = "common"  # "common" for multi-tenant
     MICROSOFT_REDIRECT_URI: str = ""  # e.g. https://api.zabt.ai/api/v1/integrations/microsoft/callback
+    # Microsoft OIDC login uses a separate callback from the delegated Graph flow.
+    MICROSOFT_OIDC_REDIRECT_URI: str = ""
+    MICROSOFT_OIDC_HTTP_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0, le=60)
 
     # Token encryption key (Fernet — generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
     TOKEN_ENCRYPTION_KEY: str = ""

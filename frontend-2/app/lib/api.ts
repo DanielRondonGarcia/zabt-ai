@@ -151,6 +151,31 @@ export const login = async (email: string, password: string): Promise<void> => {
   await loginWithRememberMe(email, password, false);
 };
 
+export interface MicrosoftOidcStatus {
+  configured: boolean;
+  tenant: string;
+  oidc_redirect_uri: string;
+  graph_redirect_uri: string;
+  oidc_scopes: string[];
+}
+
+export const getMicrosoftOidcLoginUrl = (next = "/"): string => {
+  const safeNext = next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  const params = new URLSearchParams({ next: safeNext });
+  return `${API_URL}/auth/microsoft/start?${params.toString()}`;
+};
+
+export const getMicrosoftOidcLinkUrl = (next = "/integrations"): string => {
+  const safeNext = next.startsWith("/") && !next.startsWith("//") ? next : "/integrations";
+  const params = new URLSearchParams({ next: safeNext });
+  return `${API_URL}/auth/microsoft/link/start?${params.toString()}`;
+};
+
+export const getMicrosoftOidcStatus = async (): Promise<MicrosoftOidcStatus> => {
+  const { data } = await authClient.get<MicrosoftOidcStatus>("/auth/microsoft/status");
+  return data;
+};
+
 // ── Groups and AI chat ────────────────────────────────────────────────────────
 
 export interface GroupSummary {
