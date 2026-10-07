@@ -276,35 +276,6 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _validate_microsoft_oidc_settings(self) -> "Settings":
-        if self.AUTH_ENVIRONMENT != "production":
-            return self
-
-        redirect_uri = self.MICROSOFT_OIDC_REDIRECT_URI.strip()
-        try:
-            parsed = urlsplit(redirect_uri)
-            port = parsed.port
-        except ValueError as exc:
-            raise ValueError(
-                "MICROSOFT_OIDC_REDIRECT_URI must be a public HTTPS URL in production"
-            ) from exc
-        local_hosts = {"localhost", "127.0.0.1", "::1"}
-        if (
-            not redirect_uri
-            or parsed.scheme != "https"
-            or not parsed.netloc
-            or parsed.username is not None
-            or parsed.password is not None
-            or parsed.hostname is None
-            or parsed.hostname.casefold() in local_hosts
-            or port is None and parsed.netloc.endswith(":")
-        ):
-            raise ValueError(
-                "MICROSOFT_OIDC_REDIRECT_URI must be a public HTTPS URL in production"
-            )
-        return self
-
-    @model_validator(mode="after")
     def _validate_embedding_settings(self) -> "Settings":
         """Validate embedding provider configuration."""
         provider = (self.EMBEDDING_PROVIDER or "").strip().lower()
@@ -508,12 +479,14 @@ class Settings(BaseSettings):
     TELEGRAM_CHAT_ID: str = ""
     EXPO_ACCESS_TOKEN: str | None = None
 
-    # Microsoft OAuth (Graph API integration — separate from Supabase login)
+    # Microsoft Graph delegated OAuth only. OIDC public-client configuration is
+    # stored globally in the database by an administrator; it is not read from
+    # these environment variables.
     MICROSOFT_CLIENT_ID: str = ""
     MICROSOFT_CLIENT_SECRET: str = ""
-    MICROSOFT_TENANT_ID: str = "common"  # "common" for multi-tenant
-    MICROSOFT_REDIRECT_URI: str = ""  # e.g. https://api.zabt.ai/api/v1/integrations/microsoft/callback
-    # Microsoft OIDC login uses a separate callback from the delegated Graph flow.
+    MICROSOFT_TENANT_ID: str = "common"  # Graph authority; OIDC tenant is database-backed
+    MICROSOFT_REDIRECT_URI: str = ""  # Graph callback, e.g. https://api.zabt.ai/api/v1/integrations/microsoft/callback
+    # Retained as an ignored compatibility setting for older deployments.
     MICROSOFT_OIDC_REDIRECT_URI: str = ""
     MICROSOFT_OIDC_HTTP_TIMEOUT_SECONDS: float = Field(default=10.0, gt=0, le=60)
 
@@ -524,7 +497,7 @@ class Settings(BaseSettings):
     BOT_WORKER_URL: str = "http://worker-bot:8002"
 
     # Comma-separated list of allowed CORS origins
-    BACKEND_CORS_ORIGINS: str = "http://localhost:3000"
+    BACKEND_CORS_ORIGINS: str = "http://localhost:3001"
 
     def assemble_db_connection(cls, v: Optional[str], values: Dict[str, Any]) -> Any:
         if isinstance(v, str):

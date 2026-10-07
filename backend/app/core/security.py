@@ -49,7 +49,7 @@ def allowed_origins() -> set[str]:
     return {origin.strip().rstrip("/") for origin in raw.split(",") if origin.strip()}
 
 
-def validate_request_origin(request: Request) -> None:
+def validate_request_origin(request: Request) -> str:
     """Reject cookie-authenticated state changes from another origin.
 
     A browser sends ``Origin`` for the API requests made by the web client.
@@ -71,6 +71,7 @@ def validate_request_origin(request: Request) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Invalid request origin",
         )
+    return origin.rstrip("/")
 
 
 def create_access_token(user_id: int) -> tuple[str, int]:

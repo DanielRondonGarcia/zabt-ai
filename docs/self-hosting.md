@@ -34,7 +34,7 @@ Edit `.env` and set at minimum:
 |----------|-----------------|
 | `AUTH_JWT_SECRET` | Required in every environment. Generate with `python -c "import secrets; print(secrets.token_urlsafe(48))"` and paste the result into `.env` |
 | `AUTH_ENVIRONMENT` | Leave `development` for localhost; set `production` for an explicit production deployment |
-| `AUTH_ALLOWED_ORIGINS` | Exact web origin(s), normally `http://localhost:3000` locally |
+| `AUTH_ALLOWED_ORIGINS` | Exact web origin(s), normally `http://localhost:3001` locally |
 | `OPENAI_API_KEY` | Your LLM provider (e.g. https://openrouter.ai/keys) |
 | `HF_TOKEN` | https://huggingface.co/settings/tokens (accept pyannote gate first) |
 
@@ -76,7 +76,7 @@ docker compose up -d
 docker compose logs -f api        # watch startup / migrations
 ```
 
-- Web UI → http://localhost:3000
+- Web UI → http://localhost:3001
 - API → http://localhost:8000/docs
 - MinIO console → http://localhost:9001 (`minioadmin` / `minioadmin`)
 

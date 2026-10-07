@@ -1,19 +1,24 @@
 # SPDX-License-Identifier: AGPL-3.0-only
-# Copyright (C) 2025-2026 Afeef Janjua
-"""Callback, linking, replay, and configuration endpoint tests."""
+"""Public OIDC endpoint, account-resolution, cookie, and admin tests."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from datetime import datetime
+import json
 
 import pytest
-from cryptography.fernet import Fernet
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Request, Response
 from fastapi.testclient import TestClient
+from fastapi import FastAPI
 
 from app.api.v1.endpoints import auth as auth_endpoint
 from app.core.config import settings
-from app.models import ExternalIdentity, ExternalIdentityProvider, User
+from app.models import (
+    ExternalIdentity,
+    ExternalIdentityProvider,
+    MicrosoftOidcConfiguration,
+    User,
+)
 from app.services import auth as auth_service
 from app.services.microsoft_oidc import (
     MicrosoftOidcAccountConflictError,
@@ -22,7 +27,9 @@ from app.services.microsoft_oidc import (
     link_external_identity,
     resolve_or_create_user,
 )
-from app.services.oauth_state import OAuthStateTransaction
+
+
+CLIENT_ID = "11111111-1111-4111-8111-111111111111"
 
 
 class ExecResult:
@@ -100,17 +107,38 @@ def make_oidc_identity(**overrides) -> MicrosoftOidcIdentity:
     return MicrosoftOidcIdentity(**values)
 
 
-def make_request(*, access_token: str | None = None) -> Request:
-    headers = []
-    if access_token is not None:
-        headers.append((b"cookie", f"zabt_access_token={access_token}".encode()))
+def make_configuration(**overrides) -> MicrosoftOidcConfiguration:
+    values = {
+        "id": 1,
+        "client_id": CLIENT_ID,
+        "tenant_id": "common",
+        "redirect_uri": "http://localhost:3001/login",
+        "enabled": True,
+        "created_at": datetime(2026, 10, 7),
+        "updated_at": datetime(2026, 10, 7),
+        "updated_by": 7,
+    }
+    values.update(overrides)
+    return MicrosoftOidcConfiguration(**values)
+
+
+def make_request(id_token: str | None = None) -> Request:
+    body = json.dumps({"id_token": id_token}).encode() if id_token is not None else b""
+
+    async def receive():
+        return {"type": "http.request", "body": body, "more_body": False}
+
     return Request(
         {
             "type": "http",
-            "method": "GET",
-            "path": "/api/v1/auth/microsoft/callback",
-            "headers": headers,
-        }
+            "method": "POST",
+            "path": "/api/v1/auth/microsoft/oidc/exchange",
+            "headers": [
+                (b"origin", b"http://localhost:3001"),
+                (b"content-length", str(len(body)).encode()),
+            ],
+        },
+        receive,
     )
 
 
@@ -160,18 +188,7 @@ def test_explicit_link_rejects_inactive_user():
         )
 
 
-def test_link_callback_requires_matching_active_web_session(monkeypatch: pytest.MonkeyPatch):
-    user = make_user(id=7)
-    db = FakeDb(users={7: user})
-    monkeypatch.setattr(auth_endpoint.security, "verify_access_token", lambda token: {"sub": "7"})
-
-    assert auth_endpoint._get_authenticated_link_user(make_request(access_token="access"), db, 7) is user
-
-    monkeypatch.setattr(auth_endpoint.security, "verify_access_token", lambda token: {"sub": "8"})
-    assert auth_endpoint._get_authenticated_link_user(make_request(access_token="access"), db, 7) is None
-
-
-def test_validated_identity_creates_local_user_without_password():
+def test_validated_identity_creates_external_only_user_without_password():
     db = FakeDb(exec_rows=[[], []])
 
     user = resolve_or_create_user(db, make_oidc_identity(email="new@example.com"))
@@ -201,394 +218,231 @@ def test_existing_external_identity_updates_last_login_and_rejects_inactive_owne
         )
 
 
-class FakeStateService:
-    def __init__(self, transaction: OAuthStateTransaction):
-        self.transaction = transaction
-        self.consumed = 0
+def test_public_status_contains_oidc_values_and_separate_graph_readiness(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    configuration = make_configuration()
+    db = FakeDb(exec_rows=[[configuration]])
+    monkeypatch.setattr(auth_endpoint, "is_token_storage_configured", lambda: False)
+    monkeypatch.setattr(auth_endpoint.settings, "MICROSOFT_CLIENT_ID", "")
+    monkeypatch.setattr(auth_endpoint.settings, "MICROSOFT_CLIENT_SECRET", "")
+    monkeypatch.setattr(auth_endpoint.settings, "MICROSOFT_REDIRECT_URI", "")
 
-    def consume(self, state):
-        self.consumed += 1
-        if self.consumed > 1:
-            return None
-        return self.transaction if state == self.transaction.state else None
+    http_response = Response()
+    response = auth_endpoint.microsoft_oidc_status(http_response, db)
 
-    def create_transaction(self, **kwargs):
-        expected = {
-            "purpose": self.transaction.purpose,
-            "next_path": "/meetings" if self.transaction.purpose == "oidc_login" else "/integrations",
-        }
-        if self.transaction.user_id is not None:
-            expected["user_id"] = self.transaction.user_id
-        assert kwargs == expected
-        return self.transaction
+    assert response.configured is True
+    assert response.client_id == CLIENT_ID
+    assert response.tenant == "common"
+    assert response.redirect_uri.startswith("http://localhost")
+    assert response.scopes == ["openid", "profile", "email"]
+    assert response.graph_configured is False
+    assert response.token_storage_configured is False
+    assert not hasattr(response, "client_secret")
+    assert http_response.headers["cache-control"] == "no-store"
 
 
-class FakeOidcClient:
-    def __init__(self, claims=None):
-        self.claims = claims or {"sub": "subject-1", "tid": "tenant-1"}
-        self.exchange_calls = 0
-        self.validation_calls = 0
-        self.authorization_args = None
+def test_admin_configuration_get_and_put_return_no_secret(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    admin = make_user(is_admin=True)
+    configuration = make_configuration()
+    updated = make_configuration(updated_by=admin.id, tenant_id="organizations")
+    db = FakeDb(exec_rows=[[configuration], [configuration], [updated], [updated]])
+    monkeypatch.setattr(auth_endpoint, "is_token_storage_configured", lambda: True)
+    monkeypatch.setattr(auth_endpoint, "_graph_configuration_configured", lambda: True)
+    monkeypatch.setattr(
+        auth_endpoint.security,
+        "validate_request_origin",
+        lambda request: "http://localhost:3001",
+    )
 
-    async def build_authorization_url(self, **kwargs):
-        self.authorization_args = kwargs
-        return "https://login.example/authorize?state=state"
+    get_http_response = Response()
+    get_response = auth_endpoint.microsoft_oidc_configuration(get_http_response, admin, db)
+    assert get_response.can_manage is True
+    assert get_response.is_admin is True
+    assert "client_secret" not in get_response.model_dump()
+    assert get_http_response.headers["cache-control"] == "no-store"
 
-    async def exchange_code(self, *, code, code_verifier):
-        self.exchange_calls += 1
-        assert code == "authorization-code"
-        assert code_verifier == "v" * 43
-        return {"id_token": "validated-id-token"}
+    upsert_kwargs = {}
 
-    async def validate_id_token(self, token, *, nonce):
-        self.validation_calls += 1
-        assert token == "validated-id-token"
-        assert nonce == "n" * 32
+    def fake_upsert(*args, **kwargs):
+        upsert_kwargs.update(kwargs)
+        return updated
+
+    monkeypatch.setattr(auth_endpoint, "upsert_microsoft_oidc_configuration", fake_upsert)
+    put_http_response = Response()
+    put_response = auth_endpoint.update_microsoft_oidc_configuration(
+        auth_endpoint.MicrosoftOidcConfigurationUpdate(
+            client_id=CLIENT_ID,
+            tenant="organizations",
+            redirect_uri="http://localhost:3001/login",
+        ),
+        make_request(),
+        put_http_response,
+        admin,
+        db,
+    )
+
+    assert put_response.tenant == "organizations"
+    assert db.commits == 1
+    assert put_http_response.headers["cache-control"] == "no-store"
+    assert upsert_kwargs["spa_origin"] == "http://localhost:3001"
+
+
+def test_non_admin_cannot_update_global_configuration(monkeypatch: pytest.MonkeyPatch):
+    user = make_user(is_admin=False)
+    db = FakeDb()
+    monkeypatch.setattr(
+        auth_endpoint.security,
+        "validate_request_origin",
+        lambda request: "http://localhost:3001",
+    )
+
+    with pytest.raises(Exception) as error:
+        auth_endpoint.update_microsoft_oidc_configuration(
+            auth_endpoint.MicrosoftOidcConfigurationUpdate(
+                client_id=CLIENT_ID,
+                tenant="common",
+                redirect_uri="http://localhost:3001/login",
+            ),
+            make_request(),
+            Response(),
+            user,
+            db,
+        )
+
+    assert error.value.status_code == 403
+    assert db.commits == 0
+
+
+class FakeVerifier:
+    def __init__(self, claims):
+        self.claims = claims
+
+    async def validate_id_token(self, id_token: str):
+        assert id_token == "signed-id-token"
         return self.claims
 
 
-@dataclass
-class CallbackHarness:
-    state: FakeStateService
-    oidc: FakeOidcClient
-    db: FakeDb
-    cookies: list[object]
-
-
-def callback_harness(
-    *,
-    purpose: str = "oidc_login",
-    user_id: int | None = None,
-    next_path: str = "/groups/42",
-) -> CallbackHarness:
-    transaction = OAuthStateTransaction(
-        state="state-" + "a" * 32,
-        purpose=purpose,
-        nonce="n" * 32,
-        code_verifier="v" * 43,
-        next_path=next_path,
-        user_id=user_id,
-    )
-    return CallbackHarness(
-        state=FakeStateService(transaction),
-        oidc=FakeOidcClient(),
-        db=FakeDb(),
-        cookies=[],
-    )
-
-
 @pytest.mark.asyncio
-async def test_callback_issues_existing_local_cookie_session_and_replay_is_rejected(
+async def test_id_token_exchange_issues_existing_web_cookies_without_secret(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    harness = callback_harness()
-    monkeypatch.setattr(auth_endpoint, "oauth_state_service", harness.state)
-    monkeypatch.setattr(auth_endpoint, "_microsoft_client", lambda: harness.oidc)
-    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: True)
-    monkeypatch.setattr(auth_endpoint, "resolve_or_create_user", lambda db, identity: make_user())
+    configuration = make_configuration()
+    user = make_user()
+    db = FakeDb(exec_rows=[[configuration]])
+    response = Response()
+    monkeypatch.setattr(auth_endpoint.security, "validate_request_origin", lambda request: None)
+    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda config: FakeVerifier({
+        "sub": "subject-1",
+        "tid": "tenant-1",
+    }))
+    monkeypatch.setattr(auth_endpoint, "resolve_or_create_user", lambda db, identity: user)
     monkeypatch.setattr(
         auth_endpoint.auth_service,
         "issue_tokens",
         lambda db, user: auth_service.TokenBundle("access", "refresh", 900),
     )
-    monkeypatch.setattr(
-        auth_endpoint.auth_service,
-        "set_web_auth_cookies",
-        lambda response, tokens: harness.cookies.append(tokens),
-    )
-    monkeypatch.setattr(settings, "APP_URL", "https://app.example")
 
-    response = await auth_endpoint.microsoft_oidc_callback(
-        request=make_request(),
-        db=harness.db,
-        code="authorization-code",
-        state=harness.state.transaction.state,
-        error=None,
-    )
-    replay = await auth_endpoint.microsoft_oidc_callback(
-        request=make_request(),
-        db=harness.db,
-        code="authorization-code",
-        state=harness.state.transaction.state,
-        error=None,
+    result = await auth_endpoint.exchange_microsoft_oidc_token(
+        make_request("signed-id-token"),
+        response,
+        db,
     )
 
-    assert response.status_code == 302
-    assert response.headers["location"] == "https://app.example/groups/42"
-    assert harness.cookies == [auth_service.TokenBundle("access", "refresh", 900)]
-    assert replay.headers["location"].endswith("error=microsoft_sign_in_failed")
-    assert harness.oidc.exchange_calls == 1
+    assert result.user.id == user.id
+    set_cookie_headers = [
+        value.decode("latin-1")
+        for name, value in response.raw_headers
+        if name.lower() == b"set-cookie"
+    ]
+    assert any("zabt_access_token=access" in value for value in set_cookie_headers)
+    assert any("zabt_refresh_token=refresh" in value for value in set_cookie_headers)
+    assert db.rollbacks == 0
 
 
 @pytest.mark.asyncio
-async def test_callback_anonymous_local_account_conflict_redirects_without_identity_details(
+async def test_anonymous_exchange_returns_static_local_conflict_without_token_echo(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    harness = callback_harness()
-    monkeypatch.setattr(auth_endpoint, "oauth_state_service", harness.state)
-    monkeypatch.setattr(auth_endpoint, "_microsoft_client", lambda: harness.oidc)
-    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: True)
+    configuration = make_configuration()
+    marker = "SIGNED_TOKEN_MARKER"
+    db = FakeDb(exec_rows=[[configuration]])
+    monkeypatch.setattr(auth_endpoint.security, "validate_request_origin", lambda request: None)
+    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda config: FakeVerifier({
+        "sub": "subject-1",
+        "tid": "tenant-1",
+    }))
     monkeypatch.setattr(
         auth_endpoint,
         "resolve_or_create_user",
         lambda db, identity: (_ for _ in ()).throw(MicrosoftOidcAccountConflictError()),
     )
-    monkeypatch.setattr(settings, "APP_URL", "https://app.example")
 
-    response = await auth_endpoint.microsoft_oidc_callback(
-        request=make_request(),
-        db=harness.db,
-        code="authorization-code",
-        state=harness.state.transaction.state,
-        error=None,
-    )
-
-    location = response.headers["location"]
-    assert location == "https://app.example/login?error=microsoft_local_account_exists"
-    assert "subject-1" not in location
-    assert "user@example.com" not in location
-    assert "client-secret" not in location
-
-
-@pytest.mark.asyncio
-async def test_callback_explicit_link_success_redirects_to_integrations_without_new_cookies(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    harness = callback_harness(
-        purpose="oidc_link",
-        user_id=7,
-        next_path="/integrations",
-    )
-    linked_users = []
-    monkeypatch.setattr(auth_endpoint, "oauth_state_service", harness.state)
-    monkeypatch.setattr(auth_endpoint, "_microsoft_client", lambda: harness.oidc)
-    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: True)
-    monkeypatch.setattr(
-        auth_endpoint,
-        "_get_authenticated_link_user",
-        lambda request, db, user_id: make_user(id=user_id),
-    )
-    monkeypatch.setattr(
-        auth_endpoint,
-        "link_external_identity",
-        lambda db, identity, user: linked_users.append((identity, user)),
-    )
-    monkeypatch.setattr(settings, "APP_URL", "https://app.example")
-
-    response = await auth_endpoint.microsoft_oidc_callback(
-        request=make_request(),
-        db=harness.db,
-        code="authorization-code",
-        state=harness.state.transaction.state,
-        error=None,
-    )
-
-    assert response.headers["location"] == "https://app.example/integrations?microsoft=linked"
-    assert len(linked_users) == 1
-    assert harness.cookies == []
-
-
-@pytest.mark.asyncio
-async def test_callback_explicit_link_conflict_is_safe_and_does_not_leak_identity_details(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    harness = callback_harness(
-        purpose="oidc_link",
-        user_id=7,
-        next_path="/integrations",
-    )
-    monkeypatch.setattr(auth_endpoint, "oauth_state_service", harness.state)
-    monkeypatch.setattr(auth_endpoint, "_microsoft_client", lambda: harness.oidc)
-    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: True)
-    monkeypatch.setattr(
-        auth_endpoint,
-        "_get_authenticated_link_user",
-        lambda request, db, user_id: make_user(id=user_id),
-    )
-    monkeypatch.setattr(
-        auth_endpoint,
-        "link_external_identity",
-        lambda db, identity, user: (_ for _ in ()).throw(
-            MicrosoftOidcExternalIdentityConflictError()
-        ),
-    )
-    monkeypatch.setattr(settings, "APP_URL", "https://app.example")
-
-    response = await auth_endpoint.microsoft_oidc_callback(
-        request=make_request(),
-        db=harness.db,
-        code="authorization-code",
-        state=harness.state.transaction.state,
-        error=None,
-    )
-
-    location = response.headers["location"]
-    assert location == "https://app.example/integrations?microsoft=already_linked"
-    assert "subject-1" not in location
-    assert "client-secret" not in location
-
-
-@pytest.mark.asyncio
-async def test_start_validates_next_path_stores_state_and_redirects_to_provider(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    harness = callback_harness()
-    monkeypatch.setattr(auth_endpoint, "oauth_state_service", harness.state)
-    monkeypatch.setattr(auth_endpoint, "_microsoft_client", lambda: harness.oidc)
-    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: True)
-
-    response = await auth_endpoint.microsoft_oidc_start(next_path="/meetings")
-
-    assert response.status_code == 302
-    assert response.headers["location"] == "https://login.example/authorize?state=state"
-    assert harness.oidc.authorization_args["state"] == harness.state.transaction.state
-    assert harness.oidc.authorization_args["nonce"] == harness.state.transaction.nonce
-    with pytest.raises(HTTPException) as invalid:
-        await auth_endpoint.microsoft_oidc_start(next_path="https://evil.example")
-    assert invalid.value.status_code == 400
-
-
-@pytest.mark.asyncio
-async def test_link_start_requires_active_user_and_stores_link_purpose_and_owner(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    harness = callback_harness(
-        purpose="oidc_link",
-        user_id=7,
-        next_path="/integrations",
-    )
-    monkeypatch.setattr(auth_endpoint, "oauth_state_service", harness.state)
-    monkeypatch.setattr(auth_endpoint, "_microsoft_client", lambda: harness.oidc)
-    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: True)
-
-    response = await auth_endpoint.microsoft_oidc_link_start(
-        current_user=make_user(id=7),
-        next_path="/integrations",
-    )
-
-    assert response.status_code == 302
-    assert harness.oidc.authorization_args["state"] == harness.state.transaction.state
-
-
-@pytest.mark.asyncio
-async def test_callback_provider_cancel_consumes_state_without_exchanging_code(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    harness = callback_harness()
-    monkeypatch.setattr(auth_endpoint, "oauth_state_service", harness.state)
-    monkeypatch.setattr(settings, "APP_URL", "https://app.example")
-
-    response = await auth_endpoint.microsoft_oidc_callback(
-        request=make_request(),
-        db=harness.db,
-        state=harness.state.transaction.state,
-        error="access_denied",
-    )
-
-    assert response.headers["location"].endswith("error=microsoft_cancelled")
-    assert harness.oidc.exchange_calls == 0
-    assert harness.state.consumed == 1
-
-
-@pytest.mark.asyncio
-async def test_callback_inactive_user_receives_generic_failure_without_cookies(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    harness = callback_harness()
-    monkeypatch.setattr(auth_endpoint, "oauth_state_service", harness.state)
-    monkeypatch.setattr(auth_endpoint, "_microsoft_client", lambda: harness.oidc)
-    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: True)
-
-    def reject_inactive(_db, _identity):
-        raise auth_service.InactiveUserError
-
-    monkeypatch.setattr(auth_endpoint, "resolve_or_create_user", reject_inactive)
-    monkeypatch.setattr(settings, "APP_URL", "https://app.example")
-
-    response = await auth_endpoint.microsoft_oidc_callback(
-        request=make_request(),
-        db=harness.db,
-        code="authorization-code",
-        state=harness.state.transaction.state,
-        error=None,
-    )
-
-    assert response.headers["location"].endswith("error=microsoft_sign_in_failed")
-    assert harness.db.rollbacks == 1
-    assert harness.cookies == []
-
-
-def test_oidc_oversized_code_is_not_reflected_by_fastapi_or_sent_to_provider(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    harness = callback_harness()
-    marker = "OVERSIZED_OIDC_AUTH_CODE_MARKER"
-    monkeypatch.setattr(auth_endpoint, "oauth_state_service", harness.state)
-    monkeypatch.setattr(auth_endpoint, "_microsoft_client", lambda: harness.oidc)
-    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: True)
-
-    def override_db():
-        yield harness.db
-
-    test_app = FastAPI()
-    test_app.include_router(auth_endpoint.router, prefix="/auth")
-    test_app.dependency_overrides[auth_endpoint.get_db] = override_db
-    with TestClient(test_app) as client:
-        response = client.get(
-            "/auth/microsoft/callback",
-            params={"state": harness.state.transaction.state, "code": marker * 200},
-            follow_redirects=False,
+    with pytest.raises(Exception) as error:
+        await auth_endpoint.exchange_microsoft_oidc_token(
+            make_request("signed-id-token"),
+            Response(),
+            db,
         )
 
-    assert response.status_code == 302
-    assert marker not in response.text
-    assert marker not in response.headers["location"]
-    assert harness.oidc.exchange_calls == 0
+    assert error.value.status_code == 409
+    assert marker not in str(error.value)
+    assert "client_secret" not in str(error.value)
 
 
-def test_status_endpoint_returns_only_non_sensitive_configuration(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(settings, "MICROSOFT_CLIENT_ID", "")
-    monkeypatch.setattr(settings, "MICROSOFT_CLIENT_SECRET", "")
-    monkeypatch.setattr(settings, "MICROSOFT_TENANT_ID", "tenant.example")
-    monkeypatch.setattr(settings, "MICROSOFT_OIDC_REDIRECT_URI", "https://api.example/oidc")
-    monkeypatch.setattr(settings, "MICROSOFT_REDIRECT_URI", "https://api.example/graph")
-    monkeypatch.setattr(settings, "TOKEN_ENCRYPTION_KEY", "")
-    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: False)
-
-    test_app = FastAPI()
-    test_app.include_router(auth_endpoint.router, prefix="/auth")
-    with TestClient(test_app) as client:
-        response = client.get("/auth/microsoft/status")
-
-    assert response.status_code == 200
-    payload = response.json()
-    assert payload["configured"] is False
-    assert payload["tenant"] == "tenant.example"
-    assert payload["oidc_redirect_uri"] == "https://api.example/oidc"
-    assert payload["graph_redirect_uri"] == "https://api.example/graph"
-    assert payload["oidc_scopes"] == ["openid", "profile", "email"]
-    assert payload["graph_configured"] is False
-    assert payload["token_storage_configured"] is False
-    assert "client_secret" not in payload
-
-
-def test_status_endpoint_reports_graph_and_token_storage_readiness_without_values(
+@pytest.mark.asyncio
+async def test_explicit_link_validates_id_token_without_issuing_cookies(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    storage_key = Fernet.generate_key().decode()
-    monkeypatch.setattr(settings, "MICROSOFT_CLIENT_ID", "client-id")
-    monkeypatch.setattr(settings, "MICROSOFT_CLIENT_SECRET", "secret-value")
-    monkeypatch.setattr(settings, "MICROSOFT_REDIRECT_URI", "https://api.example/graph")
-    monkeypatch.setattr(settings, "TOKEN_ENCRYPTION_KEY", storage_key)
-    monkeypatch.setattr(auth_endpoint, "is_microsoft_oidc_configured", lambda: False)
+    configuration = make_configuration()
+    user = make_user()
+    db = FakeDb(exec_rows=[[configuration]])
+    linked = []
+    monkeypatch.setattr(auth_endpoint.security, "validate_request_origin", lambda request: None)
+    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda config: FakeVerifier({
+        "sub": "subject-1",
+        "tid": "tenant-1",
+    }))
+    monkeypatch.setattr(
+        auth_endpoint,
+        "link_external_identity",
+        lambda db, identity, current_user: linked.append((identity, current_user)),
+    )
 
-    test_app = FastAPI()
-    test_app.include_router(auth_endpoint.router, prefix="/auth")
-    with TestClient(test_app) as client:
-        response = client.get("/auth/microsoft/status")
+    result = await auth_endpoint.link_microsoft_oidc_token(
+        make_request("signed-id-token"),
+        user,
+        db,
+    )
 
-    payload = response.json()
-    assert payload["graph_configured"] is True
-    assert payload["token_storage_configured"] is True
-    assert "secret-value" not in response.text
-    assert storage_key not in response.text
+    assert result == {"status": "linked"}
+    assert linked[0][1] is user
+    assert db.commits == 1
+
+
+def test_id_token_request_bounds_input_without_echoing_value(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    marker = "TOKEN_MARKER"
+    monkeypatch.setattr(auth_endpoint.settings, "AUTH_ALLOWED_ORIGINS", "http://localhost:3001")
+    app = FastAPI()
+    app.include_router(auth_endpoint.router, prefix="/auth")
+    with TestClient(app) as client:
+        response = client.post(
+            "/auth/microsoft/oidc/exchange",
+            headers={"Origin": "http://localhost:3001"},
+            json={"id_token": marker * (auth_endpoint.MAX_MICROSOFT_ID_TOKEN_LENGTH + 1)},
+        )
+    assert response.status_code == 400
+    assert marker not in response.text
+
+
+def test_legacy_confidential_routes_are_retired():
+    app = FastAPI()
+    app.include_router(auth_endpoint.router, prefix="/auth")
+    with TestClient(app) as client:
+        response = client.get("/auth/microsoft/start")
+    assert response.status_code == 410
+    assert "MICROSOFT_CLIENT_SECRET" not in response.text

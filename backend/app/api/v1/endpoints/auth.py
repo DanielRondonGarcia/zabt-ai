@@ -1,50 +1,47 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-"""Local email/password authentication endpoints."""
+"""Local authentication and Microsoft Entra public-client OIDC endpoints."""
 
 from __future__ import annotations
 
-from typing import Literal
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from datetime import datetime
+import json
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel, ConfigDict, Field, model_validator, field_validator
 from sqlmodel import Session
 
 from app.api.deps import get_current_active_user, get_db
 from app.core import security
 from app.core.config import settings
-from app.models import User, UserTier
+from app.models import MicrosoftOidcConfiguration, User, UserTier
 from app.services import auth as auth_service
 from app.services.integration import is_token_storage_configured
 from app.services.microsoft_oidc import (
     OIDC_SCOPES,
     MicrosoftOidcAccountConflictError,
+    MicrosoftOidcClient,
     MicrosoftOidcError,
     MicrosoftOidcExternalIdentityConflictError,
-    MicrosoftOidcIdentity,
-    MicrosoftOidcClient,
-    MicrosoftOidcValidationError,
+    MicrosoftOidcProviderError,
     identity_from_claims,
-    is_microsoft_oidc_configured,
     link_external_identity,
     resolve_or_create_user,
 )
-from app.services.oauth_state import (
-    OAuthStateError,
-    OAuthStateService,
-    build_pkce_challenge,
-    is_safe_oauth_callback_value,
-    validate_next_path,
+from app.services.microsoft_oidc_configuration import (
+    MicrosoftOidcConfigurationValidationError,
+    get_microsoft_oidc_configuration,
+    is_microsoft_oidc_runtime_configured,
+    upsert_microsoft_oidc_configuration,
 )
 
 
 router = APIRouter()
-oauth_state_service = OAuthStateService()
-
 
 ClientKind = Literal["web", "mobile"]
+MAX_MICROSOFT_ID_TOKEN_LENGTH = 32_768
+MAX_MICROSOFT_ID_TOKEN_REQUEST_BODY_LENGTH = MAX_MICROSOFT_ID_TOKEN_LENGTH + 512
 
 
 class UserRead(BaseModel):
@@ -103,15 +100,52 @@ class AuthResponse(BaseModel):
 
 
 class MicrosoftOidcStatus(BaseModel):
-    """Non-sensitive Microsoft OIDC and Graph configuration for the web UI."""
+    """Public Microsoft OIDC and separately reported Graph readiness."""
 
     configured: bool
-    tenant: str
-    oidc_redirect_uri: str
-    graph_redirect_uri: str
-    oidc_scopes: list[str]
+    client_id: str | None
+    tenant: str | None
+    redirect_uri: str | None
+    scopes: list[str]
+    enabled: bool
     graph_configured: bool
     token_storage_configured: bool
+
+
+class MicrosoftOidcConfigurationResponse(MicrosoftOidcStatus):
+    """Authenticated configuration view with administration metadata."""
+
+    can_manage: bool
+    is_admin: bool
+    created_at: datetime | None
+    updated_at: datetime | None
+    updated_by: int | None
+
+
+class MicrosoftOidcConfigurationUpdate(BaseModel):
+    """Only public SPA configuration is accepted; there is no secret field."""
+
+    model_config = ConfigDict(hide_input_in_errors=True)
+
+    client_id: str = Field(min_length=1, max_length=64)
+    tenant: str | None = Field(default=None, min_length=1, max_length=255)
+    # Accept the storage-oriented spelling for API clients that already use it,
+    # while the browser form sends the shorter public ``tenant`` field.
+    tenant_id: str | None = Field(default=None, min_length=1, max_length=255)
+    redirect_uri: str = Field(min_length=1, max_length=2048)
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def validate_tenant_aliases(self) -> "MicrosoftOidcConfigurationUpdate":
+        if not self.tenant and not self.tenant_id:
+            raise ValueError("Tenant is required")
+        if self.tenant and self.tenant_id and self.tenant != self.tenant_id:
+            raise ValueError("Tenant values must match")
+        return self
+
+    @property
+    def tenant_value(self) -> str:
+        return self.tenant or self.tenant_id or ""
 
 
 def _auth_response(
@@ -140,244 +174,355 @@ def _invalid_credentials() -> HTTPException:
     )
 
 
-def _microsoft_client() -> MicrosoftOidcClient:
-    return MicrosoftOidcClient.from_settings()
+def _graph_configuration_configured() -> bool:
+    """Check only the confidential delegated Graph deployment settings."""
+
+    return all(
+        isinstance(value, str) and bool(value.strip())
+        for value in (
+            settings.MICROSOFT_CLIENT_ID,
+            settings.MICROSOFT_CLIENT_SECRET,
+            settings.MICROSOFT_REDIRECT_URI,
+        )
+    )
 
 
-def _login_error_redirect(error_code: str) -> RedirectResponse:
-    login_url = f"{settings.APP_URL.rstrip('/')}/login?{urlencode({'error': error_code})}"
-    response = RedirectResponse(url=login_url, status_code=status.HTTP_302_FOUND)
-    response.headers["Cache-Control"] = "no-store"
-    return response
-
-
-def _success_redirect(next_path: str) -> RedirectResponse:
-    redirect_url = f"{settings.APP_URL.rstrip('/')}{next_path}"
-    response = RedirectResponse(url=redirect_url, status_code=status.HTTP_302_FOUND)
-    response.headers["Cache-Control"] = "no-store"
-    return response
-
-
-def _microsoft_result_redirect(next_path: str, result_code: str) -> RedirectResponse:
-    parsed = urlsplit(next_path)
-    query = parse_qsl(parsed.query, keep_blank_values=True)
-    query.append(("microsoft", result_code))
-    result_path = urlunsplit(("", "", parsed.path, urlencode(query), ""))
-    return _success_redirect(result_path)
-
-
-def _get_authenticated_link_user(
-    request: Request,
-    db: Session,
-    user_id: int,
-) -> User | None:
-    """Require the same active web session that initiated an explicit link."""
-
-    raw_token = request.cookies.get(settings.AUTH_ACCESS_COOKIE_NAME)
-    if not raw_token:
-        return None
-    try:
-        payload = security.verify_access_token(raw_token)
-        authenticated_id = int(payload["sub"])
-    except Exception:
-        return None
-    if authenticated_id != user_id:
-        return None
-    user = db.get(User, user_id)
-    if user is None or not user.is_active:
-        return None
-    return user
-
-
-@router.get("/microsoft/status", response_model=MicrosoftOidcStatus)
-def microsoft_oidc_status() -> MicrosoftOidcStatus:
-    """Return non-secret OIDC and Graph configuration for the configuration UI."""
-
+def _status_response(db: Session) -> MicrosoftOidcStatus:
+    configuration = get_microsoft_oidc_configuration(db)
     return MicrosoftOidcStatus(
-        configured=is_microsoft_oidc_configured(),
-        tenant=settings.MICROSOFT_TENANT_ID,
-        oidc_redirect_uri=settings.MICROSOFT_OIDC_REDIRECT_URI,
-        graph_redirect_uri=settings.MICROSOFT_REDIRECT_URI,
-        oidc_scopes=list(OIDC_SCOPES),
-        graph_configured=all(
-            value.strip()
-            for value in (
-                settings.MICROSOFT_CLIENT_ID,
-                settings.MICROSOFT_CLIENT_SECRET,
-                settings.MICROSOFT_REDIRECT_URI,
-            )
-        ),
+        configured=is_microsoft_oidc_runtime_configured(configuration),
+        client_id=configuration.client_id if configuration else None,
+        tenant=configuration.tenant_id if configuration else None,
+        redirect_uri=configuration.redirect_uri if configuration else None,
+        scopes=list(OIDC_SCOPES),
+        enabled=bool(configuration.enabled) if configuration else False,
+        # These values intentionally come from the separate Graph boundary.
+        graph_configured=_graph_configuration_configured(),
         token_storage_configured=is_token_storage_configured(),
     )
 
 
-async def _start_microsoft_transaction(
-    *,
-    purpose: str,
-    next_path: str,
-    user_id: int | None = None,
-) -> RedirectResponse:
-    if not is_microsoft_oidc_configured():
+def _configuration_response(
+    db: Session,
+    current_user: User,
+) -> MicrosoftOidcConfigurationResponse:
+    configuration = get_microsoft_oidc_configuration(db)
+    return MicrosoftOidcConfigurationResponse(
+        **_status_response(db).model_dump(),
+        can_manage=bool(current_user.is_admin),
+        is_admin=bool(current_user.is_admin),
+        created_at=configuration.created_at if configuration else None,
+        updated_at=configuration.updated_at if configuration else None,
+        updated_by=configuration.updated_by if configuration else None,
+    )
+
+
+def _oidc_verifier(configuration: MicrosoftOidcConfiguration) -> MicrosoftOidcClient:
+    return MicrosoftOidcClient.from_configuration(configuration)
+
+
+def _oidc_not_configured() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="Microsoft sign-in is not configured",
+    )
+
+
+def _oidc_validation_failure() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Microsoft sign-in could not be completed",
+    )
+
+
+def _invalid_id_token_request() -> HTTPException:
+    """Return a static malformed-request error without echoing the assertion."""
+
+    return HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Invalid Microsoft ID token request",
+    )
+
+
+async def _read_microsoft_id_token(request: Request) -> str:
+    """Read and bound the browser assertion before any Pydantic error can echo it."""
+
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > MAX_MICROSOFT_ID_TOKEN_REQUEST_BODY_LENGTH:
+                raise _invalid_id_token_request()
+        except (TypeError, ValueError) as exc:
+            raise _invalid_id_token_request() from exc
+
+    raw_body = await request.body()
+    if len(raw_body) > MAX_MICROSOFT_ID_TOKEN_REQUEST_BODY_LENGTH:
+        raise _invalid_id_token_request()
+    try:
+        body: Any = json.loads(raw_body)
+    except (TypeError, ValueError) as exc:
+        raise _invalid_id_token_request() from exc
+    if not isinstance(body, dict):
+        raise _invalid_id_token_request()
+    id_token = body.get("id_token")
+    if (
+        not isinstance(id_token, str)
+        or not id_token
+        or len(id_token) > MAX_MICROSOFT_ID_TOKEN_LENGTH
+    ):
+        raise _invalid_id_token_request()
+    return id_token
+
+
+@router.get("/microsoft/status", response_model=MicrosoftOidcStatus)
+def microsoft_oidc_status(
+    response: Response,
+    db: Session = Depends(get_db),
+) -> MicrosoftOidcStatus:
+    """Return non-secret runtime configuration before the user is authenticated."""
+
+    response.headers["Cache-Control"] = "no-store"
+    return _status_response(db)
+
+
+@router.get(
+    "/microsoft/config",
+    response_model=MicrosoftOidcConfigurationResponse,
+)
+def microsoft_oidc_configuration(
+    response: Response,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+) -> MicrosoftOidcConfigurationResponse:
+    """Return the global OIDC configuration and current user's admin ability."""
+
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store"
+    return _configuration_response(db, current_user)
+
+
+@router.put(
+    "/microsoft/config",
+    response_model=MicrosoftOidcConfigurationResponse,
+)
+def update_microsoft_oidc_configuration(
+    payload: MicrosoftOidcConfigurationUpdate,
+    request: Request,
+    response: Response,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+) -> MicrosoftOidcConfigurationResponse:
+    """Save the singleton public OIDC configuration for an administrator."""
+
+    request_origin = security.validate_request_origin(request)
+    if not current_user.is_admin:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Microsoft sign-in is not configured",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator access is required",
+        )
+    if current_user.id is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrator access is required",
         )
 
     try:
-        transaction_kwargs = {"purpose": purpose, "next_path": next_path}
-        if user_id is not None:
-            transaction_kwargs["user_id"] = user_id
-        transaction = oauth_state_service.create_transaction(**transaction_kwargs)
-        client = _microsoft_client()
-        authorization_url = await client.build_authorization_url(
-            state=transaction.state,
-            nonce=transaction.nonce,
-            code_challenge=build_pkce_challenge(transaction.code_verifier),
+        upsert_microsoft_oidc_configuration(
+            db,
+            client_id=payload.client_id,
+            tenant=payload.tenant_value,
+            redirect_uri=payload.redirect_uri,
+            enabled=payload.enabled,
+            updated_by=current_user.id,
+            spa_origin=request_origin,
         )
-    except (OAuthStateError, MicrosoftOidcError, ValueError) as exc:
-        # The state is short-lived; consume it if discovery failed before the
-        # browser received the authorization URL.
-        if "transaction" in locals():
-            try:
-                oauth_state_service.consume(transaction.state)
-            except OAuthStateError:
-                pass
+        db.commit()
+    except MicrosoftOidcConfigurationValidationError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+    except (TypeError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Microsoft OIDC configuration is invalid",
+        ) from exc
+
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store"
+    return _configuration_response(db, current_user)
+
+
+@router.post(
+    "/microsoft/oidc/exchange",
+    response_model=AuthResponse,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["id_token"],
+                        "properties": {
+                            "id_token": {
+                                "type": "string",
+                                "maxLength": MAX_MICROSOFT_ID_TOKEN_LENGTH,
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+async def exchange_microsoft_oidc_token(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+) -> AuthResponse:
+    """Validate a browser-issued ID token and issue Zabt web cookies."""
+
+    security.validate_request_origin(request)
+    id_token = await _read_microsoft_id_token(request)
+    configuration = get_microsoft_oidc_configuration(db)
+    if not is_microsoft_oidc_runtime_configured(configuration):
+        raise _oidc_not_configured()
+    assert configuration is not None
+
+    try:
+        claims = await _oidc_verifier(configuration).validate_id_token(id_token)
+        user = resolve_or_create_user(db, identity_from_claims(claims))
+        tokens = auth_service.issue_tokens(db, user)
+    except MicrosoftOidcAccountConflictError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A local account already uses this email. Sign in locally and link Microsoft from settings.",
+        ) from exc
+    except auth_service.InactiveUserError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Inactive user",
+        ) from exc
+    except MicrosoftOidcProviderError as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Microsoft sign-in is temporarily unavailable",
         ) from exc
-    return RedirectResponse(url=authorization_url, status_code=status.HTTP_302_FOUND)
-
-
-@router.get("/microsoft/start")
-async def microsoft_oidc_start(
-    next_path: str = Query(default="/", alias="next", max_length=2048),
-) -> RedirectResponse:
-    """Start the anonymous Entra OIDC authorization-code + PKCE flow."""
-
-    try:
-        safe_next = validate_next_path(next_path)
-    except ValueError as exc:
+    except (MicrosoftOidcError, TypeError, ValueError) as exc:
+        db.rollback()
+        raise _oidc_validation_failure() from exc
+    except Exception as exc:
+        db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid next path",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Microsoft sign-in is temporarily unavailable",
         ) from exc
-    return await _start_microsoft_transaction(
-        purpose="oidc_login",
-        next_path=safe_next,
-    )
+
+    return _auth_response(response, user, tokens, "web")
 
 
-@router.get("/microsoft/link/start")
-async def microsoft_oidc_link_start(
-    current_user: User = Depends(get_current_active_user),
-    next_path: str = Query(default="/integrations", alias="next", max_length=2048),
-) -> RedirectResponse:
-    """Start an explicit Microsoft identity link for the active local user."""
-
-    try:
-        safe_next = validate_next_path(next_path)
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid next path",
-        ) from exc
-    return await _start_microsoft_transaction(
-        purpose="oidc_link",
-        next_path=safe_next,
-        user_id=current_user.id,
-    )
-
-
-@router.get("/microsoft/callback")
-async def microsoft_oidc_callback(
+@router.post(
+    "/microsoft/oidc/link",
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": {
+                        "type": "object",
+                        "required": ["id_token"],
+                        "properties": {
+                            "id_token": {
+                                "type": "string",
+                                "maxLength": MAX_MICROSOFT_ID_TOKEN_LENGTH,
+                            }
+                        },
+                    }
+                }
+            },
+        }
+    },
+)
+async def link_microsoft_oidc_token(
     request: Request,
+    current_user: User = Depends(get_current_active_user),
     db: Session = Depends(get_db),
-    code: str | None = Query(default=None),
-    state: str | None = Query(default=None),
-    error: str | None = Query(default=None),
-) -> RedirectResponse:
-    """Consume the one-time transaction and finish Entra sign-in."""
+) -> dict[str, str]:
+    """Explicitly link a browser-issued Microsoft identity to the current user."""
 
-    if not state or not is_safe_oauth_callback_value(state, max_length=256):
-        return _login_error_redirect("microsoft_sign_in_failed")
-
-    try:
-        transaction = oauth_state_service.consume(state)
-    except OAuthStateError:
-        return _login_error_redirect("microsoft_sign_in_failed")
-    if transaction is None or transaction.purpose not in {"oidc_login", "oidc_link"}:
-        return _login_error_redirect("microsoft_sign_in_failed")
-
-    if not is_safe_oauth_callback_value(error, max_length=128):
-        if transaction.purpose == "oidc_link":
-            return _microsoft_result_redirect(transaction.next_path, "link_failed")
-        return _login_error_redirect("microsoft_sign_in_failed")
-    if error is not None:
-        if error == "access_denied":
-            if transaction.purpose == "oidc_link":
-                return _microsoft_result_redirect(transaction.next_path, "cancelled")
-            return _login_error_redirect("microsoft_cancelled")
-        if transaction.purpose == "oidc_link":
-            return _microsoft_result_redirect(transaction.next_path, "link_failed")
-        return _login_error_redirect("microsoft_sign_in_failed")
-    if not is_safe_oauth_callback_value(code, max_length=4096):
-        if transaction.purpose == "oidc_link":
-            return _microsoft_result_redirect(transaction.next_path, "link_failed")
-        return _login_error_redirect("microsoft_sign_in_failed")
-    if not code or not is_microsoft_oidc_configured():
-        if transaction.purpose == "oidc_link":
-            return _microsoft_result_redirect(transaction.next_path, "link_failed")
-        return _login_error_redirect("microsoft_sign_in_failed")
+    security.validate_request_origin(request)
+    id_token = await _read_microsoft_id_token(request)
+    configuration = get_microsoft_oidc_configuration(db)
+    if not is_microsoft_oidc_runtime_configured(configuration):
+        raise _oidc_not_configured()
+    assert configuration is not None
 
     try:
-        client = _microsoft_client()
-        token_data = await client.exchange_code(
-            code=code,
-            code_verifier=transaction.code_verifier,
-        )
-        claims = await client.validate_id_token(
-            token_data["id_token"],
-            nonce=transaction.nonce,
-        )
-        identity: MicrosoftOidcIdentity = identity_from_claims(claims)
-        if transaction.purpose == "oidc_link":
-            if transaction.user_id is None:
-                raise MicrosoftOidcValidationError("Microsoft link owner is missing")
-            user = _get_authenticated_link_user(request, db, transaction.user_id)
-            if user is None:
-                return _microsoft_result_redirect(transaction.next_path, "link_failed")
-            link_external_identity(db, identity, user)
-            db.commit()
-            return _microsoft_result_redirect(transaction.next_path, "linked")
-        user = resolve_or_create_user(db, identity)
-        tokens = auth_service.issue_tokens(db, user)
-    except MicrosoftOidcAccountConflictError:
+        claims = await _oidc_verifier(configuration).validate_id_token(id_token)
+        link_external_identity(db, identity_from_claims(claims), current_user)
+        db.commit()
+    except MicrosoftOidcExternalIdentityConflictError as exc:
         db.rollback()
-        return _login_error_redirect("microsoft_local_account_exists")
-    except MicrosoftOidcExternalIdentityConflictError:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This Microsoft account is already linked to another Zabt account.",
+        ) from exc
+    except auth_service.InactiveUserError as exc:
         db.rollback()
-        return _microsoft_result_redirect(transaction.next_path, "already_linked")
-    except auth_service.InactiveUserError:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Inactive user") from exc
+    except MicrosoftOidcProviderError as exc:
         db.rollback()
-        if transaction.purpose == "oidc_link":
-            return _microsoft_result_redirect(transaction.next_path, "link_failed")
-        return _login_error_redirect("microsoft_sign_in_failed")
-    except (MicrosoftOidcError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Microsoft account linking is temporarily unavailable",
+        ) from exc
+    except (MicrosoftOidcError, TypeError, ValueError) as exc:
         db.rollback()
-        if transaction.purpose == "oidc_link":
-            return _microsoft_result_redirect(transaction.next_path, "link_failed")
-        return _login_error_redirect("microsoft_sign_in_failed")
-    except Exception:
-        # Callback failures are deliberately indistinguishable to the browser.
+        raise _oidc_validation_failure() from exc
+    except Exception as exc:
         db.rollback()
-        if transaction.purpose == "oidc_link":
-            return _microsoft_result_redirect(transaction.next_path, "link_failed")
-        return _login_error_redirect("microsoft_sign_in_failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Microsoft account linking is temporarily unavailable",
+        ) from exc
 
-    response = _success_redirect(transaction.next_path)
-    auth_service.set_web_auth_cookies(response, tokens)
-    return response
+    return {"status": "linked"}
+
+
+@router.get("/microsoft/start", include_in_schema=False)
+def microsoft_oidc_legacy_start() -> None:
+    """Retire the former confidential OIDC start route without reading a secret."""
+
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Microsoft OIDC now uses the public SPA flow",
+    )
+
+
+@router.get("/microsoft/link/start", include_in_schema=False)
+def microsoft_oidc_legacy_link_start() -> None:
+    """Retire the former server-side OIDC link route."""
+
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Microsoft OIDC now uses the public SPA flow",
+    )
+
+
+@router.get("/microsoft/callback", include_in_schema=False)
+def microsoft_oidc_legacy_callback() -> None:
+    """Return a safe compatibility response for old confidential callbacks."""
+
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail="Microsoft OIDC now uses the public SPA flow",
+    )
 
 
 @router.post("/register", response_model=AuthResponse, status_code=status.HTTP_201_CREATED)

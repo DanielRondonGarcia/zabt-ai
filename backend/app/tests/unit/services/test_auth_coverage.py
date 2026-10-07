@@ -10,6 +10,7 @@ PostgreSQL-specific model metadata bind.
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from fastapi import Request, Response
 import pytest
@@ -63,6 +64,21 @@ class FakeSession:
 
     def refresh(self, obj):
         self.refreshed.append(obj)
+
+
+class FakePostgresSession(FakeSession):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.advisory_lock_calls = []
+
+    def get_bind(self):
+        return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
+
+    def exec(self, statement, params=None):
+        if "pg_advisory_xact_lock" in str(statement):
+            self.advisory_lock_calls.append(params)
+            return ExecResult([])
+        return super().exec(statement)
 
 
 def make_user(**overrides) -> User:
@@ -150,6 +166,7 @@ def test_create_user_normalizes_trims_name_hashes_and_commits(monkeypatch: pytes
     assert user.password_hash == "hashed:secret"
     assert user.supabase_id is None
     assert user.is_active is True
+    assert user.is_admin is True
     assert fake_db.added == [user]
     assert fake_db.commits == 1
     assert fake_db.refreshed == [user]
@@ -163,6 +180,27 @@ def test_create_user_rejects_existing_normalized_email():
 
     assert fake_db.added == []
     assert fake_db.commits == 0
+
+
+def test_create_user_keeps_subsequent_registration_non_admin(monkeypatch: pytest.MonkeyPatch):
+    fake_db = FakeSession(exec_rows=[[], [1]])
+    monkeypatch.setattr(auth, "hash_password", lambda _password: "hashed")
+
+    user = auth.create_user(fake_db, email="second@example.com", password="secret")
+
+    assert user.is_admin is False
+
+
+def test_first_admin_bootstrap_uses_transaction_scoped_postgres_advisory_lock(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    fake_db = FakePostgresSession(exec_rows=[[], [None]])
+    monkeypatch.setattr(auth, "hash_password", lambda _password: "hashed")
+
+    user = auth.create_user(fake_db, email="first@example.com", password="secret")
+
+    assert user.is_admin is True
+    assert fake_db.advisory_lock_calls == [{"lock_key": auth._FIRST_ADMIN_ADVISORY_LOCK_KEY}]
 
 
 def test_create_user_converts_unique_constraint_race_to_duplicate(monkeypatch: pytest.MonkeyPatch):

@@ -124,6 +124,7 @@ class UserBase(SQLModel):
     picture: Optional[str] = None
     tier: UserTier = Field(default=UserTier.FREE)
     is_active: bool = True
+    is_admin: bool = Field(default=False, index=True)
     minutes_used_this_month: int = Field(default=0)
     # Kept nullable for compatibility with data created by the former Supabase
     # integration. New local users intentionally leave this field unset.

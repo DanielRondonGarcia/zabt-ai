@@ -33,7 +33,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow frontend-2 origin (http://localhost:3000 for development)
+# CORS — allow the frontend-2 origin (http://localhost:3001 for development)
 from fastapi.middleware.cors import CORSMiddleware
 _cors_origins = {
     origin.strip()

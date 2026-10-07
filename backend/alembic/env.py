@@ -16,6 +16,7 @@ from app.models import (  # Import models to register them
     CalendarEvent,
     ExternalIdentity,
     Integration,
+    MicrosoftOidcConfiguration,
     MCPToken,
     Meeting,
     User,

@@ -48,6 +48,12 @@ from app.models.external_identity import (
     ExternalIdentity,
 )
 
+# Re-export global Microsoft OIDC configuration models
+from app.models.microsoft_oidc_configuration import (
+    MicrosoftOidcProvider,
+    MicrosoftOidcConfiguration,
+)
+
 # Re-export email share models
 from app.models.email_share import (
     EmailShareStatus,
@@ -139,6 +145,9 @@ __all__ = [
     # external identities
     "ExternalIdentityProvider",
     "ExternalIdentity",
+    # Microsoft OIDC configuration
+    "MicrosoftOidcProvider",
+    "MicrosoftOidcConfiguration",
     # email_share
     "EmailShareStatus",
     "EmailShare",

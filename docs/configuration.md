@@ -88,9 +88,9 @@ intentionally unavailable without a configured delivery provider.
 | Variable | Default | Notes |
 |----------|---------|-------|
 | `NEXT_PUBLIC_API_URL` | `http://localhost:8000/api/v1` | Browser → API base URL. |
-| `NEXT_PUBLIC_FRONTEND_URL` | `http://localhost:3000` | |
-| `APP_URL` | `http://localhost:3000` | Used in email deep-links. |
-| `BACKEND_CORS_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins. |
+| `NEXT_PUBLIC_FRONTEND_URL` | `http://localhost:3001` | |
+| `APP_URL` | `http://localhost:3001` | Used in email deep-links. |
+| `BACKEND_CORS_ORIGINS` | `http://localhost:3001` | Comma-separated allowed origins. |
 
 ## LLM (summarization)
 
@@ -317,9 +317,23 @@ and retry the meeting after the worker is healthy.
 
 ## Integrations & notifications (optional)
 
+### Microsoft Entra public SPA OIDC
+
+Microsoft Entra OIDC is configured globally from **Integrations** by an
+administrator. The browser uses a public SPA client with PKCE, so no OIDC
+client secret belongs in `.env`. The redirect URI must be on the same origin as
+the frontend SPA. Local development defaults to
+`http://localhost:3001/login`; the frontend derives the current browser origin
+at runtime. In production, register the actual frontend HTTPS origin followed
+by `/login`, for example `https://app.example.com/login`.
+
+The delegated Graph callback remains a separate backend URL:
+`https://api.example.com/api/v1/integrations/microsoft/callback`. Do not use
+that backend callback as the public SPA OIDC redirect.
+
 | Variable | Notes |
 |----------|-------|
-| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT_ID` / `MICROSOFT_REDIRECT_URI` | Microsoft/Teams OAuth. |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT_ID` / `MICROSOFT_REDIRECT_URI` | Server-side delegated Microsoft Graph/Teams OAuth only. These values are separate from OIDC. |
 | `TOKEN_ENCRYPTION_KEY` | Fernet key encrypting stored OAuth tokens. **Required if you enable integrations.** Generate: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
 | `BOT_DISPLAY_NAME` / `BOT_WORKER_URL` | Teams meeting bot (profile `bot`). |
 | `RESEND_API_KEY` / `RESEND_FROM_EMAIL` | Transactional email (Resend). |
@@ -340,6 +354,3 @@ and retry the meeting after the worker is healthy.
 `EXPO_ACCESS_TOKEN`, `EXPO_PUBLIC_API_URL` — only needed if you build the Expo mobile app.
 Mobile local authentication uses the API's `client=mobile` contract and SecureStore; no Supabase
 variables are needed.
-
-> This table is kept in sync with `.env.example`. If you add a variable to the code, add it to
-> both.
