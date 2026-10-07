@@ -3,6 +3,7 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
+import Link from "next/link";
 import {
   createGroup,
   deleteGroup,
@@ -31,7 +32,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/app/components/ui/dialog";
-import { FolderOpen, Pencil, Plus, Trash2, Users } from "lucide-react";
+import { ArrowRight, FolderOpen, Pencil, Plus, Trash2, Users } from "lucide-react";
 
 function getErrorMessage(error: unknown, fallback: string): string {
   if (typeof error === "object" && error !== null && "response" in error) {
@@ -42,11 +43,12 @@ function getErrorMessage(error: unknown, fallback: string): string {
 }
 
 function formatDate(value: string): string {
-  return new Date(value).toLocaleDateString("en-US", {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "Unknown date" : new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
     year: "numeric",
-  });
+  }).format(date);
 }
 
 interface GroupFormDialogProps {
@@ -112,11 +114,13 @@ function GroupFormDialog({
             </label>
             <Input
               id="group-name"
+              name="group-name"
               value={name}
               onChange={(event) => setName(event.target.value)}
-              placeholder="e.g. Product team"
+              placeholder="e.g. Product team…"
               maxLength={100}
               autoFocus
+              autoComplete="off"
               disabled={saving}
             />
             <p className="text-xs text-muted-foreground">Up to 100 characters.</p>
@@ -127,9 +131,10 @@ function GroupFormDialog({
             </label>
             <textarea
               id="group-description"
+              name="group-description"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
-              placeholder="What meetings belong here?"
+              placeholder="What meetings belong here?…"
               maxLength={500}
               disabled={saving}
               rows={4}
@@ -170,7 +175,18 @@ export default function GroupsPage() {
     let mounted = true;
     getGroups()
       .then((data) => {
-        if (mounted) setGroups(data);
+        if (mounted) {
+          setGroups(data);
+          const editParam = new URLSearchParams(window.location.search).get("edit");
+          const editGroupId = editParam && /^\d+$/.test(editParam) ? Number(editParam) : null;
+          const groupToEdit = editGroupId === null
+            ? null
+            : data.find((group) => group.id === editGroupId) ?? null;
+          if (groupToEdit) {
+            setEditingGroup(groupToEdit);
+            setFormOpen(true);
+          }
+        }
       })
       .catch((requestError) => {
         if (mounted) setError(getErrorMessage(requestError, "Groups could not be loaded."));
@@ -232,7 +248,7 @@ export default function GroupsPage() {
           </p>
         </div>
         <Button onClick={openCreateDialog}>
-          <Plus className="size-4" />
+          <Plus className="size-4" aria-hidden="true" />
           New group
         </Button>
       </header>
@@ -255,7 +271,7 @@ export default function GroupsPage() {
             After creating a group, open a meeting and select it in the meeting header. Assigned meetings are indexed for secure group search and AI Chat.
           </p>
           <Button className="mt-6" onClick={openCreateDialog}>
-            <Plus className="size-4" />
+            <Plus className="size-4" aria-hidden="true" />
             Create group
           </Button>
         </section>
@@ -271,17 +287,25 @@ export default function GroupsPage() {
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
                     <h3 className="truncate text-base font-semibold text-foreground">{group.name}</h3>
-                    <p className="mt-1 min-h-10 text-sm text-muted-foreground">
+                    <p className="mt-1 min-h-10 break-words text-sm text-muted-foreground">
                       {group.description || "No description added yet."}
                     </p>
                   </div>
                   <Users className="mt-0.5 size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
                 </div>
-                <div className="mt-5 flex items-center justify-between border-t border-border pt-3">
+                <div className="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
                   <span className="text-xs text-muted-foreground">Created {formatDate(group.created_at)}</span>
-                  <div className="flex items-center gap-1">
+                  <div className="flex flex-wrap items-center justify-end gap-1">
+                    <Link
+                      href={`/groups/${group.id}`}
+                      aria-label={`Open group ${group.name}`}
+                      className="inline-flex min-h-7 items-center gap-1.5 rounded-lg px-2 py-1 text-sm font-medium text-primary outline-none hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50"
+                    >
+                      Open group
+                      <ArrowRight className="size-3.5" aria-hidden="true" />
+                    </Link>
                     <Button variant="ghost" size="sm" onClick={() => openEditDialog(group)}>
-                      <Pencil className="size-3.5" />
+                      <Pencil className="size-3.5" aria-hidden="true" />
                       Edit
                     </Button>
                     <Button
@@ -293,7 +317,7 @@ export default function GroupsPage() {
                         setDeletingGroup(group);
                       }}
                     >
-                      <Trash2 className="size-3.5" />
+                      <Trash2 className="size-3.5" aria-hidden="true" />
                       Delete
                     </Button>
                   </div>
