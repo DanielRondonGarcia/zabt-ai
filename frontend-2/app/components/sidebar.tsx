@@ -7,6 +7,7 @@ import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
 import { fetchCurrentUser } from "@/app/lib/api";
 import { ProfileMenu } from "@/app/components/profile-menu";
+import { ThemeToggle } from "@/app/components/theme-toggle";
 import clsx from "clsx";
 import { Users } from "lucide-react";
 
@@ -39,12 +40,12 @@ const SettingsIcon = () => (
     </svg>
 );
 const ChevronIcon = ({ open }: { open: boolean }) => (
-    <svg className={clsx("w-3 h-3 transition-transform duration-150", open && "rotate-180")} viewBox="0 0 20 20" fill="currentColor">
+    <svg className={clsx("w-3 h-3 transition-transform duration-150 motion-reduce:transition-none", open && "rotate-180")} viewBox="0 0 20 20" fill="currentColor">
         <path fillRule="evenodd" d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z" clipRule="evenodd" />
     </svg>
 );
 const HashIcon = () => (
-    <svg className="w-3.5 h-3.5 text-stone-400 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
+    <svg className="w-3.5 h-3.5 text-sidebar-foreground/50 flex-shrink-0" viewBox="0 0 20 20" fill="currentColor">
         <path fillRule="evenodd" d="M9.243 3.03a1 1 0 01.727 1.213L9.53 6h2.94l.56-2.243a1 1 0 111.94.486L14.53 6H17a1 1 0 110 2h-2.97l-1 4H15a1 1 0 110 2h-2.47l-.56 2.243a1 1 0 11-1.94-.486L10.47 14H7.53l-.56 2.243a1 1 0 11-1.94-.486L5.47 14H3a1 1 0 110-2h2.97l1-4H5a1 1 0 110-2h2.47l.56-2.243a1 1 0 011.213-.727zM9.03 8l-1 4h2.938l1-4H9.031z" clipRule="evenodd" />
     </svg>
 );
@@ -89,29 +90,29 @@ export function Sidebar({ onNavClick }: SidebarProps) {
 
     return (
         <aside
-            className="flex flex-col h-full bg-white border-r border-stone-200 overflow-y-auto"
+            className="flex flex-col h-full bg-sidebar text-sidebar-foreground border-r border-sidebar-border overflow-y-auto"
             style={{ width: "220px", minWidth: "220px" }}
         >
             {/* Logo */}
-            <div className="px-4 pt-5 pb-3 border-b border-stone-100">
+            <div className="px-4 pt-5 pb-3 border-b border-sidebar-border">
                 <span className="flex items-center gap-2">
                     <span className="flex items-center justify-center w-7 h-7 rounded-lg bg-primary text-primary-foreground text-xs font-bold select-none">
                         Z
                     </span>
-                    <span className="text-base font-bold text-stone-900 tracking-tight">Zabt AI</span>
+                    <span className="text-base font-bold text-sidebar-foreground tracking-tight">Zabt AI</span>
                 </span>
             </div>
 
             {/* Profile */}
-            <div className="px-3 py-3 border-b border-stone-100">
+            <div className="px-3 py-3 border-b border-sidebar-border">
                 <ProfileMenu>
-                    <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-stone-50 cursor-pointer transition-colors">
+                    <div className="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-sidebar-accent cursor-pointer transition-colors">
                         <span className="flex items-center justify-center w-7 h-7 rounded-full bg-primary/15 text-primary text-xs font-semibold flex-shrink-0">
                             {initials}
                         </span>
                         <div className="min-w-0 flex-1 text-left">
-                            <p className="text-sm font-medium text-stone-800 truncate leading-tight">{userName}</p>
-                            <p className="text-xs text-stone-400 truncate leading-tight">{userEmail}</p>
+                            <p className="text-sm font-medium text-sidebar-foreground truncate leading-tight">{userName}</p>
+                            <p className="text-xs text-sidebar-foreground/60 truncate leading-tight">{userEmail}</p>
                         </div>
                     </div>
                 </ProfileMenu>
@@ -130,10 +131,10 @@ export function Sidebar({ onNavClick }: SidebarProps) {
                                 "flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-colors",
                                 active
                                     ? "bg-primary/10 text-primary"
-                                    : "text-stone-600 hover:bg-stone-100 hover:text-stone-900"
+                                    : "text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground"
                             )}
                         >
-                            <span className={active ? "text-primary" : "text-stone-400"}>{icon}</span>
+                            <span className={active ? "text-primary" : "text-sidebar-foreground/50"}>{icon}</span>
                             {label}
                         </Link>
                     );
@@ -144,7 +145,7 @@ export function Sidebar({ onNavClick }: SidebarProps) {
             <div className="mt-1">
                 <button
                     onClick={() => setChannelsOpen((v) => !v)}
-                    className="w-full flex items-center justify-between px-4 py-1.5 text-xs font-medium uppercase tracking-wide text-stone-400 hover:text-stone-500 transition-colors"
+                    className="w-full flex items-center justify-between px-4 py-1.5 text-xs font-medium uppercase tracking-wide text-sidebar-foreground/55 hover:text-sidebar-foreground transition-colors"
                 >
                     <span>Channels</span>
                     <ChevronIcon open={channelsOpen} />
@@ -154,7 +155,7 @@ export function Sidebar({ onNavClick }: SidebarProps) {
                         <Link
                             href="/channels/general"
                             onClick={onNavClick}
-                            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm text-stone-600 hover:bg-stone-100 transition-colors"
+                            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
                         >
                             <HashIcon /> General
                         </Link>
@@ -166,13 +167,13 @@ export function Sidebar({ onNavClick }: SidebarProps) {
             <div className="mt-1">
                 <button
                     onClick={() => setDmOpen((v) => !v)}
-                    className="w-full flex items-center justify-between px-4 py-1.5 text-xs font-medium uppercase tracking-wide text-stone-400 hover:text-stone-500 transition-colors"
+                    className="w-full flex items-center justify-between px-4 py-1.5 text-xs font-medium uppercase tracking-wide text-sidebar-foreground/55 hover:text-sidebar-foreground transition-colors"
                 >
                     <span>Direct Messages</span>
                     <ChevronIcon open={dmOpen} />
                 </button>
                 {dmOpen && (
-                    <p className="px-5 pb-2 text-xs text-stone-400 italic">No conversations yet</p>
+                    <p className="px-5 pb-2 text-xs text-sidebar-foreground/55 italic">No conversations yet</p>
                 )}
             </div>
 
@@ -180,27 +181,21 @@ export function Sidebar({ onNavClick }: SidebarProps) {
             <div className="mt-1">
                 <button
                     onClick={() => setFoldersOpen((v) => !v)}
-                    className="w-full flex items-center justify-between px-4 py-1.5 text-xs font-medium uppercase tracking-wide text-stone-400 hover:text-stone-500 transition-colors"
+                    className="w-full flex items-center justify-between px-4 py-1.5 text-xs font-medium uppercase tracking-wide text-sidebar-foreground/55 hover:text-sidebar-foreground transition-colors"
                 >
                     <span>Folders</span>
                     <ChevronIcon open={foldersOpen} />
                 </button>
                 {foldersOpen && (
-                    <p className="px-5 pb-2 text-xs text-stone-400 italic">No folders yet</p>
+                    <p className="px-5 pb-2 text-xs text-sidebar-foreground/55 italic">No folders yet</p>
                 )}
             </div>
 
             <div className="flex-1" />
 
-            {/* Plan usage */}
-            <div className="px-3 py-4 border-t border-stone-100">
-                <div className="bg-stone-50 rounded-lg px-3 py-2 border border-stone-200">
-                    <p className="text-xs font-medium text-stone-700">Basic Plan</p>
-                    <div className="mt-1 h-1.5 w-full rounded-lg bg-stone-200 overflow-hidden">
-                        <div className="h-full bg-primary/60 rounded-lg" style={{ width: "0%" }} />
-                    </div>
-                    <p className="mt-1 text-xs text-stone-400">0 of 300 monthly mins used</p>
-                </div>
+            {/* Theme */}
+            <div className="px-3 py-3 border-t border-sidebar-border">
+                <ThemeToggle />
             </div>
         </aside>
     );

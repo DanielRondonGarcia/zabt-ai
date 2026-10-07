@@ -13,7 +13,7 @@ export function AppShell({ children }: AppShellProps) {
     const [sidebarOpen, setSidebarOpen] = useState(false);
 
     return (
-        <div className="flex h-screen overflow-hidden bg-stone-50">
+        <div className="flex h-screen overflow-hidden bg-background text-foreground">
             {/* Mobile backdrop */}
             {sidebarOpen && (
                 <div
@@ -25,7 +25,7 @@ export function AppShell({ children }: AppShellProps) {
             {/* Sidebar — fixed on mobile, static on md+ */}
             <div
                 className={`
-          fixed inset-y-0 left-0 z-50 transition-transform duration-200 ease-in-out
+          fixed inset-y-0 left-0 z-50 transition-transform duration-200 ease-in-out motion-reduce:transition-none
           md:relative md:translate-x-0 md:z-auto
           ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}
         `}
@@ -36,17 +36,17 @@ export function AppShell({ children }: AppShellProps) {
             {/* Main content */}
             <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
                 {/* Mobile top bar */}
-                <header className="flex items-center gap-3 px-4 py-3 bg-white border-b border-stone-200 md:hidden">
+                <header className="flex items-center gap-3 px-4 py-3 bg-background border-b border-border md:hidden">
                     <button
                         onClick={() => setSidebarOpen(true)}
-                        className="p-1.5 rounded-lg text-stone-500 hover:bg-stone-100 transition-colors"
+                        className="p-1.5 rounded-lg text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         aria-label="Open menu"
                     >
                         <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
                             <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
                         </svg>
                     </button>
-                    <span className="text-sm font-bold text-stone-900">Zabt AI</span>
+                    <span className="text-sm font-bold text-foreground">Zabt AI</span>
                 </header>
 
                 {/* Page content */}

@@ -57,6 +57,7 @@
 }
 
 :root {
+  color-scheme: light;
   --background: oklch(0.985 0.001 106.423);
   --foreground: oklch(0.147 0.004 49.25);
   --card: oklch(0.985 0.001 106.423);
@@ -93,6 +94,7 @@
 }
 
 .dark {
+  color-scheme: dark;
   --background: oklch(0.147 0.004 49.25);
   --foreground: oklch(0.985 0.001 106.423);
   --card: oklch(0.216 0.006 56.043);
@@ -135,6 +137,167 @@
     @apply bg-background text-foreground;
   }
   html {
-    @apply font-sans;
+    @apply bg-background font-sans;
   }
+}
+
+/*
+ * Legacy dashboard utilities are kept for now so existing screens can adopt
+ * the semantic palette without a broad, risky class-by-class rewrite.
+ * Status colors intentionally remain outside this compatibility layer.
+ */
+.dark .bg-white {
+  background-color: var(--card);
+}
+
+.dark .bg-stone-50 {
+  background-color: var(--background);
+}
+
+.dark .bg-stone-50\/60 {
+  background-color: color-mix(in oklab, var(--muted) 60%, transparent);
+}
+
+.dark .bg-stone-100 {
+  background-color: var(--muted);
+}
+
+.dark .bg-stone-200 {
+  background-color: var(--border);
+}
+
+.dark .text-stone-900,
+.dark .text-stone-800,
+.dark .text-stone-700 {
+  color: var(--foreground);
+}
+
+.dark .text-stone-600,
+.dark .text-stone-500,
+.dark .text-stone-400,
+.dark .text-stone-300 {
+  color: var(--muted-foreground);
+}
+
+.dark .border-stone-50,
+.dark .border-stone-100,
+.dark .border-stone-200 {
+  border-color: var(--border);
+}
+
+.dark .hover\:bg-stone-50:hover,
+.dark .hover\:bg-stone-100:hover,
+.dark .active\:bg-stone-100:active {
+  background-color: var(--accent);
+}
+
+.dark .hover\:text-stone-500:hover,
+.dark .hover\:text-stone-600:hover,
+.dark .hover\:text-stone-700:hover,
+.dark .hover\:text-stone-900:hover {
+  color: var(--accent-foreground);
+}
+
+.dark .placeholder-stone-400::placeholder,
+.dark .placeholder-stone-500::placeholder {
+  color: var(--muted-foreground);
+}
+
+.dark .disabled\:bg-stone-100:disabled,
+.dark .disabled\:bg-stone-200:disabled {
+  background-color: var(--muted);
+}
+
+.dark .disabled\:text-stone-400:disabled {
+  color: var(--muted-foreground);
+}
+
+.dark .focus\:border-stone-400:focus,
+.dark .focus\:border-stone-500:focus {
+  border-color: var(--ring);
+}
+
+/*
+ * Tailwind Typography emits fixed prose-stone colors and explicit prose
+ * descendant utilities can be more specific than the shared text mappings.
+ * Keep this block scoped to dark prose content so status accents elsewhere
+ * remain unchanged.
+ */
+.dark .prose {
+  --tw-prose-body: var(--foreground);
+  --tw-prose-headings: var(--foreground);
+  --tw-prose-lead: var(--muted-foreground);
+  --tw-prose-links: var(--primary);
+  --tw-prose-bold: var(--foreground);
+  --tw-prose-counters: var(--muted-foreground);
+  --tw-prose-bullets: var(--muted-foreground);
+  --tw-prose-hr: var(--border);
+  --tw-prose-quotes: var(--foreground);
+  --tw-prose-quote-borders: var(--border);
+  --tw-prose-captions: var(--muted-foreground);
+  --tw-prose-kbd: var(--foreground);
+  --tw-prose-kbd-shadows: var(--border);
+  --tw-prose-code: var(--foreground);
+  --tw-prose-pre-code: var(--foreground);
+  --tw-prose-pre-bg: var(--muted);
+  --tw-prose-th-borders: var(--border);
+  --tw-prose-td-borders: var(--border);
+}
+
+.dark .prose :is(h1, h2, h3, h4, h5, h6, p, li, th, td, strong, b, em, i, del):not(
+    :where([class~="not-prose"], [class~="not-prose"] *)
+  ) {
+  color: var(--foreground);
+}
+
+.dark .prose a:not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+  color: var(--primary);
+}
+
+.dark .prose :not(:where(pre code, [class~="not-prose"] code, [class~="not-prose"] *)) > code {
+  background-color: var(--muted);
+  color: var(--foreground);
+}
+
+.dark .prose pre {
+  overflow-x: auto;
+  background-color: var(--muted);
+  color: var(--foreground);
+}
+
+.dark .prose pre code {
+  background-color: transparent;
+  color: inherit;
+}
+
+.dark .prose :is(ol, ul) > li::before,
+.dark .prose ol > li::marker {
+  color: var(--muted-foreground);
+}
+
+.dark .prose ul > li::marker {
+  color: var(--muted-foreground);
+}
+
+.dark .prose blockquote {
+  border-left-color: var(--border);
+  color: var(--foreground);
+}
+
+.dark .prose hr {
+  border-color: var(--border);
+}
+
+.dark .prose :is(figcaption, caption) {
+  color: var(--muted-foreground);
+}
+
+.dark .prose thead,
+.dark .prose th {
+  border-color: var(--border);
+}
+
+.dark .prose tbody tr,
+.dark .prose td {
+  border-color: var(--border);
 }
