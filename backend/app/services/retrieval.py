@@ -57,13 +57,12 @@ class GroupRetrievalService:
             )
         except HTTPException:
             raise
-        except Exception:
-            logger.exception(
-                "group retrieval unavailable group_id=%s user_id=%s kinds=%s limit=%s",
+        except Exception as exc:
+            logger.warning(
+                "group retrieval unavailable group_id=%s user_id=%s exception_type=%s",
                 group_id,
                 user_id,
-                kinds,
-                limit,
+                type(exc).__name__,
             )
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

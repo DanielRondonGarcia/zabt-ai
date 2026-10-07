@@ -2,9 +2,10 @@
 # Copyright (C) 2025-2026 Afeef Janjua
 from typing import List, Optional
 from fastapi import HTTPException, status
+from sqlalchemy import func
 from sqlmodel import Session, select
 from app.db.engine import engine
-from app.models import Group, User
+from app.models import Group, Meeting, User
 from app.services.base import BaseService
 
 
@@ -13,6 +14,21 @@ class GroupService(BaseService):
         with Session(engine) as session:
             statement = select(Group).where(Group.owner_id == user_id)
             return list(session.exec(statement).all())
+
+    def list_for_user_with_meeting_counts(
+        self, user_id: int
+    ) -> list[tuple[Group, int]]:
+        """Return owner groups and their meeting counts in one read query."""
+
+        with Session(engine) as session:
+            statement = (
+                select(Group, func.count(Meeting.id))
+                .outerjoin(Meeting, Meeting.group_id == Group.id)
+                .where(Group.owner_id == user_id)
+                .group_by(Group.id)
+                .order_by(Group.created_at.asc(), Group.id.asc())
+            )
+            return [(group, int(count)) for group, count in session.exec(statement).all()]
 
     def get_accessible(self, group_id: int, user_id: int) -> Group:
         with Session(engine) as session:

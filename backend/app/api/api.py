@@ -18,6 +18,7 @@ from app.api.v1.endpoints import (
     users,
     webhooks,
     billing,
+    mcp,
 )
 
 api_router = APIRouter()
@@ -37,3 +38,4 @@ api_router.include_router(highlights.router, tags=["highlights"])
 api_router.include_router(devices.router, prefix="/devices", tags=["devices"])
 api_router.include_router(uploads.router, tags=["uploads"])
 api_router.include_router(languages.router, tags=["languages"])
+api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])

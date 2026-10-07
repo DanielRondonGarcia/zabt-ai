@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.core.logging import init_sentry, init_logfire
 from app.middleware.audit import AuditMiddleware
 from app.db.engine import create_db_and_tables
+from app.mcp_server import mcp_http_app
 
 init_sentry()
 init_logfire(service_name="zabt-api")
@@ -16,9 +17,15 @@ async def lifespan(app: FastAPI):
     create_db_and_tables()
     from app.services.template_seed import seed_built_in_templates
     seed_built_in_templates()
-    yield
-    from app.services.analytics import shutdown as analytics_shutdown
-    analytics_shutdown()
+    try:
+        # Mounted Starlette applications do not receive lifespan events from
+        # FastAPI automatically, so explicitly keep the MCP session manager in
+        # the existing application lifecycle.
+        async with mcp_http_app.router.lifespan_context(mcp_http_app):
+            yield
+    finally:
+        from app.services.analytics import shutdown as analytics_shutdown
+        analytics_shutdown()
 
 app = FastAPI(
     title=settings.PROJECT_NAME,
@@ -57,6 +64,10 @@ if settings.LOGFIRE_TOKEN:
 
 from app.api.api import api_router
 app.include_router(api_router, prefix=settings.API_V1_STR)
+# Management routes are registered above this mount, so /mcp/tokens and
+# /mcp/status remain regular authenticated API endpoints while the mount owns
+# the Streamable HTTP root at /mcp.
+app.mount(settings.API_V1_STR, mcp_http_app)
 
 @app.get("/")
 async def root():

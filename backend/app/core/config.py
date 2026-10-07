@@ -85,6 +85,16 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Zabt"
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api/v1"
+    # URL-shaped SDK auth setting used by the custom bearer verifier. This first
+    # version uses user-managed bearer tokens and does not expose OAuth metadata.
+    # Deployments should set this to their externally reachable MCP URL.
+    MCP_PUBLIC_URL: str = "http://localhost:8000/api/v1/mcp"
+    # Comma-separated MCP transport allowlists. Empty values use safe local
+    # defaults in development; production deployments must set their topology
+    # explicitly and may not use wildcards.
+    MCP_ALLOWED_HOSTS: str = ""
+    MCP_ALLOWED_ORIGINS: str = ""
+    MCP_RESPONSE_MAX_CHARS: int = Field(default=12_000, ge=1_000, le=100_000)
 
     POSTGRES_USER: str = "app"
     POSTGRES_PASSWORD: str = "app"
@@ -226,6 +236,43 @@ class Settings(BaseSettings):
             raise ValueError("AUTH_COOKIE_SECURE must be true when AUTH_COOKIE_SAMESITE=none")
         if self.AUTH_ENVIRONMENT == "production" and not self.AUTH_COOKIE_SECURE:
             raise ValueError("AUTH_COOKIE_SECURE must be true when AUTH_ENVIRONMENT=production")
+        return self
+
+    @model_validator(mode="after")
+    def _validate_mcp_transport_settings(self) -> "Settings":
+        """Reject malformed MCP allowlists and production wildcards."""
+
+        for field_name in ("MCP_ALLOWED_HOSTS", "MCP_ALLOWED_ORIGINS"):
+            raw_value = getattr(self, field_name)
+            if "\r" in raw_value or "\n" in raw_value:
+                raise ValueError(f"{field_name} must not contain line breaks")
+
+            entries = [entry.strip() for entry in raw_value.split(",") if entry.strip()]
+            if any(any(character.isspace() for character in entry) for entry in entries):
+                raise ValueError(f"{field_name} entries must not contain whitespace")
+            if self.AUTH_ENVIRONMENT == "production" and any("*" in entry for entry in entries):
+                raise ValueError(f"{field_name} must not contain wildcards in production")
+
+            if field_name == "MCP_ALLOWED_HOSTS":
+                if any("/" in entry for entry in entries):
+                    raise ValueError("MCP_ALLOWED_HOSTS entries must be host values")
+                continue
+
+            for entry in entries:
+                parsed = urlsplit(entry)
+                if (
+                    parsed.scheme not in {"http", "https"}
+                    or not parsed.netloc
+                    or parsed.username is not None
+                    or parsed.password is not None
+                    or parsed.path not in {"", "/"}
+                    or parsed.query
+                    or parsed.fragment
+                ):
+                    raise ValueError(
+                        "MCP_ALLOWED_ORIGINS entries must be http(s) origins"
+                    )
+
         return self
 
     @model_validator(mode="after")

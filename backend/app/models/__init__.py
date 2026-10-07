@@ -97,6 +97,8 @@ from app.models.ai_chat import (
     AIChatSourceRead,
 )
 
+from app.models.mcp_token import MCPToken
+
 __all__ = [
     # base
     "TranscriptionType",
@@ -170,4 +172,6 @@ __all__ = [
     "AIChatMessage",
     "AIChatMessageRead",
     "AIChatSourceRead",
+    # MCP
+    "MCPToken",
 ]

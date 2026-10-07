@@ -47,6 +47,33 @@ class MeetingService(BaseService):
             statement = select(Meeting).where(Meeting.id == meeting_id).options(selectinload(Meeting.segments))
             return session.exec(statement).first()
 
+    def get_meeting_for_owner(
+        self, meeting_id: int, owner_id: int
+    ) -> Optional[Meeting]:
+        """Authorize by both ids before loading the full meeting and segments."""
+
+        with Session(engine) as session:
+            authorized = session.exec(
+                select(Meeting.id)
+                .where(
+                    Meeting.id == meeting_id,
+                    Meeting.owner_id == owner_id,
+                )
+                .limit(1)
+            ).first()
+            if authorized is None:
+                return None
+
+            statement = (
+                select(Meeting)
+                .where(
+                    Meeting.id == meeting_id,
+                    Meeting.owner_id == owner_id,
+                )
+                .options(selectinload(Meeting.segments))
+            )
+            return session.exec(statement).first()
+
     def get_meetings(self, owner_id: int, skip: int = 0, limit: int = 100) -> List[Meeting]:
         """List meetings without heavy text columns. summary_text is truncated to 300 chars."""
         with Session(engine) as session:
@@ -84,6 +111,34 @@ class MeetingService(BaseService):
                 .limit(limit)
             )
             return session.exec(statement).all()
+
+    def get_group_meetings(self, group_id: int, owner_id: int, limit: int = 100):
+        """Return bounded meeting metadata for an owner-scoped group."""
+
+        with Session(engine) as session:
+            statement = (
+                select(
+                    Meeting.id,
+                    Meeting.title,
+                    Meeting.description,
+                    Meeting.duration_seconds,
+                    Meeting.owner_id,
+                    Meeting.group_id,
+                    Meeting.created_at,
+                    Meeting.status,
+                    Meeting.sub_status,
+                    func.substr(Meeting.summary_text, 1, 300).label("summary_text"),
+                )
+                .where(
+                    Meeting.owner_id == owner_id,
+                    Meeting.group_id == group_id,
+                )
+                .order_by(Meeting.created_at.desc(), Meeting.id.desc())
+                .limit(limit)
+            )
+            return list(session.exec(statement).all())
+
+    list_for_group = get_group_meetings
 
     def update_status(self, meeting_id: int, status: str) -> Optional[Meeting]:
         meeting = self.get(Meeting, meeting_id)
