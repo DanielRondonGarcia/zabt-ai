@@ -10,6 +10,22 @@ and notes which are required. Values marked **REQUIRED** must be set for a worki
 |----------|---------|-------|
 | `COMPOSE_PROFILES` | `local` | `local` = bundled db+minio+gpu+web. Add `bot`/`vision` for add-ons. Empty for the cloud split. |
 
+## Container memory limits
+
+The base Compose file applies hard per-service memory caps. Override only the services that need
+more room in `.env`; values use Docker memory syntax such as `m` or `g`. These are protective caps.
+The default `large-v3` and pyannote workload may need a smaller model or a higher explicit override
+if it is OOM-killed.
+
+| Variable | Default | Service |
+|----------|---------|---------|
+| `ZABT_MEMORY_LIMIT_REDIS` / `ZABT_MEMORY_LIMIT_API` / `ZABT_MEMORY_LIMIT_WORKER` / `ZABT_MEMORY_LIMIT_BEAT` | `256m` / `768m` / `1g` / `256m` | Always-on broker and backend processes. |
+| `ZABT_MEMORY_LIMIT_DB` / `ZABT_MEMORY_LIMIT_MINIO` / `ZABT_MEMORY_LIMIT_MINIO_INIT` | `768m` / `768m` / `128m` | Local PostgreSQL and object storage services. |
+| `ZABT_MEMORY_LIMIT_WORKER_GPU` | `4g` | Local GPU/CPU transcription worker protective cap; use a smaller model or a higher explicit override if it is OOM-killed. |
+| `ZABT_MEMORY_LIMIT_WEB` / `ZABT_MEMORY_LIMIT_QDRANT` | `512m` / `512m` | Local web and vector-store services. |
+| `ZABT_MEMORY_LIMIT_WORKER_BOT` | `3g` | Optional browser bot; includes headroom for its `2gb` shared-memory mount. |
+| `ZABT_MEMORY_LIMIT_VISION_WORKER` | `1g` | Optional visual breakdown worker. |
+
 ### Local Actsis without a GPU
 
 The base Compose file keeps generic transcription and recovery fallbacks for the local GPU,

@@ -16,18 +16,22 @@
 #
 # Services with no `profiles:` always run (redis, api, worker, beat). Services tagged
 # `profiles: [local]` only run when COMPOSE_PROFILES includes "local" (the default).
+# Each service has a hard memory cap. Override individual caps in `.env` with the
+# matching `ZABT_MEMORY_LIMIT_*` variable when a workload needs more room.
 
 services:
   # ---- Always-on core ----
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_REDIS:-256m}
     volumes:
       - redis_data:/data
 
   api:
     image: zabt-api:latest
     restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_API:-768m}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -173,6 +177,7 @@ services:
   worker:
     image: zabt-worker:latest
     restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_WORKER:-1g}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -296,6 +301,7 @@ services:
   beat:
     image: zabt-worker:latest
     restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_BEAT:-256m}
     build:
       context: ./backend
       dockerfile: Dockerfile
@@ -340,6 +346,7 @@ services:
   db:
     image: postgres:16-alpine
     restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_DB:-768m}
     profiles: [local]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-app}
@@ -360,6 +367,7 @@ services:
   minio:
     image: minio/minio
     restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_MINIO:-768m}
     profiles: [local]
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
@@ -381,6 +389,7 @@ services:
     depends_on:
       - minio
     restart: "no"
+    mem_limit: ${ZABT_MEMORY_LIMIT_MINIO_INIT:-128m}
     entrypoint: >
       /bin/sh -c "
       sleep 5;
@@ -396,6 +405,9 @@ services:
   worker-gpu:
     image: zabt-gpu-worker:latest
     restart: unless-stopped
+    # Protective cap for local GPU memory. The default large-v3 + pyannote workload
+    # may need a smaller model or a higher explicit override if it is OOM-killed.
+    mem_limit: ${ZABT_MEMORY_LIMIT_WORKER_GPU:-4g}
     profiles: [local]
     build:
       context: ./zabt-gpu-worker
@@ -427,6 +439,7 @@ services:
   web:
     image: zabt-web:latest
     restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_WEB:-512m}
     profiles: [local]
     build:
       context: .
@@ -455,6 +468,7 @@ services:
   worker-bot:
     image: zabt-bot-worker:latest
     restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_WORKER_BOT:-3g}
     profiles: [bot]
     shm_size: "2gb"
     build:
@@ -487,6 +501,7 @@ services:
   qdrant:
     image: qdrant/qdrant:latest
     restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_QDRANT:-512m}
     profiles: [local]
     ports:
       - "6333:6333"
@@ -501,6 +516,7 @@ services:
   zabt-vision-worker:
     image: zabt-vision-worker:latest
     restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_VISION_WORKER:-1g}
     profiles: [vision]
     build:
       context: ./zabt-vision-worker
