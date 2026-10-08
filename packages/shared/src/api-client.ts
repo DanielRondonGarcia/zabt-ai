@@ -21,6 +21,18 @@ export function createApiClient(config: ApiClientConfig): AxiosInstance {
     headers: { "Content-Type": "application/json" },
     ...config.axiosConfig,
   });
+  let refreshPromise: Promise<boolean> | null = null;
+
+  const refreshAuthTokenOnce = (): Promise<boolean> => {
+    if (!refreshPromise) {
+      refreshPromise = Promise.resolve()
+        .then(() => config.refreshAuthToken!())
+        .finally(() => {
+          refreshPromise = null;
+        });
+    }
+    return refreshPromise;
+  };
 
   client.interceptors.request.use(async (cfg) => {
     const token = await config.getAuthToken();
@@ -40,7 +52,7 @@ export function createApiClient(config: ApiClientConfig): AxiosInstance {
         if (request && config.refreshAuthToken && !request._authRetry) {
           request._authRetry = true;
           try {
-            if (await config.refreshAuthToken()) {
+            if (await refreshAuthTokenOnce()) {
               return client(request);
             }
           } catch {
