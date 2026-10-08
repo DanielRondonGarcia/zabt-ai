@@ -599,22 +599,24 @@ export default function IntegrationsPage() {
         <p className="mb-4 text-sm text-muted-foreground">
           Connect delegated Microsoft Graph separately to sync Calendar events and send email from Zabt.
         </p>
-        <div className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-3 text-sm text-muted-foreground">
-          <p>
-            Graph OAuth readiness: {microsoftStatus?.graph_configured ? "Configured" : "Not configured"}
-          </p>
-          <p>
-            Token storage: {microsoftStatus?.token_storage_configured ? "Configured" : "Not configured"}
-          </p>
-          <p className="mt-2">
-            Graph uses deployment-managed <code className="font-mono text-foreground">MICROSOFT_CLIENT_ID</code>,{" "}
-            <code className="font-mono text-foreground">MICROSOFT_CLIENT_SECRET</code>,{" "}
-            <code className="font-mono text-foreground">MICROSOFT_TENANT_ID</code>,{" "}
-            <code className="font-mono text-foreground">MICROSOFT_REDIRECT_URI</code>, and{" "}
-            <code className="font-mono text-foreground">TOKEN_ENCRYPTION_KEY</code>. OIDC above never needs a client
-            secret, and these Graph settings do not control OIDC sign-in.
-          </p>
-        </div>
+        {canManage && (
+          <div className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-3 text-sm text-muted-foreground">
+            <p>
+              Graph OAuth readiness: {microsoftStatus?.graph_configured ? "Configured" : "Not configured"}
+            </p>
+            <p>
+              Token storage: {microsoftStatus?.token_storage_configured ? "Configured" : "Not configured"}
+            </p>
+            <p className="mt-2">
+              Graph uses deployment-managed <code className="font-mono text-foreground">MICROSOFT_CLIENT_ID</code>,{" "}
+              <code className="font-mono text-foreground">MICROSOFT_CLIENT_SECRET</code>,{" "}
+              <code className="font-mono text-foreground">MICROSOFT_TENANT_ID</code>,{" "}
+              <code className="font-mono text-foreground">MICROSOFT_REDIRECT_URI</code>, and{" "}
+              <code className="font-mono text-foreground">TOKEN_ENCRYPTION_KEY</code>. OIDC above never needs a client
+              secret, and these Graph settings do not control OIDC sign-in.
+            </p>
+          </div>
+        )}
         {microsoftGraphErrorMessage && (
           <p
             className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-foreground"
