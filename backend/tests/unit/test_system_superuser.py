@@ -296,9 +296,9 @@ class _PostgresBootstrapSession:
     def get_bind(self):
         return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
 
-    def exec(self, statement, params=None):
+    def exec(self, statement):
         if "pg_advisory_xact_lock" in str(statement):
-            self.advisory_locks.append(params)
+            self.advisory_locks.append(statement.compile().params)
         return _EmptyResult()
 
     def add(self, model):

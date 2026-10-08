@@ -50,10 +50,10 @@ def _authentication_policy_lock(db: Session) -> Iterator[None]:
     if dialect_name == "postgresql":
         # Transaction-scoped advisory locks are released by commit/rollback;
         # all application workers therefore serialize the bootstrap check.
-        db.exec(
-            text("SELECT pg_advisory_xact_lock(:lock_key)"),
-            {"lock_key": _AUTHENTICATION_POLICY_ADVISORY_LOCK_KEY},
+        statement = text("SELECT pg_advisory_xact_lock(:lock_key)").bindparams(
+            lock_key=_AUTHENTICATION_POLICY_ADVISORY_LOCK_KEY
         )
+        db.exec(statement)
         yield
         return
 

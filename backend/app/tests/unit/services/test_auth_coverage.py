@@ -74,9 +74,9 @@ class FakePostgresSession(FakeSession):
     def get_bind(self):
         return SimpleNamespace(dialect=SimpleNamespace(name="postgresql"))
 
-    def exec(self, statement, params=None):
+    def exec(self, statement):
         if "pg_advisory_xact_lock" in str(statement):
-            self.advisory_lock_calls.append(params)
+            self.advisory_lock_calls.append(statement.compile().params)
             return ExecResult([])
         return super().exec(statement)
 
