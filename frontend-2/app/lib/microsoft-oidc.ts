@@ -7,6 +7,7 @@ import {
   type AuthenticationResult,
 } from "@azure/msal-browser";
 import {
+  createMicrosoftOidcChallenge,
   exchangeMicrosoftOidcToken,
   linkMicrosoftOidcToken,
   type MicrosoftOidcStatus,
@@ -100,11 +101,15 @@ export async function initializeMicrosoftOidc(
   await getMsalApplication(configuration);
 }
 
-async function loginPopup(configuration: MicrosoftOidcStatus): Promise<AuthenticationResult> {
+async function loginPopup(
+  configuration: MicrosoftOidcStatus,
+  nonce: string,
+): Promise<AuthenticationResult> {
   const application = await getMsalApplication(configuration);
   return application.loginPopup({
     scopes: MICROSOFT_OIDC_SCOPES,
     redirectUri: configuration.redirect_uri ?? undefined,
+    nonce,
   });
 }
 
@@ -112,20 +117,22 @@ async function loginPopup(configuration: MicrosoftOidcStatus): Promise<Authentic
 export async function signInWithMicrosoft(
   configuration: MicrosoftOidcStatus,
 ): Promise<void> {
-  const result = await loginPopup(configuration);
+  const challenge = await createMicrosoftOidcChallenge("login", "web");
+  const result = await loginPopup(configuration, challenge.nonce);
   if (!result.idToken) {
     throw new Error("Microsoft sign-in did not return an ID token");
   }
-  await exchangeMicrosoftOidcToken(result.idToken);
+  await exchangeMicrosoftOidcToken(result.idToken, challenge.challenge_id);
 }
 
 /** Link the selected Microsoft identity without changing the current Zabt session. */
 export async function linkMicrosoftAccount(
   configuration: MicrosoftOidcStatus,
 ): Promise<void> {
-  const result = await loginPopup(configuration);
+  const challenge = await createMicrosoftOidcChallenge("link", "web");
+  const result = await loginPopup(configuration, challenge.nonce);
   if (!result.idToken) {
     throw new Error("Microsoft linking did not return an ID token");
   }
-  await linkMicrosoftOidcToken(result.idToken);
+  await linkMicrosoftOidcToken(result.idToken, challenge.challenge_id);
 }

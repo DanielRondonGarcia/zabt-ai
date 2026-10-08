@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025-2026 Afeef Janjua
-/** Local token authentication for the Expo client. */
+/** Token authentication for the Expo client. */
 
 import axios from "axios";
 import { useEffect, useState } from "react";
@@ -28,6 +28,29 @@ export type LocalSession = Pick<
   "access_token" | "refresh_token" | "token_type" | "expires_in"
 >;
 
+export type AuthenticationMode = "local" | "microsoft_oidc";
+
+export interface AuthenticationModeResponse {
+  mode: AuthenticationMode;
+  oidc_configured: boolean;
+}
+
+export interface MicrosoftOidcStatus {
+  configured: boolean;
+  client_id: string | null;
+  tenant: string | null;
+  redirect_uri: string | null;
+  scopes: string[];
+  enabled: boolean;
+  graph_configured: boolean;
+  token_storage_configured: boolean;
+}
+
+export interface MicrosoftOidcChallenge {
+  challenge_id: string;
+  nonce: string;
+}
+
 async function persistTokenResponse(response: AuthToken): Promise<LocalSession> {
   await saveTokens(response.access_token, response.refresh_token);
   return {
@@ -38,10 +61,40 @@ async function persistTokenResponse(response: AuthToken): Promise<LocalSession> 
   };
 }
 
+export async function getAuthenticationMode(): Promise<AuthenticationModeResponse> {
+  const { data } = await authClient.get<AuthenticationModeResponse>("/auth/mode");
+  return data;
+}
+
+export async function getMicrosoftOidcStatus(): Promise<MicrosoftOidcStatus> {
+  const { data } = await authClient.get<MicrosoftOidcStatus>("/auth/microsoft/status");
+  return data;
+}
+
+export async function createMicrosoftOidcChallenge(): Promise<MicrosoftOidcChallenge> {
+  const { data } = await authClient.post<MicrosoftOidcChallenge>(
+    "/auth/microsoft/oidc/challenge",
+    { purpose: "login", client: "mobile" },
+  );
+  return data;
+}
+
 export async function signIn(email: string, password: string): Promise<LocalSession> {
   const { data } = await authClient.post<AuthToken>("/auth/login", {
     email,
     password,
+    client: "mobile",
+  });
+  return persistTokenResponse(data);
+}
+
+export async function signInWithMicrosoftIdToken(
+  idToken: string,
+  challengeId: string,
+): Promise<LocalSession> {
+  const { data } = await authClient.post<AuthToken>("/auth/microsoft/oidc/exchange", {
+    id_token: idToken,
+    challenge_id: challengeId,
     client: "mobile",
   });
   return persistTokenResponse(data);

@@ -122,6 +122,18 @@ export interface LocalAuthResponse {
   user: User;
 }
 
+export type AuthenticationMode = "local" | "microsoft_oidc";
+
+export interface AuthenticationModeResponse {
+  mode: AuthenticationMode;
+  oidc_configured: boolean;
+}
+
+export interface AuthenticationModeConfiguration extends AuthenticationModeResponse {
+  unlinked_user_count: number;
+  unlinked_passwordless_user_count: number;
+}
+
 export const loginWithRememberMe = async (
   email: string,
   password: string,
@@ -151,6 +163,30 @@ export const login = async (email: string, password: string): Promise<void> => {
   await loginWithRememberMe(email, password, false);
 };
 
+export const loginSuperuser = async (email: string, password: string): Promise<void> => {
+  await authClient.post<LocalAuthResponse>("/auth/superuser/login", { email, password });
+};
+
+export const getAuthenticationMode = async (): Promise<AuthenticationModeResponse> => {
+  const { data } = await authClient.get<AuthenticationModeResponse>("/auth/mode");
+  return data;
+};
+
+export const getAuthenticationModeConfiguration = async (): Promise<AuthenticationModeConfiguration> => {
+  const { data } = await apiClient.get<AuthenticationModeConfiguration>("/auth/mode/config");
+  return data;
+};
+
+export const updateAuthenticationMode = async (
+  mode: AuthenticationMode,
+): Promise<AuthenticationModeConfiguration> => {
+  const { data } = await apiClient.put<AuthenticationModeConfiguration>(
+    "/auth/mode/config",
+    { mode },
+  );
+  return data;
+};
+
 export interface MicrosoftOidcStatus {
   configured: boolean;
   client_id: string | null;
@@ -162,9 +198,15 @@ export interface MicrosoftOidcStatus {
   token_storage_configured: boolean;
 }
 
+export interface MicrosoftOidcChallenge {
+  challenge_id: string;
+  nonce: string;
+}
+
 export interface MicrosoftOidcConfiguration extends MicrosoftOidcStatus {
   can_manage: boolean;
   is_admin: boolean;
+  is_superuser: boolean;
   created_at: string | null;
   updated_at: string | null;
   updated_by: number | null;
@@ -197,15 +239,41 @@ export const updateMicrosoftOidcConfiguration = async (
   return data;
 };
 
-export const exchangeMicrosoftOidcToken = async (idToken: string): Promise<LocalAuthResponse> => {
+export const exchangeMicrosoftOidcToken = async (
+  idToken: string,
+  challengeId: string,
+  client: "web" | "mobile" = "web",
+): Promise<LocalAuthResponse> => {
   const { data } = await authClient.post<LocalAuthResponse>("/auth/microsoft/oidc/exchange", {
     id_token: idToken,
+    challenge_id: challengeId,
+    client,
   });
   return data;
 };
 
-export const linkMicrosoftOidcToken = async (idToken: string): Promise<void> => {
-  await apiClient.post("/auth/microsoft/oidc/link", { id_token: idToken });
+export const createMicrosoftOidcChallenge = async (
+  purpose: "login" | "link",
+  client: "web" | "mobile" = "web",
+): Promise<MicrosoftOidcChallenge> => {
+  const requestClient = purpose === "link" ? apiClient : authClient;
+  const { data } = await requestClient.post<MicrosoftOidcChallenge>(
+    "/auth/microsoft/oidc/challenge",
+    { purpose, client },
+  );
+  return data;
+};
+
+export const linkMicrosoftOidcToken = async (
+  idToken: string,
+  challengeId: string,
+  client: "web" | "mobile" = "web",
+): Promise<void> => {
+  await apiClient.post("/auth/microsoft/oidc/link", {
+    id_token: idToken,
+    challenge_id: challengeId,
+    client,
+  });
 };
 
 // ── Groups and AI chat ────────────────────────────────────────────────────────
@@ -304,6 +372,11 @@ export interface AskAiChatPayload {
 /** Returns the HTTP status of a failed API call, or `undefined` for network/unknown errors. */
 export const getApiErrorStatus = (error: unknown): number | undefined =>
   axios.isAxiosError(error) ? error.response?.status : undefined;
+
+export const getApiErrorMessage = (error: unknown): string | undefined =>
+  axios.isAxiosError(error) && typeof error.response?.data?.detail === "string"
+    ? error.response.data.detail
+    : undefined;
 
 export const getGroups = async (): Promise<GroupSummary[]> => {
   const { data } = await apiClient.get<GroupSummary[]>("/groups/");

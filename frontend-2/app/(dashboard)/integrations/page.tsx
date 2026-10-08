@@ -10,14 +10,22 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import {
+  getApiErrorMessage,
   getApiErrorStatus,
+  getAuthenticationMode,
+  getAuthenticationModeConfiguration,
   getCalendarEvents,
   getIntegrations,
   getMicrosoftOidcConfiguration,
+  getMicrosoftOidcStatus,
+  updateAuthenticationMode,
   updateMicrosoftOidcConfiguration,
+  type AuthenticationMode,
+  type AuthenticationModeConfiguration,
   type CalendarEventRead,
   type IntegrationRead,
   type MicrosoftOidcConfiguration,
+  type MicrosoftOidcStatus,
 } from "@/app/lib/api";
 import {
   getDefaultMicrosoftOidcRedirectUri,
@@ -33,6 +41,8 @@ import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
 
 const SUPPORTED_PROVIDERS = ["microsoft"];
+const PASSWORDLESS_UNLINKED_REMEDIATION =
+  "Passwordless active accounts require identity reconciliation or deactivation by the system superuser before switching to Microsoft OIDC.";
 const MICROSOFT_GRAPH_ERRORS: Record<string, string> = {
   cancelled: "Microsoft Graph connection was cancelled.",
   configuration: "Microsoft Graph connection is not configured for this deployment.",
@@ -52,6 +62,13 @@ export default function IntegrationsPage() {
   const [events, setEvents] = useState<CalendarEventRead[]>([]);
   const [microsoftConfiguration, setMicrosoftConfiguration] =
     useState<MicrosoftOidcConfiguration | null>(null);
+  const [microsoftStatus, setMicrosoftStatus] = useState<MicrosoftOidcStatus | null>(null);
+  const [authenticationMode, setAuthenticationMode] = useState<AuthenticationMode | null>(null);
+  const [modeConfiguration, setModeConfiguration] =
+    useState<AuthenticationModeConfiguration | null>(null);
+  const [selectedMode, setSelectedMode] = useState<AuthenticationMode>("local");
+  const [savingMode, setSavingMode] = useState(false);
+  const [modeFeedback, setModeFeedback] = useState<Feedback | null>(null);
   const [configurationLoading, setConfigurationLoading] = useState(true);
   const [configurationError, setConfigurationError] = useState(false);
   const [configurationFeedback, setConfigurationFeedback] = useState<Feedback | null>(null);
@@ -81,14 +98,26 @@ export default function IntegrationsPage() {
     setConfigurationLoading(true);
     setConfigurationError(false);
     try {
-      const configuration = await getMicrosoftOidcConfiguration();
-      setMicrosoftConfiguration(configuration);
-      setClientId(configuration.client_id ?? "");
-      setTenant(configuration.tenant ?? "");
-      setRedirectUri(configuration.redirect_uri ?? getDefaultMicrosoftOidcRedirectUri());
-      setEnabled(configuration.enabled);
-      if (configuration.configured) {
-        void initializeMicrosoftOidc(configuration).catch(() => undefined);
+      const status = await getMicrosoftOidcStatus();
+      setMicrosoftStatus(status);
+      const modeResult = await getAuthenticationMode().catch(() => null);
+      setAuthenticationMode(modeResult?.mode ?? null);
+      const modeConfig = await getAuthenticationModeConfiguration().catch(() => null);
+      setModeConfiguration(modeConfig);
+      if (modeConfig) setSelectedMode(modeConfig.mode);
+
+      if (modeConfig) {
+        const configuration = await getMicrosoftOidcConfiguration();
+        setMicrosoftConfiguration(configuration);
+        setClientId(configuration.client_id ?? "");
+        setTenant(configuration.tenant ?? "");
+        setRedirectUri(configuration.redirect_uri ?? getDefaultMicrosoftOidcRedirectUri());
+        setEnabled(configuration.enabled);
+        if (configuration.configured) {
+          void initializeMicrosoftOidc(configuration).catch(() => undefined);
+        }
+      } else {
+        setMicrosoftConfiguration(null);
       }
       return true;
     } catch {
@@ -123,8 +152,8 @@ export default function IntegrationsPage() {
     ? MICROSOFT_GRAPH_ERRORS[microsoftGraphError] ?? MICROSOFT_GRAPH_ERRORS.oauth_failed
     : null;
   const graphConnectDisabled =
-    !microsoftConfiguration?.graph_configured ||
-    !microsoftConfiguration?.token_storage_configured;
+    !microsoftStatus?.graph_configured ||
+    !microsoftStatus?.token_storage_configured;
 
   const handleSaveConfiguration = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -149,12 +178,13 @@ export default function IntegrationsPage() {
         kind: "success",
         message: "Microsoft Entra public-client configuration saved.",
       });
+      setMicrosoftStatus(saved);
     } catch (error) {
       setConfigurationFeedback({
         kind: "error",
         message:
           getApiErrorStatus(error) === 403
-            ? "Only an administrator can update Microsoft Entra configuration."
+            ? "Only the system administrator can update Microsoft Entra configuration."
             : "Microsoft Entra configuration could not be saved. Check the public values and try again.",
       });
     } finally {
@@ -176,11 +206,11 @@ export default function IntegrationsPage() {
   };
 
   const handleLinkMicrosoft = async () => {
-    if (!microsoftConfiguration?.configured) return;
+    if (!microsoftStatus?.configured || authenticationMode !== "local") return;
     setConfigurationFeedback(null);
     setLinkingMicrosoft(true);
     try {
-      await linkMicrosoftAccount(microsoftConfiguration);
+      await linkMicrosoftAccount(microsoftStatus);
       setConfigurationFeedback({
         kind: "success",
         message: "Microsoft account linked successfully.",
@@ -198,8 +228,34 @@ export default function IntegrationsPage() {
     }
   };
 
-  const oidcConfigured = microsoftConfiguration?.configured === true;
-  const canManage = microsoftConfiguration?.can_manage === true;
+  const handleSaveAuthenticationMode = async () => {
+    setModeFeedback(null);
+    setSavingMode(true);
+    try {
+      const saved = await updateAuthenticationMode(selectedMode);
+      setModeConfiguration(saved);
+      setAuthenticationMode(saved.mode);
+      setSelectedMode(saved.mode);
+      setModeFeedback({ kind: "success", message: "Authentication method saved." });
+    } catch (error) {
+      setModeFeedback({
+        kind: "error",
+        message:
+          getApiErrorStatus(error) === 409
+            ? getApiErrorMessage(error) ??
+              (modeConfiguration?.unlinked_passwordless_user_count
+                ? PASSWORDLESS_UNLINKED_REMEDIATION
+                : "Some active local accounts are not linked yet. Each affected user must sign in locally and link Microsoft from Integrations before switching.")
+            : "Authentication method could not be saved. Check Microsoft readiness and try again.",
+      });
+    } finally {
+      setSavingMode(false);
+    }
+  };
+
+  const oidcConfigured = microsoftStatus?.configured === true;
+  const canManage =
+    microsoftConfiguration?.can_manage === true || microsoftConfiguration?.is_superuser === true;
 
   return (
     <div className="max-w-3xl px-8 py-8">
@@ -210,6 +266,98 @@ export default function IntegrationsPage() {
         </p>
       </div>
 
+      {canManage && modeConfiguration && (
+        <section className="mb-10 rounded-lg border border-border bg-muted/30 p-5">
+          <h2 className="text-lg font-semibold text-foreground">Authentication method</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Choose the regular-user sign-in method for web and mobile. The system administrator always uses the separate administrator login.
+          </p>
+          <p className="mt-2 text-sm text-muted-foreground">
+            This setting governs new login and registration attempts. Existing sessions are not revoked and remain active while their access and refresh credentials are valid, until normal expiration or another revocation event.
+          </p>
+
+          <fieldset className="mt-4 space-y-3">
+            <legend className="mb-2 text-sm font-medium text-foreground">Regular-user sign-in</legend>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-background p-3 text-sm text-foreground">
+              <input
+                type="radio"
+                name="authentication-mode"
+                value="local"
+                checked={selectedMode === "local"}
+                onChange={() => setSelectedMode("local")}
+                className="mt-0.5 size-4 accent-primary"
+              />
+              <span>
+                <span className="block font-medium">Local email and password</span>
+                <span className="mt-1 block text-muted-foreground">Allow users to sign in or register with a local Zabt account.</span>
+              </span>
+            </label>
+            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-border bg-background p-3 text-sm text-foreground">
+              <input
+                type="radio"
+                name="authentication-mode"
+                value="microsoft_oidc"
+                checked={selectedMode === "microsoft_oidc"}
+                onChange={() => setSelectedMode("microsoft_oidc")}
+                disabled={!modeConfiguration.oidc_configured || modeConfiguration.unlinked_user_count > 0}
+                className="mt-0.5 size-4 accent-primary"
+              />
+              <span>
+                <span className="block font-medium">Microsoft OIDC</span>
+                <span className="mt-1 block text-muted-foreground">Use Microsoft sign-in on both web and mobile.</span>
+              </span>
+            </label>
+          </fieldset>
+
+          <div className="mt-4 rounded-lg border border-border bg-background px-3 py-3 text-sm text-muted-foreground">
+            <p>
+              Microsoft OIDC readiness: {modeConfiguration.oidc_configured ? "Configured" : "Not configured"}
+            </p>
+            <p className="mt-1">
+              Active non-superuser accounts still needing a Microsoft link: {modeConfiguration.unlinked_user_count}
+            </p>
+            <p className="mt-1">
+              Passwordless active accounts still needing a Microsoft link: {modeConfiguration.unlinked_passwordless_user_count}
+            </p>
+            {!modeConfiguration.oidc_configured && (
+              <p className="mt-2">Configure and enable Microsoft OIDC below before switching this instance to Microsoft sign-in.</p>
+            )}
+            {modeConfiguration.unlinked_user_count > 0 && (
+              <p className="mt-2">
+                {modeConfiguration.unlinked_passwordless_user_count > 0
+                  ? PASSWORDLESS_UNLINKED_REMEDIATION
+                  : "Each affected user must sign in with their local account and use “Link Microsoft account” below before the mode can be changed."}
+              </p>
+            )}
+          </div>
+
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <Button
+              type="button"
+              onClick={handleSaveAuthenticationMode}
+              loading={savingMode}
+              disabled={
+                savingMode ||
+                selectedMode === modeConfiguration.mode ||
+                (selectedMode === "microsoft_oidc" &&
+                  (!modeConfiguration.oidc_configured || modeConfiguration.unlinked_user_count > 0))
+              }
+            >
+              Save authentication method
+            </Button>
+            {modeFeedback && (
+              <p
+                className={modeFeedback.kind === "success" ? "text-sm text-foreground" : "text-sm text-destructive"}
+                role="status"
+                aria-live="polite"
+              >
+                {modeFeedback.message}
+              </p>
+            )}
+          </div>
+        </section>
+      )}
+
       <section className="mb-10 rounded-lg border border-border bg-muted/30 p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -219,7 +367,7 @@ export default function IntegrationsPage() {
               authorization code + PKCE in the browser and does not require a client secret.
             </p>
           </div>
-          {microsoftConfiguration && (
+          {(microsoftConfiguration || microsoftStatus) && (
             <Badge
               variant="outline"
               className={
@@ -250,25 +398,25 @@ export default function IntegrationsPage() {
               <div>
                 <dt className="font-medium text-foreground">Client ID</dt>
                 <dd className="mt-1 break-all font-mono text-xs text-muted-foreground">
-                  {microsoftConfiguration?.client_id || "Not configured"}
+                  {microsoftConfiguration?.client_id || microsoftStatus?.client_id || "Not configured"}
                 </dd>
               </div>
               <div>
                 <dt className="font-medium text-foreground">Tenant</dt>
                 <dd className="mt-1 break-all text-muted-foreground">
-                  {microsoftConfiguration?.tenant || "Not configured"}
+                  {microsoftConfiguration?.tenant || microsoftStatus?.tenant || "Not configured"}
                 </dd>
               </div>
               <div className="sm:col-span-2">
                 <dt className="font-medium text-foreground">Registered SPA redirect URI</dt>
                 <dd className="mt-1 break-all font-mono text-xs text-muted-foreground">
-                  {microsoftConfiguration?.redirect_uri || "Not configured"}
+                  {microsoftConfiguration?.redirect_uri || microsoftStatus?.redirect_uri || "Not configured"}
                 </dd>
               </div>
               <div>
                 <dt className="font-medium text-foreground">OIDC scopes</dt>
                 <dd className="mt-1 break-words text-muted-foreground">
-                  {microsoftConfiguration?.scopes.join(", ") || "openid, profile, email"}
+                  {microsoftConfiguration?.scopes.join(", ") || microsoftStatus?.scopes.join(", ") || "openid, profile, email"}
                 </dd>
               </div>
               <div>
@@ -352,7 +500,7 @@ export default function IntegrationsPage() {
               </form>
             ) : (
               <p className="mt-5 rounded-lg border border-border bg-background px-3 py-2 text-sm text-muted-foreground">
-                Only administrators can change the global Microsoft Entra settings. Ask an administrator to configure
+                Only the system administrator can change the global Microsoft Entra settings. Ask them to configure
                 Microsoft Entra if this instance is not ready.
               </p>
             )}
@@ -372,7 +520,7 @@ export default function IntegrationsPage() {
                 />
                 {configurationLoading ? "Rechecking…" : "Recheck configuration"}
               </Button>
-              {oidcConfigured && (
+              {oidcConfigured && authenticationMode === "local" && (
                 <Button
                   type="button"
                   variant="outline"
@@ -412,10 +560,10 @@ export default function IntegrationsPage() {
         </p>
         <div className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-3 text-sm text-muted-foreground">
           <p>
-            Graph OAuth readiness: {microsoftConfiguration?.graph_configured ? "Configured" : "Not configured"}
+            Graph OAuth readiness: {microsoftStatus?.graph_configured ? "Configured" : "Not configured"}
           </p>
           <p>
-            Token storage: {microsoftConfiguration?.token_storage_configured ? "Configured" : "Not configured"}
+            Token storage: {microsoftStatus?.token_storage_configured ? "Configured" : "Not configured"}
           </p>
           <p className="mt-2">
             Graph uses deployment-managed <code className="font-mono text-foreground">MICROSOFT_CLIENT_ID</code>,{" "}

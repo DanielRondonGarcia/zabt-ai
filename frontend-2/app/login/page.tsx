@@ -6,9 +6,11 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Eye, EyeOff, ShieldCheck } from "lucide-react";
 import {
+  getAuthenticationMode,
   getApiErrorStatus,
   getMicrosoftOidcStatus,
   login,
+  type AuthenticationModeResponse,
   type MicrosoftOidcStatus,
 } from "@/app/lib/api";
 import { initializeMicrosoftOidc, signInWithMicrosoft } from "@/app/lib/microsoft-oidc";
@@ -22,19 +24,27 @@ function LoginPageContent() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [microsoftLoading, setMicrosoftLoading] = useState(false);
+  const [authenticationMode, setAuthenticationMode] = useState<AuthenticationModeResponse | null>(null);
+  const [modeLoading, setModeLoading] = useState(true);
   const [microsoftStatus, setMicrosoftStatus] = useState<MicrosoftOidcStatus | null>(null);
   const [microsoftStatusLoading, setMicrosoftStatusLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
+    getAuthenticationMode()
+      .then((mode) => {
+        if (!cancelled) setAuthenticationMode(mode);
+      })
+      .catch(() => {
+        if (!cancelled) setAuthenticationMode(null);
+      })
+      .finally(() => {
+        if (!cancelled) setModeLoading(false);
+      });
     getMicrosoftOidcStatus()
       .then((status) => {
-        if (!cancelled) {
-          setMicrosoftStatus(status);
-          if (status.configured) {
-            void initializeMicrosoftOidc(status).catch(() => undefined);
-          }
-        }
+        if (!cancelled) setMicrosoftStatus(status);
+        if (status.configured) void initializeMicrosoftOidc(status).catch(() => undefined);
       })
       .catch(() => {
         if (!cancelled) setMicrosoftStatus(null);
@@ -49,6 +59,7 @@ function LoginPageContent() {
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
+    if (authenticationMode?.mode !== "local") return;
     setError(null);
     setLoading(true);
     try {
@@ -62,7 +73,7 @@ function LoginPageContent() {
   };
 
   const handleMicrosoftSignIn = async () => {
-    if (!microsoftStatus?.configured) return;
+    if (!oidcAvailable || !microsoftStatus) return;
     setError(null);
     setMicrosoftLoading(true);
     try {
@@ -79,7 +90,11 @@ function LoginPageContent() {
     }
   };
 
-  const microsoftConfigured = microsoftStatus?.configured === true;
+  const oidcAvailable =
+    authenticationMode?.mode === "microsoft_oidc" &&
+    authenticationMode.oidc_configured &&
+    microsoftStatus?.configured === true;
+  const regularModeReady = authenticationMode !== null && !modeLoading;
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-stone-50 px-4 dark:bg-stone-950">
@@ -90,110 +105,123 @@ function LoginPageContent() {
             Welcome back
           </h1>
           <p className="text-sm text-stone-500 dark:text-stone-400">
-            Please enter your details to sign in.
+            {authenticationMode?.mode === "microsoft_oidc"
+              ? "Sign in with your Microsoft work account."
+              : "Please enter your details to sign in."}
           </p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label
-              htmlFor="email"
-              className="mb-1 block text-sm font-medium text-stone-700 dark:text-stone-300"
-            >
-              Email address
-            </label>
-            <Input
-              id="email"
-              type="email"
-              required
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="name@company.com"
-            />
-          </div>
-
-          <div>
-            <label
-              htmlFor="password"
-              className="mb-1 block text-sm font-medium text-stone-700 dark:text-stone-300"
-            >
-              Password
-            </label>
-            <div className="relative">
-              <Input
-                id="password"
-                type={showPassword ? "text" : "password"}
-                required
-                value={password}
-                onChange={(event) => setPassword(event.target.value)}
-                className="pr-10"
-                placeholder="••••••••"
-              />
-              <button
-                type="button"
-                onClick={() => setShowPassword((value) => !value)}
-                className="absolute inset-y-0 right-0 flex items-center px-3 text-stone-400 hover:text-stone-600 dark:hover:text-stone-200"
-                aria-label={showPassword ? "Hide password" : "Show password"}
+        {modeLoading ? (
+          <p className="text-sm text-stone-500 dark:text-stone-400" role="status" aria-live="polite">
+            Loading sign-in options…
+          </p>
+        ) : !regularModeReady ? (
+          <p
+            className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-600 dark:border-stone-800 dark:bg-stone-950 dark:text-stone-300"
+            role="alert"
+          >
+            Sign-in options are temporarily unavailable. Please try again later.
+          </p>
+        ) : authenticationMode.mode === "local" ? (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label
+                htmlFor="email"
+                className="mb-1 block text-sm font-medium text-stone-700 dark:text-stone-300"
               >
-                {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
+                Email address
+              </label>
+              <Input
+                id="email"
+                name="email"
+                type="email"
+                required
+                autoComplete="email"
+                spellCheck={false}
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="name@company.com"
+              />
             </div>
-          </div>
-
-          <div className="flex justify-end">
-            <Link href="/forgot-password" className="text-sm text-primary hover:underline">
-              Forgot password?
-            </Link>
-          </div>
-
-          {error && (
-            <p
-              className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300"
-              role="alert"
-            >
-              {error}
-            </p>
-          )}
-
-          <Button type="submit" loading={loading} className="w-full">
-            Sign in
-          </Button>
-        </form>
-
-        {!microsoftStatusLoading && microsoftConfigured && (
-          <>
-            <div className="my-5 flex items-center gap-3 text-xs text-stone-400">
-              <span className="h-px flex-1 bg-stone-200 dark:bg-stone-800" />
-              <span>or</span>
-              <span className="h-px flex-1 bg-stone-200 dark:bg-stone-800" />
+            <div>
+              <label
+                htmlFor="password"
+                className="mb-1 block text-sm font-medium text-stone-700 dark:text-stone-300"
+              >
+                Password
+              </label>
+              <div className="relative">
+                <Input
+                  id="password"
+                  name="password"
+                  type={showPassword ? "text" : "password"}
+                  required
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={(event) => setPassword(event.target.value)}
+                  className="pr-10"
+                  placeholder="Your password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword((value) => !value)}
+                  className="absolute inset-y-0 right-0 flex items-center px-3 text-stone-400 hover:text-stone-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary dark:hover:text-stone-200"
+                  aria-label={showPassword ? "Hide password" : "Show password"}
+                >
+                  {showPassword ? <EyeOff size={16} aria-hidden="true" /> : <Eye size={16} aria-hidden="true" />}
+                </button>
+              </div>
             </div>
-            <Button
-              type="button"
-              variant="outline"
-              loading={microsoftLoading}
-              onClick={handleMicrosoftSignIn}
-              className="w-full"
-            >
-              <ShieldCheck size={16} aria-hidden="true" />
-              Continue with Microsoft
+            <div className="flex justify-end">
+              <Link href="/forgot-password" className="text-sm text-primary hover:underline">
+                Forgot password?
+              </Link>
+            </div>
+            {error && <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300" role="alert" aria-live="polite">{error}</p>}
+            <Button type="submit" loading={loading} className="w-full">
+              Sign in
             </Button>
-          </>
+          </form>
+        ) : (
+          <div className="space-y-4">
+            {microsoftStatusLoading ? (
+              <p className="text-sm text-stone-500 dark:text-stone-400" role="status" aria-live="polite">
+                Checking Microsoft sign-in…
+              </p>
+            ) : oidcAvailable && microsoftStatus ? (
+              <>
+                {error && <p className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600 dark:border-red-900/60 dark:bg-red-950/30 dark:text-red-300" role="alert" aria-live="polite">{error}</p>}
+                <Button
+                  type="button"
+                  variant="outline"
+                  loading={microsoftLoading}
+                  onClick={handleMicrosoftSignIn}
+                  className="w-full"
+                >
+                  <ShieldCheck size={16} aria-hidden="true" />
+                  Continue with Microsoft
+                </Button>
+              </>
+            ) : (
+              <p className="rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-600 dark:border-stone-800 dark:bg-stone-950 dark:text-stone-300" role="status">
+                Microsoft sign-in is selected for this instance but is not available right now. Local sign-in remains disabled; contact the system administrator.
+              </p>
+            )}
+          </div>
         )}
 
-        {!microsoftStatusLoading && !microsoftConfigured && (
-          <p className="mt-5 rounded-lg border border-stone-200 bg-stone-50 px-3 py-2 text-sm text-stone-500 dark:border-stone-800 dark:bg-stone-950 dark:text-stone-400">
-            Microsoft sign-in is not configured for this instance. An administrator can configure it in{" "}
-            <Link href="/integrations" className="text-primary hover:underline">
-              Integrations
+        {regularModeReady && authenticationMode?.mode === "local" && (
+          <p className="mt-6 text-center text-sm text-stone-500 dark:text-stone-400">
+            Don&apos;t have an account?{" "}
+            <Link href="/register" className="text-primary hover:underline">
+              Register
             </Link>
-            .
           </p>
         )}
-
-        <p className="mt-6 text-center text-sm text-stone-500 dark:text-stone-400">
-          Don&apos;t have an account?{" "}
-          <Link href="/register" className="text-primary hover:underline">
-            Register
+        <p className="mt-6 text-center text-xs text-stone-500 dark:text-stone-400">
+          System administrator?{" "}
+          <Link href="/superuser/login" className="text-primary hover:underline">
+            Use the administrator sign-in
           </Link>
         </p>
       </div>

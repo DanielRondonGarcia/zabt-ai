@@ -2,37 +2,61 @@
 // Copyright (C) 2025-2026 Afeef Janjua
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as SecureStore from "expo-secure-store";
-
-/**
- * SecureStore is the normal mobile path. AsyncStorage is retained only as the
- * existing Expo Go/web fallback when SecureStore is unavailable.
- */
-const storage = {
-  async getItem(key: string): Promise<string | null> {
-    try {
-      return await SecureStore.getItemAsync(key);
-    } catch {
-      return AsyncStorage.getItem(key);
-    }
-  },
-  async setItem(key: string, value: string): Promise<void> {
-    try {
-      await SecureStore.setItemAsync(key, value);
-    } catch {
-      await AsyncStorage.setItem(key, value);
-    }
-  },
-  async removeItem(key: string): Promise<void> {
-    try {
-      await SecureStore.deleteItemAsync(key);
-    } catch {
-      await AsyncStorage.removeItem(key);
-    }
-  },
-};
+import { Platform } from "react-native";
 
 const ACCESS_TOKEN_KEY = "zabt.auth.access_token";
 const REFRESH_TOKEN_KEY = "zabt.auth.refresh_token";
+
+let legacyTokenCleanup: Promise<void> | undefined;
+
+/** Remove tokens written by older versions that fell back to AsyncStorage. */
+function cleanupLegacyAsyncStorageTokens(): Promise<void> {
+  legacyTokenCleanup ??= Promise.all([
+    Promise.resolve()
+      .then(() => AsyncStorage.removeItem(ACCESS_TOKEN_KEY))
+      .catch(() => undefined),
+    Promise.resolve()
+      .then(() => AsyncStorage.removeItem(REFRESH_TOKEN_KEY))
+      .catch(() => undefined),
+  ]).then(() => undefined);
+  return legacyTokenCleanup;
+}
+
+function assertNativePlatform(): void {
+  if (Platform.OS !== "ios" && Platform.OS !== "android") {
+    throw new Error(`Secure token storage is unsupported on ${Platform.OS}.`);
+  }
+}
+
+/** Web uses AsyncStorage; native tokens are stored only in SecureStore. */
+const storage = {
+  async getItem(key: string): Promise<string | null> {
+    if (Platform.OS === "web") {
+      return AsyncStorage.getItem(key);
+    }
+    assertNativePlatform();
+    await cleanupLegacyAsyncStorageTokens();
+    return SecureStore.getItemAsync(key);
+  },
+  async setItem(key: string, value: string): Promise<void> {
+    if (Platform.OS === "web") {
+      await AsyncStorage.setItem(key, value);
+      return;
+    }
+    assertNativePlatform();
+    await cleanupLegacyAsyncStorageTokens();
+    await SecureStore.setItemAsync(key, value);
+  },
+  async removeItem(key: string): Promise<void> {
+    if (Platform.OS === "web") {
+      await AsyncStorage.removeItem(key);
+      return;
+    }
+    assertNativePlatform();
+    await cleanupLegacyAsyncStorageTokens();
+    await SecureStore.deleteItemAsync(key);
+  },
+};
 
 export async function getAccessToken(): Promise<string | null> {
   return storage.getItem(ACCESS_TOKEN_KEY);
