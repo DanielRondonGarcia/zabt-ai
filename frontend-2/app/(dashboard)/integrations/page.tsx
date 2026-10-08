@@ -358,6 +358,7 @@ export default function IntegrationsPage() {
         </section>
       )}
 
+      {canManage && (
       <section className="mb-10 rounded-lg border border-border bg-muted/30 p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -552,6 +553,46 @@ export default function IntegrationsPage() {
           </>
         )}
       </section>
+      )}
+
+      {!configurationLoading && !canManage && oidcConfigured && authenticationMode === "local" && (
+        <section className="mb-10 rounded-lg border border-border bg-muted/30 p-5">
+          <h2 className="text-lg font-semibold text-foreground">Connect your Microsoft account</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Microsoft sign-in is configured for this instance, but regular-user sign-in still uses local accounts.
+            Link your Microsoft account before the administrator switches regular-user login to Microsoft OIDC.
+          </p>
+          <div className="mt-4 flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={handleLinkMicrosoft}
+              loading={linkingMicrosoft}
+              aria-busy={linkingMicrosoft}
+            >
+              <ShieldCheck className="size-4" aria-hidden="true" />
+              Link Microsoft account
+            </Button>
+          </div>
+          {configurationFeedback && (
+            <p
+              className={
+                configurationFeedback.kind === "success"
+                  ? "mt-3 text-sm text-foreground"
+                  : "mt-3 text-sm text-destructive"
+              }
+              role="status"
+              aria-live="polite"
+            >
+              {configurationFeedback.kind === "success" && (
+                <Check className="mr-1 inline size-4" aria-hidden="true" />
+              )}
+              {configurationFeedback.message}
+            </p>
+          )}
+        </section>
+      )}
 
       <section className="mb-10">
         <h2 className="mb-4 text-lg font-semibold text-foreground">Microsoft Graph connections</h2>
