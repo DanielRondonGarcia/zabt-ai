@@ -435,17 +435,17 @@ export default function MeetingDetailPage({
 
         {/* Meeting-wide status banners — rendered above tabs so they're visible regardless of active tab */}
         {isActive && (
-          <div className="bg-amber-50 border border-amber-200 rounded-lg px-5 py-4 text-sm text-amber-800 space-y-3">
+          <div className="bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/60 rounded-lg px-5 py-4 text-sm text-amber-800 dark:text-amber-200 space-y-3">
             <div>
               <div className="flex items-center gap-2 mb-1">
-                <Loader2 className="size-4 animate-spin text-amber-600" />
+                <Loader2 className="size-4 animate-spin text-amber-600 dark:text-amber-300" />
                 <p className="font-medium">
                    {meeting.status === "processing" && meeting.sub_status
                      ? STAGE_LABELS[userStage]
                     : "Processing your meeting…"}
                 </p>
               </div>
-              <p className="text-amber-700">
+              <p className="text-amber-700 dark:text-amber-300">
                 This page will update automatically. Transcription and summarization may take a few
                 minutes depending on file length.
               </p>
@@ -455,11 +455,11 @@ export default function MeetingDetailPage({
         )}
 
         {meeting.status === "failed" && (
-          <div className="bg-red-50 border border-red-200 rounded-lg px-5 py-4 text-sm text-red-800 space-y-3">
+          <div className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-800/60 rounded-lg px-5 py-4 text-sm text-red-800 dark:text-red-200 space-y-3">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="font-medium mb-1">Processing failed</p>
-                <p className="text-red-700">
+                <p className="text-red-700 dark:text-red-300">
                   {meeting.sub_status || "The AI pipeline encountered an error for this meeting. Partial results may be available below."}
                 </p>
               </div>
@@ -467,7 +467,7 @@ export default function MeetingDetailPage({
                 type="button"
                 variant="outline"
                 size="sm"
-                className="shrink-0 border-red-300 bg-white text-red-800 hover:bg-red-100 hover:text-red-900"
+                className="shrink-0 border-red-300 bg-white text-red-800 hover:bg-red-100 hover:text-red-900 dark:border-red-700/60 dark:bg-red-950/40 dark:text-red-200 dark:hover:bg-red-900/50 dark:hover:text-red-100"
                 onClick={handleReprocess}
                 disabled={isReprocessing}
               >
@@ -480,7 +480,7 @@ export default function MeetingDetailPage({
               </Button>
             </div>
             {reprocessError && (
-              <p className="rounded-lg border border-red-200 bg-white px-3 py-2 text-red-700">
+              <p className="rounded-lg border border-red-200 bg-white px-3 py-2 text-red-700 dark:border-red-800/60 dark:bg-red-950/40 dark:text-red-300">
                 {reprocessError}
               </p>
             )}

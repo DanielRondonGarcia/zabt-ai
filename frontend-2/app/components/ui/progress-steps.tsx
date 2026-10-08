@@ -29,10 +29,10 @@ export function ProgressSteps({ currentStage }: ProgressStepsProps) {
             <div className="flex flex-col items-center gap-1">
               <div
                 className={clsx(
-                  "w-6 h-6 rounded-full flex items-center justify-center text-xs font-medium transition-all",
+                  "w-6 h-6 rounded-full flex items-center justify-center text-xs font-medium transition-colors",
                   isCompleted && "bg-primary text-white",
-                  isActive && "ring-2 ring-primary bg-white text-primary",
-                  isPending && "border border-stone-200 bg-white text-stone-400"
+                  isActive && "ring-2 ring-primary bg-white text-primary dark:bg-stone-900 dark:text-primary",
+                  isPending && "border border-stone-200 bg-white text-stone-400 dark:border-stone-700/80 dark:bg-stone-900 dark:text-stone-400"
                 )}
                 aria-current={isActive ? "step" : undefined}
               >
@@ -63,7 +63,7 @@ export function ProgressSteps({ currentStage }: ProgressStepsProps) {
               <div
                 className={clsx(
                   "flex-1 h-0.5 mx-1",
-                  !isFailed && currentIdx > idx ? "bg-primary" : "bg-stone-200"
+                  !isFailed && currentIdx > idx ? "bg-primary" : "bg-stone-200 dark:bg-stone-700/80"
                 )}
               />
             )}

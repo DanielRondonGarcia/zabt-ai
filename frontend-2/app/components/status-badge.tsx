@@ -21,7 +21,7 @@ const dotColors: Record<Meeting["status"], string> = {
 const badgeColors: Record<Meeting["status"], string> = {
   pending_upload: "text-stone-500",
   queued: "text-stone-600",
-  processing: "text-amber-600",
+  processing: "text-amber-600 dark:text-amber-300",
   completed: "text-emerald-600",
   failed: "text-red-500",
 };
