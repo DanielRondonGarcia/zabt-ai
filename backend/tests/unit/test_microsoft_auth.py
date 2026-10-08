@@ -610,13 +610,19 @@ async def test_oidc_exchange_returns_bearer_tokens_for_mobile_client(
 
 
 @pytest.mark.asyncio
-async def test_oidc_exchange_does_not_authenticate_system_superuser(
+@pytest.mark.parametrize("client", ["web", "mobile"])
+async def test_oidc_exchange_authenticates_explicitly_linked_system_superuser(
     monkeypatch: pytest.MonkeyPatch,
+    client: str,
 ):
     configuration = make_configuration()
     user = make_user(is_superuser=True)
-    db = FakeDb(exec_rows=[[configuration]])
-    install_challenge(monkeypatch, client="mobile")
+    linked_identity = make_identity(user_id=user.id)
+    db = FakeDb(
+        exec_rows=[[configuration], [linked_identity]],
+        users={user.id: user},
+    )
+    install_challenge(monkeypatch, client=client)
     monkeypatch.setattr(
         auth_endpoint.auth_mode_service,
         "get_user_login_mode",
@@ -626,22 +632,40 @@ async def test_oidc_exchange_does_not_authenticate_system_superuser(
         "sub": "subject-1",
         "tid": "tenant-1",
     }))
-    monkeypatch.setattr(auth_endpoint, "resolve_or_create_user", lambda db, identity: user)
+    issued_users = []
     monkeypatch.setattr(
         auth_endpoint.auth_service,
         "issue_tokens",
-        lambda *args: pytest.fail("superuser must use local superuser login"),
+        lambda db, issued_user: issued_users.append(issued_user)
+        or auth_service.TokenBundle("access", "refresh", 900),
     )
 
-    with pytest.raises(Exception) as error:
-        await auth_endpoint.exchange_microsoft_oidc_token(
-            make_request("signed-id-token", client="mobile", origin=None),
-            Response(),
-            db,
-        )
+    response = Response()
+    result = await auth_endpoint.exchange_microsoft_oidc_token(
+        make_request(
+            "signed-id-token",
+            client=client,
+            origin=None if client == "mobile" else "http://localhost:3001",
+        ),
+        response,
+        db,
+    )
 
-    assert error.value.status_code == 403
-    assert db.rollbacks == 1
+    assert result.user.id == user.id
+    assert issued_users == [user]
+    assert db.rollbacks == 0
+    if client == "web":
+        set_cookie_headers = [
+            value.decode("latin-1")
+            for name, value in response.raw_headers
+            if name.lower() == b"set-cookie"
+        ]
+        assert any("zabt_access_token=access" in value for value in set_cookie_headers)
+        assert any("zabt_refresh_token=refresh" in value for value in set_cookie_headers)
+    else:
+        assert result.access_token == "access"
+        assert result.refresh_token == "refresh"
+        assert not any(name.lower() == b"set-cookie" for name, _ in response.raw_headers)
 
 
 @pytest.mark.asyncio

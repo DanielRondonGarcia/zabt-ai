@@ -738,11 +738,6 @@ async def exchange_microsoft_oidc_token(
             nonce=challenge.nonce,
         )
         user = resolve_or_create_user(db, identity_from_claims(claims))
-        if user.is_superuser:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Microsoft sign-in is not enabled for this account",
-            )
         tokens = auth_service.issue_tokens(db, user)
     except HTTPException:
         db.rollback()
