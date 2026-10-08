@@ -134,11 +134,13 @@ services:
   api:
     image: ${ZABT_API_IMAGE:?ZABT_API_IMAGE must be set for full-cloud deployment}
     restart: unless-stopped
-    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
+    command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap_superuser && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
     ports:
       - "${API_PORT:-8000}:8000"
     environment:
       <<: *backend-environment
+      BOOTSTRAP_SUPERUSER_EMAIL: ${BOOTSTRAP_SUPERUSER_EMAIL:-}
+      BOOTSTRAP_SUPERUSER_PASSWORD: ${BOOTSTRAP_SUPERUSER_PASSWORD:-}
 
   worker:
     image: ${ZABT_WORKER_IMAGE:?ZABT_WORKER_IMAGE must be set for full-cloud deployment}

@@ -105,6 +105,11 @@ from app.models.ai_chat import (
 
 from app.models.mcp_token import MCPToken
 
+from app.models.authentication_configuration import (
+    AuthenticationConfiguration,
+    UserLoginMode,
+)
+
 __all__ = [
     # base
     "TranscriptionType",
@@ -183,4 +188,7 @@ __all__ = [
     "AIChatSourceRead",
     # MCP
     "MCPToken",
+    # authentication mode
+    "AuthenticationConfiguration",
+    "UserLoginMode",
 ]

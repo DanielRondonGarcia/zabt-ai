@@ -7,7 +7,7 @@ from datetime import datetime
 import json
 
 import pytest
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from fastapi.testclient import TestClient
 from fastapi import FastAPI
 
@@ -18,6 +18,7 @@ from app.models import (
     ExternalIdentityProvider,
     MicrosoftOidcConfiguration,
     User,
+    UserLoginMode,
 )
 from app.services import auth as auth_service
 from app.services.microsoft_oidc import (
@@ -27,6 +28,7 @@ from app.services.microsoft_oidc import (
     link_external_identity,
     resolve_or_create_user,
 )
+from app.services.oauth_state import OAuthStateTransaction
 
 
 CLIENT_ID = "11111111-1111-4111-8111-111111111111"
@@ -122,21 +124,35 @@ def make_configuration(**overrides) -> MicrosoftOidcConfiguration:
     return MicrosoftOidcConfiguration(**values)
 
 
-def make_request(id_token: str | None = None) -> Request:
-    body = json.dumps({"id_token": id_token}).encode() if id_token is not None else b""
+def make_request(
+    id_token: str | None = None,
+    *,
+    client: str | None = "web",
+    challenge_id: str | None = "c" * 43,
+    origin: str | None = "http://localhost:3001",
+) -> Request:
+    if id_token is None:
+        body = b""
+    else:
+        payload = {"id_token": id_token}
+        if client is not None:
+            payload["client"] = client
+        if challenge_id is not None:
+            payload["challenge_id"] = challenge_id
+        body = json.dumps(payload).encode()
 
     async def receive():
         return {"type": "http.request", "body": body, "more_body": False}
 
+    headers = [(b"content-length", str(len(body)).encode())]
+    if origin is not None:
+        headers.append((b"origin", origin.encode()))
     return Request(
         {
             "type": "http",
             "method": "POST",
             "path": "/api/v1/auth/microsoft/oidc/exchange",
-            "headers": [
-                (b"origin", b"http://localhost:3001"),
-                (b"content-length", str(len(body)).encode()),
-            ],
+            "headers": headers,
         },
         receive,
     )
@@ -245,7 +261,7 @@ def test_public_status_contains_oidc_values_and_separate_graph_readiness(
 def test_admin_configuration_get_and_put_return_no_secret(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    admin = make_user(is_admin=True)
+    admin = make_user(is_admin=False, is_superuser=True)
     configuration = make_configuration()
     updated = make_configuration(updated_by=admin.id, tenant_id="organizations")
     db = FakeDb(exec_rows=[[configuration], [configuration], [updated], [updated], [updated]])
@@ -256,11 +272,17 @@ def test_admin_configuration_get_and_put_return_no_secret(
         "validate_request_origin",
         lambda request: "http://localhost:3001",
     )
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.LOCAL,
+    )
 
     get_http_response = Response()
     get_response = auth_endpoint.microsoft_oidc_configuration(get_http_response, admin, db)
     assert get_response.can_manage is True
-    assert get_response.is_admin is True
+    assert get_response.is_admin is False
+    assert get_response.is_superuser is True
     assert "client_secret" not in get_response.model_dump()
     assert get_http_response.headers["cache-control"] == "no-store"
 
@@ -290,51 +312,44 @@ def test_admin_configuration_get_and_put_return_no_secret(
     assert upsert_kwargs["spa_origin"] == "http://localhost:3001"
 
 
-def test_non_admin_can_view_and_claim_global_configuration_when_absent(
+def test_non_superuser_cannot_claim_global_configuration_when_absent(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    user = make_user(is_admin=False)
-    saved = make_configuration(updated_by=user.id)
+    user = make_user(is_admin=True)
     monkeypatch.setattr(
         auth_endpoint.security,
         "validate_request_origin",
         lambda request: "http://localhost:3001",
     )
 
-    view_response = auth_endpoint.microsoft_oidc_configuration(
-        Response(),
-        user,
-        FakeDb(exec_rows=[[], []]),
-    )
-    assert view_response.can_manage is True
-    assert view_response.is_admin is False
+    with pytest.raises(HTTPException) as view_error:
+        auth_endpoint.microsoft_oidc_configuration(
+            Response(),
+            user,
+            FakeDb(exec_rows=[[], []]),
+        )
+    assert view_error.value.status_code == 403
 
     db = FakeDb(exec_rows=[[]])
-    upsert_kwargs = {}
+    with pytest.raises(HTTPException) as error:
+        auth_endpoint.update_microsoft_oidc_configuration(
+            auth_endpoint.MicrosoftOidcConfigurationUpdate(
+                client_id=CLIENT_ID,
+                tenant="common",
+                redirect_uri="http://localhost:3001/login",
+            ),
+            make_request(),
+            Response(),
+            user,
+            db,
+        )
 
-    def fake_upsert(*args, **kwargs):
-        upsert_kwargs.update(kwargs)
-        return saved
-
-    monkeypatch.setattr(auth_endpoint, "upsert_microsoft_oidc_configuration", fake_upsert)
-    auth_endpoint.update_microsoft_oidc_configuration(
-        auth_endpoint.MicrosoftOidcConfigurationUpdate(
-            client_id=CLIENT_ID,
-            tenant="common",
-            redirect_uri="http://localhost:3001/login",
-        ),
-        make_request(),
-        Response(),
-        user,
-        db,
-    )
-
+    assert error.value.status_code == 403
     assert user.is_admin is True
-    assert db.commits == 1
-    assert upsert_kwargs["updated_by"] == user.id
+    assert db.commits == 0
 
 
-def test_non_admin_cannot_claim_or_overwrite_after_configuration_exists(
+def test_non_superuser_cannot_overwrite_after_configuration_exists(
     monkeypatch: pytest.MonkeyPatch,
 ):
     user = make_user(is_admin=False)
@@ -351,7 +366,7 @@ def test_non_admin_cannot_claim_or_overwrite_after_configuration_exists(
         lambda *args, **kwargs: pytest.fail("a non-admin must not overwrite configuration"),
     )
 
-    with pytest.raises(Exception) as error:
+    with pytest.raises(HTTPException) as error:
         auth_endpoint.update_microsoft_oidc_configuration(
             auth_endpoint.MicrosoftOidcConfigurationUpdate(
                 client_id=CLIENT_ID,
@@ -369,26 +384,67 @@ def test_non_admin_cannot_claim_or_overwrite_after_configuration_exists(
     assert user.is_admin is False
 
 
-def test_non_admin_loses_read_only_manage_claim_after_configuration_exists():
+def test_non_superuser_cannot_read_existing_configuration():
     user = make_user(is_admin=False)
-    configuration = make_configuration()
-    response = auth_endpoint.microsoft_oidc_configuration(
-        Response(),
-        user,
-        FakeDb(exec_rows=[[configuration], [configuration]]),
-    )
+    response = Response()
 
-    assert response.can_manage is False
-    assert response.is_admin is False
+    with pytest.raises(HTTPException) as error:
+        auth_endpoint.microsoft_oidc_configuration(
+            response,
+            user,
+            FakeDb(exec_rows=[]),
+        )
+
+    assert error.value.status_code == 403
+    assert response.headers["cache-control"] == "no-store"
 
 
 class FakeVerifier:
     def __init__(self, claims):
         self.claims = claims
+        self.nonces = []
 
-    async def validate_id_token(self, id_token: str):
+    async def validate_id_token(self, id_token: str, *, nonce: str | None = None):
         assert id_token == "signed-id-token"
+        self.nonces.append(nonce)
         return self.claims
+
+
+def install_challenge(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    purpose: str = "oidc_login",
+    client: str = "web",
+    user_id: int | None = None,
+    nonce: str = "server-issued-nonce-value",
+    challenge_id: str = "c" * 43,
+):
+    transaction = OAuthStateTransaction(
+        state=challenge_id,
+        purpose=purpose,
+        nonce=nonce,
+        code_verifier="v" * 43,
+        next_path="/",
+        user_id=user_id,
+        client=client,
+    )
+
+    class OneTimeChallenge:
+        def __init__(self):
+            self.transaction = transaction
+            self.consumed = []
+
+        def consume(self, state):
+            self.consumed.append(state)
+            if state != transaction.state:
+                return None
+            result = self.transaction
+            self.transaction = None
+            return result
+
+    service = OneTimeChallenge()
+    monkeypatch.setattr(auth_endpoint, "oauth_state_service", service)
+    return service, transaction
 
 
 @pytest.mark.asyncio
@@ -399,11 +455,18 @@ async def test_id_token_exchange_issues_existing_web_cookies_without_secret(
     user = make_user()
     db = FakeDb(exec_rows=[[configuration]])
     response = Response()
+    _, challenge = install_challenge(monkeypatch)
     monkeypatch.setattr(auth_endpoint.security, "validate_request_origin", lambda request: None)
-    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda config: FakeVerifier({
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.MICROSOFT_OIDC,
+    )
+    verifier = FakeVerifier({
         "sub": "subject-1",
         "tid": "tenant-1",
-    }))
+    })
+    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda config: verifier)
     monkeypatch.setattr(auth_endpoint, "resolve_or_create_user", lambda db, identity: user)
     monkeypatch.setattr(
         auth_endpoint.auth_service,
@@ -412,12 +475,13 @@ async def test_id_token_exchange_issues_existing_web_cookies_without_secret(
     )
 
     result = await auth_endpoint.exchange_microsoft_oidc_token(
-        make_request("signed-id-token"),
+        make_request("signed-id-token", client=None),
         response,
         db,
     )
 
     assert result.user.id == user.id
+    assert verifier.nonces == [challenge.nonce]
     set_cookie_headers = [
         value.decode("latin-1")
         for name, value in response.raw_headers
@@ -435,7 +499,13 @@ async def test_anonymous_exchange_returns_static_local_conflict_without_token_ec
     configuration = make_configuration()
     marker = "SIGNED_TOKEN_MARKER"
     db = FakeDb(exec_rows=[[configuration]])
+    install_challenge(monkeypatch)
     monkeypatch.setattr(auth_endpoint.security, "validate_request_origin", lambda request: None)
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.MICROSOFT_OIDC,
+    )
     monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda config: FakeVerifier({
         "sub": "subject-1",
         "tid": "tenant-1",
@@ -466,11 +536,22 @@ async def test_explicit_link_validates_id_token_without_issuing_cookies(
     user = make_user()
     db = FakeDb(exec_rows=[[configuration]])
     linked = []
+    _, challenge = install_challenge(
+        monkeypatch,
+        purpose="oidc_link",
+        user_id=user.id,
+    )
     monkeypatch.setattr(auth_endpoint.security, "validate_request_origin", lambda request: None)
-    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda config: FakeVerifier({
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.LOCAL,
+    )
+    verifier = FakeVerifier({
         "sub": "subject-1",
         "tid": "tenant-1",
-    }))
+    })
+    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda config: verifier)
     monkeypatch.setattr(
         auth_endpoint,
         "link_external_identity",
@@ -485,7 +566,272 @@ async def test_explicit_link_validates_id_token_without_issuing_cookies(
 
     assert result == {"status": "linked"}
     assert linked[0][1] is user
+    assert verifier.nonces == [challenge.nonce]
     assert db.commits == 1
+
+
+@pytest.mark.asyncio
+async def test_oidc_exchange_returns_bearer_tokens_for_mobile_client(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    configuration = make_configuration()
+    user = make_user()
+    db = FakeDb(exec_rows=[[configuration]])
+    response = Response()
+    _, challenge = install_challenge(monkeypatch, client="mobile")
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.MICROSOFT_OIDC,
+    )
+    verifier = FakeVerifier({
+        "sub": "subject-1",
+        "tid": "tenant-1",
+    })
+    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda config: verifier)
+    monkeypatch.setattr(auth_endpoint, "resolve_or_create_user", lambda db, identity: user)
+    monkeypatch.setattr(
+        auth_endpoint.auth_service,
+        "issue_tokens",
+        lambda db, user: auth_service.TokenBundle("access", "refresh", 900),
+    )
+
+    result = await auth_endpoint.exchange_microsoft_oidc_token(
+        make_request("signed-id-token", client="mobile", origin=None),
+        response,
+        db,
+    )
+
+    assert result.access_token == "access"
+    assert result.refresh_token == "refresh"
+    assert result.user.id == user.id
+    assert verifier.nonces == [challenge.nonce]
+    assert not any(name.lower() == b"set-cookie" for name, _ in response.raw_headers)
+
+
+@pytest.mark.asyncio
+async def test_oidc_exchange_does_not_authenticate_system_superuser(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    configuration = make_configuration()
+    user = make_user(is_superuser=True)
+    db = FakeDb(exec_rows=[[configuration]])
+    install_challenge(monkeypatch, client="mobile")
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.MICROSOFT_OIDC,
+    )
+    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda config: FakeVerifier({
+        "sub": "subject-1",
+        "tid": "tenant-1",
+    }))
+    monkeypatch.setattr(auth_endpoint, "resolve_or_create_user", lambda db, identity: user)
+    monkeypatch.setattr(
+        auth_endpoint.auth_service,
+        "issue_tokens",
+        lambda *args: pytest.fail("superuser must use local superuser login"),
+    )
+
+    with pytest.raises(Exception) as error:
+        await auth_endpoint.exchange_microsoft_oidc_token(
+            make_request("signed-id-token", client="mobile", origin=None),
+            Response(),
+            db,
+        )
+
+    assert error.value.status_code == 403
+    assert db.rollbacks == 1
+
+
+@pytest.mark.asyncio
+async def test_oidc_exchange_requires_challenge_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.MICROSOFT_OIDC,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        await auth_endpoint.exchange_microsoft_oidc_token(
+            make_request("signed-id-token", challenge_id=None),
+            Response(),
+            FakeDb(),
+        )
+
+    assert error.value.status_code == 400
+    assert "signed-id-token" not in str(error.value)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("purpose", "stored_client", "request_client", "owner_id"),
+    [
+        ("oidc_link", "web", "web", 7),
+        ("oidc_login", "mobile", "web", None),
+    ],
+)
+async def test_oidc_exchange_consumes_and_rejects_mismatched_challenges(
+    monkeypatch: pytest.MonkeyPatch,
+    purpose: str,
+    stored_client: str,
+    request_client: str,
+    owner_id: int | None,
+):
+    configuration = make_configuration()
+    service, _ = install_challenge(
+        monkeypatch,
+        purpose=purpose,
+        client=stored_client,
+        user_id=owner_id,
+    )
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.MICROSOFT_OIDC,
+    )
+    monkeypatch.setattr(auth_endpoint.security, "validate_request_origin", lambda request: None)
+    verifier = FakeVerifier({"sub": "subject-1", "tid": "tenant-1"})
+    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda _configuration: verifier)
+
+    with pytest.raises(HTTPException) as error:
+        await auth_endpoint.exchange_microsoft_oidc_token(
+            make_request("signed-id-token", client=request_client),
+            Response(),
+            FakeDb(exec_rows=[[configuration]]),
+        )
+
+    assert error.value.status_code == 400
+    assert service.consumed == ["c" * 43]
+    assert verifier.nonces == []
+
+
+@pytest.mark.asyncio
+async def test_oidc_challenge_replay_is_rejected_before_second_token_validation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    configuration = make_configuration()
+    user = make_user()
+    service, challenge = install_challenge(monkeypatch)
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.MICROSOFT_OIDC,
+    )
+    monkeypatch.setattr(auth_endpoint.security, "validate_request_origin", lambda request: None)
+    verifier = FakeVerifier({"sub": "subject-1", "tid": "tenant-1"})
+    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda _configuration: verifier)
+    monkeypatch.setattr(auth_endpoint, "resolve_or_create_user", lambda _db, _identity: user)
+    monkeypatch.setattr(
+        auth_endpoint.auth_service,
+        "issue_tokens",
+        lambda _db, _user: auth_service.TokenBundle("access", "refresh", 900),
+    )
+    db = FakeDb(exec_rows=[[configuration], [configuration]])
+
+    first = await auth_endpoint.exchange_microsoft_oidc_token(
+        make_request("signed-id-token"),
+        Response(),
+        db,
+    )
+    with pytest.raises(HTTPException) as replay:
+        await auth_endpoint.exchange_microsoft_oidc_token(
+            make_request("signed-id-token"),
+            Response(),
+            db,
+        )
+
+    assert first.user.id == user.id
+    assert replay.value.status_code == 400
+    assert verifier.nonces == [challenge.nonce]
+    assert service.consumed == [challenge.state, challenge.state]
+
+
+@pytest.mark.asyncio
+async def test_oidc_link_rejects_foreign_user_challenge_before_token_validation(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    configuration = make_configuration()
+    user = make_user()
+    service, challenge = install_challenge(
+        monkeypatch,
+        purpose="oidc_link",
+        user_id=user.id + 1,
+    )
+    monkeypatch.setattr(auth_endpoint.security, "validate_request_origin", lambda request: None)
+    verifier = FakeVerifier({"sub": "subject-1", "tid": "tenant-1"})
+    monkeypatch.setattr(auth_endpoint, "_oidc_verifier", lambda _configuration: verifier)
+
+    with pytest.raises(HTTPException) as error:
+        await auth_endpoint.link_microsoft_oidc_token(
+            make_request("signed-id-token"),
+            user,
+            FakeDb(exec_rows=[[configuration]]),
+        )
+
+    assert error.value.status_code == 400
+    assert service.consumed == [challenge.state]
+    assert verifier.nonces == []
+
+
+@pytest.mark.asyncio
+async def test_oidc_link_requires_challenge_id(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    configuration = make_configuration()
+    user = make_user()
+    monkeypatch.setattr(auth_endpoint.security, "validate_request_origin", lambda request: None)
+
+    with pytest.raises(HTTPException) as error:
+        await auth_endpoint.link_microsoft_oidc_token(
+            make_request("signed-id-token", challenge_id=None),
+            user,
+            FakeDb(exec_rows=[[configuration]]),
+        )
+
+    assert error.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_oidc_exchange_is_rejected_while_local_mode_is_selected(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.LOCAL,
+    )
+    with pytest.raises(Exception) as error:
+        await auth_endpoint.exchange_microsoft_oidc_token(
+            make_request("signed-id-token", client="mobile"),
+            Response(),
+            FakeDb(),
+        )
+
+    assert error.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_oidc_exchange_rejects_unsupported_client(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.MICROSOFT_OIDC,
+    )
+
+    with pytest.raises(Exception) as error:
+        await auth_endpoint.exchange_microsoft_oidc_token(
+            make_request("signed-id-token", client="desktop"),
+            Response(),
+            FakeDb(),
+        )
+
+    assert error.value.status_code == 400
+    assert "signed-id-token" not in str(error.value)
 
 
 def test_id_token_request_bounds_input_without_echoing_value(
@@ -493,6 +839,11 @@ def test_id_token_request_bounds_input_without_echoing_value(
 ):
     marker = "TOKEN_MARKER"
     monkeypatch.setattr(auth_endpoint.settings, "AUTH_ALLOWED_ORIGINS", "http://localhost:3001")
+    monkeypatch.setattr(
+        auth_endpoint.auth_mode_service,
+        "get_user_login_mode",
+        lambda db: UserLoginMode.MICROSOFT_OIDC,
+    )
     app = FastAPI()
     app.include_router(auth_endpoint.router, prefix="/auth")
     with TestClient(app) as client:

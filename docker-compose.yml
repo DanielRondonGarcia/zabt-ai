@@ -32,7 +32,7 @@ services:
       context: ./backend
       dockerfile: Dockerfile
       target: api
-    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"
+    command: sh -c "alembic upgrade head && python -m app.bootstrap_superuser && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"
     ports:
       - "8000:8000"
     volumes:
@@ -64,6 +64,12 @@ services:
       AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:-http://localhost:3001}
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3001}
       APP_URL: ${APP_URL:-http://localhost:3001}
+      # Bootstrap credentials are read only by the API startup command. They
+      # are never sent to worker or beat, and are not reapplied after creation.
+      # Empty values allow restarts after provisioning; the bootstrap command
+      # fails closed if no system superuser exists yet.
+      BOOTSTRAP_SUPERUSER_EMAIL: ${BOOTSTRAP_SUPERUSER_EMAIL:-}
+      BOOTSTRAP_SUPERUSER_PASSWORD: ${BOOTSTRAP_SUPERUSER_PASSWORD:-}
       # Storage
       STORAGE_PROVIDER: ${STORAGE_PROVIDER:-minio}
       MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
@@ -157,7 +163,12 @@ services:
       LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
       LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      # Optional so external-database deployments can leave the local profile off.
+      db:
+        condition: service_healthy
+        required: false
 
   worker:
     image: zabt-worker:latest
@@ -339,6 +350,12 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
 
   minio:
     image: minio/minio

@@ -290,6 +290,25 @@ async def test_validate_id_token_checks_jwks_signature_issuer_audience_exp_and_n
 
 
 @pytest.mark.asyncio
+async def test_validate_id_token_rejects_nonce_that_differs_from_server_challenge(
+    client: MicrosoftOidcClient,
+    signing_material,
+):
+    private_pem, jwk = signing_material
+    jwk["issuer"] = f"{MICROSOFT_AUTH_BASE}/{{tenantid}}/v2.0"
+    FakeAsyncClient.responses = [
+        FakeResponse(200, discovery_payload()),
+        FakeResponse(200, {"keys": [jwk]}),
+    ]
+
+    with pytest.raises(MicrosoftOidcValidationError):
+        await client.validate_id_token(
+            make_id_token(private_pem, nonce="signed-nonce-value"),
+            nonce="different-server-challenge-value",
+        )
+
+
+@pytest.mark.asyncio
 async def test_repeated_unknown_kids_use_bounded_jwks_refreshes(
     client: MicrosoftOidcClient,
     signing_material,

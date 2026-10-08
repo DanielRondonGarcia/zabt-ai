@@ -31,13 +31,13 @@ password_context = CryptContext(
     bcrypt_sha256__rounds=12,
 )
 
-_FIRST_ADMIN_ADVISORY_LOCK_KEY = 7_846_213_901
-_FIRST_ADMIN_FALLBACK_LOCK = threading.Lock()
+_AUTHENTICATION_POLICY_ADVISORY_LOCK_KEY = 7_846_213_901
+_AUTHENTICATION_POLICY_FALLBACK_LOCK = threading.RLock()
 
 
 @contextmanager
-def _first_admin_bootstrap_lock(db: Session) -> Iterator[None]:
-    """Serialize the first-user check across PostgreSQL workers and test SQLite."""
+def _authentication_policy_lock(db: Session) -> Iterator[None]:
+    """Serialize policy changes and bootstrap across workers and test SQLite."""
 
     bind = None
     get_bind = getattr(db, "get_bind", None)
@@ -52,7 +52,7 @@ def _first_admin_bootstrap_lock(db: Session) -> Iterator[None]:
         # all application workers therefore serialize the bootstrap check.
         db.exec(
             text("SELECT pg_advisory_xact_lock(:lock_key)"),
-            {"lock_key": _FIRST_ADMIN_ADVISORY_LOCK_KEY},
+            {"lock_key": _AUTHENTICATION_POLICY_ADVISORY_LOCK_KEY},
         )
         yield
         return
@@ -60,7 +60,7 @@ def _first_admin_bootstrap_lock(db: Session) -> Iterator[None]:
     # SQLite test databases do not expose PostgreSQL advisory locks. The
     # process lock keeps the fallback deterministic while the production path
     # remains database-coordinated.
-    with _FIRST_ADMIN_FALLBACK_LOCK:
+    with _AUTHENTICATION_POLICY_FALLBACK_LOCK:
         yield
 
 
@@ -161,30 +161,23 @@ def create_user(
     if existing is not None:
         raise DuplicateEmailError
 
-    # A migrated installation bootstraps its earliest existing user through
-    # Alembic. A brand-new installation has no row for the migration to mark,
-    # so the first registration receives the same bootstrap capability. The
-    # lock must cover the check and commit or concurrent first registrations
-    # could both observe an empty table.
-    with _first_admin_bootstrap_lock(db):
-        first_user_id = db.exec(select(User.id).order_by(User.id).limit(1)).first()
-
-        user = User(
-            email=normalized_email,
-            full_name=full_name.strip() if full_name and full_name.strip() else None,
-            password_hash=hash_password(password),
-            supabase_id=None,
-            is_active=True,
-            is_admin=first_user_id is None,
-        )
-        db.add(user)
-        try:
-            db.commit()
-        except IntegrityError as exc:
-            db.rollback()
-            # The lookup above prevents the normal duplicate path; this handles a
-            # concurrent registration racing the unique database constraint.
-            raise DuplicateEmailError from exc
+    user = User(
+        email=normalized_email,
+        full_name=full_name.strip() if full_name and full_name.strip() else None,
+        password_hash=hash_password(password),
+        supabase_id=None,
+        is_active=True,
+        is_admin=False,
+        is_superuser=False,
+    )
+    db.add(user)
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        # The lookup above prevents the normal duplicate path; this handles a
+        # concurrent registration racing the unique database constraint.
+        raise DuplicateEmailError from exc
     db.refresh(user)
     return user
 

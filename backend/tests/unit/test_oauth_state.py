@@ -39,6 +39,7 @@ def test_state_is_opaque_hashed_and_consumed_once():
 
     transaction = service.create_transaction(
         purpose="oidc_link",
+        client="web",
         next_path="/meetings?filter=upcoming",
         user_id=42,
         nonce="n" * 32,
@@ -56,6 +57,7 @@ def test_state_is_opaque_hashed_and_consumed_once():
         "code_verifier": "v" * 43,
         "next_path": "/meetings?filter=upcoming",
         "user_id": 42,
+        "client": "web",
     }
 
     consumed = service.consume(transaction.state)
@@ -70,6 +72,7 @@ def test_expired_and_malformed_state_fail_closed():
 
     transaction = service.create_transaction(
         purpose="oidc_login",
+        client="mobile",
         nonce="n" * 32,
         code_verifier="v" * 43,
     )
@@ -79,6 +82,7 @@ def test_expired_and_malformed_state_fail_closed():
 
     expired = service.create_transaction(
         purpose="oidc_login",
+        client="web",
         nonce="n" * 32,
         code_verifier="v" * 43,
     )
@@ -89,6 +93,22 @@ def test_expired_and_malformed_state_fail_closed():
 def test_link_state_requires_an_owner_user_id():
     with pytest.raises(ValueError, match="requires a user"):
         OAuthStateService(FakeRedis()).create_transaction(purpose="oidc_link")
+
+
+def test_oidc_transaction_requires_and_preserves_client_binding():
+    service = OAuthStateService(FakeRedis())
+    with pytest.raises(ValueError, match="supported client"):
+        service.create_transaction(purpose="oidc_login")
+
+    transaction = service.create_transaction(
+        purpose="oidc_login",
+        client="mobile",
+        nonce="n" * 32,
+        code_verifier="v" * 43,
+    )
+
+    assert transaction.client == "mobile"
+    assert service.consume(transaction.state) == transaction
 
 
 def test_graph_connect_state_is_user_bound_and_one_time():

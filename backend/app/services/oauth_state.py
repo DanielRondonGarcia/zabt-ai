@@ -23,6 +23,7 @@ _STATE_KEY_PREFIX = "zabt:oauth-state:"
 _STATE_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 _CODE_VERIFIER_RE = re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _ALLOWED_PURPOSES = frozenset({"oidc_login", "oidc_link", "graph_connect"})
+_OIDC_CLIENTS = frozenset({"web", "mobile"})
 
 
 class OAuthStateError(RuntimeError):
@@ -31,7 +32,7 @@ class OAuthStateError(RuntimeError):
 
 @dataclass(frozen=True)
 class OAuthStateTransaction:
-    """The state returned to the provider and its server-side transaction data."""
+    """Opaque transaction identifier and associated server-side flow data."""
 
     state: str
     purpose: str
@@ -39,6 +40,7 @@ class OAuthStateTransaction:
     code_verifier: str
     next_path: str
     user_id: int | None = None
+    client: str | None = None
 
 
 def validate_next_path(next_path: str | None) -> str:
@@ -113,6 +115,7 @@ class OAuthStateService:
         purpose: str,
         next_path: str | None = None,
         user_id: int | None = None,
+        client: str | None = None,
         nonce: str | None = None,
         code_verifier: str | None = None,
     ) -> OAuthStateTransaction:
@@ -122,6 +125,10 @@ class OAuthStateService:
             raise ValueError("This OAuth state purpose requires a user")
         if purpose == "oidc_login" and user_id is not None:
             raise ValueError("OIDC login state cannot include a user")
+        if purpose in {"oidc_login", "oidc_link"} and client not in _OIDC_CLIENTS:
+            raise ValueError("OIDC state requires a supported client")
+        if purpose == "graph_connect" and client is not None:
+            raise ValueError("Graph state cannot include an OIDC client")
         if user_id is not None and (
             isinstance(user_id, bool) or not isinstance(user_id, int) or user_id <= 0
         ):
@@ -135,6 +142,7 @@ class OAuthStateService:
             code_verifier=code_verifier or secrets.token_urlsafe(64),
             next_path=safe_next,
             user_id=user_id,
+            client=client,
         )
         if not transaction.nonce or not transaction.code_verifier:
             raise ValueError("Invalid OAuth transaction material")
@@ -147,6 +155,7 @@ class OAuthStateService:
             "code_verifier": transaction.code_verifier,
             "next_path": transaction.next_path,
             "user_id": transaction.user_id,
+            "client": transaction.client,
         }
         try:
             written = self._redis.set(
@@ -190,6 +199,7 @@ class OAuthStateService:
         code_verifier = payload.get("code_verifier")
         next_path = payload.get("next_path")
         user_id = payload.get("user_id")
+        client = payload.get("client")
         if purpose not in _ALLOWED_PURPOSES:
             raise ValueError("Malformed OAuth state purpose")
         if not isinstance(nonce, str) or not 16 <= len(nonce) <= 256:
@@ -207,6 +217,10 @@ class OAuthStateService:
             raise ValueError("Malformed OAuth owner")
         if purpose == "oidc_login" and user_id is not None:
             raise ValueError("Malformed OAuth login owner")
+        if purpose in {"oidc_login", "oidc_link"} and client not in _OIDC_CLIENTS:
+            raise ValueError("Malformed OIDC client")
+        if purpose == "graph_connect" and client is not None:
+            raise ValueError("Malformed Graph client")
         return OAuthStateTransaction(
             state=state,
             purpose=purpose,
@@ -214,4 +228,5 @@ class OAuthStateService:
             code_verifier=code_verifier,
             next_path=safe_next,
             user_id=user_id,
+            client=client,
         )

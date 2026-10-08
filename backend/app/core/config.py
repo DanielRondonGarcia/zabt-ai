@@ -85,6 +85,8 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "Zabt"
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api/v1"
+    BOOTSTRAP_SUPERUSER_EMAIL: Optional[str] = None
+    BOOTSTRAP_SUPERUSER_PASSWORD: Optional[str] = None
     # URL-shaped SDK auth setting used by the custom bearer verifier. This first
     # version uses user-managed bearer tokens and does not expose OAuth metadata.
     # Deployments should set this to their externally reachable MCP URL.
