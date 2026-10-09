@@ -153,6 +153,47 @@ def test_ollama_falls_back_to_native_tags_for_local_v1_setup() -> None:
     assert requests[0]["headers"] == {}
 
 
+def test_ollama_cloud_discovery_uses_v1_models_and_bearer_auth() -> None:
+    requests: list[dict] = []
+    base_url = "https://ollama.com/v1"
+    catalog = ai_provider_models.discover_model_catalog(
+        provider=CustomAIProvider.OLLAMA,
+        base_url=base_url,
+        api_key="ollama-cloud-test",
+        client_factory=_client_factory(
+            {
+                f"{base_url}/models": {
+                    "object": "list",
+                    "data": [{"id": "gemma4:31b"}],
+                }
+            },
+            requests,
+        ),
+        endpoint_validator=_allow_runtime_endpoint,
+    )
+
+    assert catalog.models == ["gemma4:31b"]
+    assert catalog.source == "ollama-compatible"
+    assert requests == [{
+        "method": "GET",
+        "url": "https://ollama.com/v1/models",
+        "headers": {"Authorization": "Bearer ollama-cloud-test"},
+    }]
+
+
+def test_ollama_cloud_discovery_requires_an_api_key() -> None:
+    with pytest.raises(
+        AIProviderConfigurationValidationError,
+        match="Ollama cloud endpoints require an API key",
+    ):
+        ai_provider_models.discover_model_catalog(
+            provider=CustomAIProvider.OLLAMA,
+            base_url="https://ollama.com/v1",
+            api_key=None,
+            endpoint_validator=_allow_runtime_endpoint,
+        )
+
+
 def test_model_ids_are_bounded_sorted_deduplicated_and_safe() -> None:
     payload = {
         "data": [

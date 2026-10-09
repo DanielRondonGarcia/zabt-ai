@@ -23,7 +23,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 const PROVIDER_DEFAULTS: Record<CustomAIProvider, { model: string; baseUrl: string }> = {
   openai: { model: "gpt-4o-mini", baseUrl: "https://api.openai.com/v1" },
   anthropic: { model: "claude-3-5-haiku-latest", baseUrl: "https://api.anthropic.com" },
-  ollama: { model: "llama3.2:3b", baseUrl: "http://host.docker.internal:11434/v1" },
+  ollama: { model: "gemma4:31b", baseUrl: "https://ollama.com/v1" },
 };
 
 const PROVIDER_LABELS: Record<CustomAIProvider, string> = {
@@ -247,13 +247,13 @@ export function AIProviderSettings() {
     provider === "ollama" &&
     isHttpUrl(baseUrl.trim() || PROVIDER_DEFAULTS.ollama.baseUrl);
   const keyHint = ollamaHttpEndpoint
-    ? "Local HTTP Ollama must not use an API key. Use HTTPS before entering one."
+    ? "Keyless HTTP Ollama is limited to localhost development. Use HTTPS before entering an API key."
     : configuration?.provider === provider && configuration.api_key_configured
       ? "A key is already stored securely. Leave this blank to keep it."
-      : "Required for OpenAI and Claude; optional for Ollama-compatible endpoints.";
+      : "Required for OpenAI, Claude, and cloud Ollama; optional only for local keyless Ollama.";
 
   return (
-    <section className="min-w-0 space-y-4 overflow-x-hidden" aria-labelledby="ai-provider-heading">
+    <section className="min-w-0 space-y-4" aria-labelledby="ai-provider-heading">
       <div className="min-w-0 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
           <h2 id="ai-provider-heading" className="text-lg font-semibold text-foreground">
@@ -264,7 +264,7 @@ export function AIProviderSettings() {
           </span>
         </div>
         <p className="break-words text-sm text-muted-foreground">
-          Use your own provider for meeting summaries and AI Chat. Credentials are encrypted on the server and never returned to the browser. Localhost HTTP is supported for development; outside localhost, the Zabt backend must use HTTPS before a custom AI key is sent. Disabled or unselected purposes use the application default.
+          Use your own provider for meeting summaries and AI Chat. Credentials are encrypted on the server and never returned to the browser. Cloud Ollama uses HTTPS and an API key; keyless HTTP Ollama is supported only for localhost development. Disabled or unselected purposes use the application default.
         </p>
       </div>
 
@@ -381,7 +381,7 @@ export function AIProviderSettings() {
                     maxLength={2048}
                     disabled={saving}
                   />
-                  <p className="break-words text-xs text-muted-foreground">Hosted providers require HTTPS. Ollama allows only localhost, 127.0.0.1, ::1, or host.docker.internal; local HTTP Ollama must not use an API key.</p>
+                  <p className="break-words text-xs text-muted-foreground">Cloud Ollama uses https://ollama.com/v1 and an API key. Other public Ollama endpoints require HTTPS; keyless HTTP is limited to localhost development.</p>
                 </div>
               </div>
 

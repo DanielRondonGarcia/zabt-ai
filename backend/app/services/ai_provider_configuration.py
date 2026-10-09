@@ -46,13 +46,13 @@ _UNSAFE_HOST_SUFFIXES = (
 DEFAULT_MODELS: dict[CustomAIProvider, str] = {
     CustomAIProvider.OPENAI: "gpt-4o-mini",
     CustomAIProvider.ANTHROPIC: "claude-3-5-haiku-latest",
-    CustomAIProvider.OLLAMA: "llama3.2:3b",
+    CustomAIProvider.OLLAMA: "gemma4:31b",
 }
 
 DEFAULT_BASE_URLS: dict[CustomAIProvider, str] = {
     CustomAIProvider.OPENAI: "https://api.openai.com/v1",
     CustomAIProvider.ANTHROPIC: "https://api.anthropic.com",
-    CustomAIProvider.OLLAMA: "http://host.docker.internal:11434/v1",
+    CustomAIProvider.OLLAMA: "https://ollama.com/v1",
 }
 
 
@@ -126,15 +126,16 @@ def _validate_provider_base_url(
 
     if provider == CustomAIProvider.OLLAMA:
         # Ollama is the only user-configured provider allowed to use local HTTP.
-        # Keep this allowlist exact so arbitrary private, metadata, and loopback
-        # destinations cannot be used as an SSRF primitive.
-        if normalized_hostname not in _OLLAMA_LOCAL_HOSTS:
-            raise AIProviderConfigurationValidationError(
-                "ollama base_url must target localhost, 127.0.0.1, ::1, or host.docker.internal"
-            )
-        return
+        # Public endpoints still use the same HTTPS and public-host policy as the
+        # other hosted providers; runtime DNS validation remains the final guard.
+        if normalized_hostname in _OLLAMA_LOCAL_HOSTS:
+            return
 
     if parsed.scheme.casefold() != "https":
+        if provider == CustomAIProvider.OLLAMA:
+            raise AIProviderConfigurationValidationError(
+                "ollama public endpoints must use HTTPS; keyless HTTP is limited to localhost"
+            )
         raise AIProviderConfigurationValidationError(
             "base_url must use HTTPS for OpenAI and Anthropic providers"
         )
@@ -259,8 +260,14 @@ def validate_api_key_transport(
     provider: CustomAIProvider | str,
     has_api_key: bool,
 ) -> None:
-    """Prevent credentials from being configured for a cleartext endpoint."""
+    """Enforce HTTPS credentials and keep keyless Ollama local-only."""
     selected_provider = normalize_provider(provider)
+    if selected_provider == CustomAIProvider.OLLAMA:
+        hostname = (urlsplit(base_url).hostname or "").casefold()
+        if not has_api_key and hostname not in _OLLAMA_LOCAL_HOSTS:
+            raise AIProviderConfigurationValidationError(
+                "Ollama cloud endpoints require an API key; keyless Ollama is limited to localhost"
+            )
     if has_api_key and urlsplit(base_url).scheme.casefold() != "https":
         if selected_provider == CustomAIProvider.OLLAMA:
             raise AIProviderConfigurationValidationError(

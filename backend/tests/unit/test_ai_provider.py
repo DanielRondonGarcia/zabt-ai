@@ -16,6 +16,8 @@ from app.models.ai_provider import AIProviderConfiguration, CustomAIProvider
 from app.services import ai_provider
 from app.services.ai_chat import AIChatService
 from app.services.ai_provider_configuration import (
+    DEFAULT_BASE_URLS,
+    DEFAULT_MODELS,
     AIProviderConfigurationService,
     AIProviderSecretStorageError,
     AIProviderConfigurationValidationError,
@@ -214,6 +216,31 @@ def test_provider_url_policy_allows_documented_ollama_local_hosts() -> None:
             normalize_base_url(value, provider=CustomAIProvider.OLLAMA)
 
 
+def test_ollama_defaults_target_the_official_cloud_endpoint() -> None:
+    assert DEFAULT_MODELS[CustomAIProvider.OLLAMA] == "gemma4:31b"
+    assert DEFAULT_BASE_URLS[CustomAIProvider.OLLAMA] == "https://ollama.com/v1"
+    assert normalize_base_url(
+        DEFAULT_BASE_URLS[CustomAIProvider.OLLAMA],
+        provider=CustomAIProvider.OLLAMA,
+    ) == "https://ollama.com/v1"
+
+
+def test_ollama_allows_public_https_endpoints_but_requires_runtime_validation() -> None:
+    assert normalize_base_url(
+        "https://api.example.com/v1",
+        provider=CustomAIProvider.OLLAMA,
+    ) == "https://api.example.com/v1"
+
+    for value in (
+        "http://api.example.com/v1",
+        "https://10.0.0.5/v1",
+        "https://169.254.169.254/v1",
+        "https://metadata.google.internal/v1",
+    ):
+        with pytest.raises(AIProviderConfigurationValidationError):
+            normalize_base_url(value, provider=CustomAIProvider.OLLAMA)
+
+
 def test_hosted_provider_urls_require_https_and_public_hosts() -> None:
     for provider in (CustomAIProvider.OPENAI, CustomAIProvider.ANTHROPIC):
         with pytest.raises(AIProviderConfigurationValidationError):
@@ -304,17 +331,17 @@ def test_switching_provider_resets_defaults_and_clears_the_old_secret() -> None:
         provider=CustomAIProvider.OLLAMA,
         model=None,
         base_url=None,
-        api_key=None,
+        api_key="ollama-cloud-secret",
         enabled=None,
         use_for_summary=None,
         use_for_chat=None,
-        fields_set={"provider"},
+        fields_set={"provider", "api_key"},
     )
 
     assert switched.provider == CustomAIProvider.OLLAMA
-    assert switched.model == "llama3.2:3b"
-    assert switched.base_url == "http://host.docker.internal:11434/v1"
-    assert switched.encrypted_api_key is None
+    assert switched.model == "gemma4:31b"
+    assert switched.base_url == "https://ollama.com/v1"
+    assert switched.encrypted_api_key == "encrypted:ollama-cloud-secret"
 
 
 class _FakeCompletions:
