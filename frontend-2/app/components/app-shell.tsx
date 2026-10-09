@@ -13,7 +13,7 @@ export function AppShell({ children }: AppShellProps) {
     const [sidebarOpen, setSidebarOpen] = useState(false);
 
     return (
-        <div className="flex h-screen overflow-hidden bg-background text-foreground">
+        <div className="flex h-dvh min-h-0 overflow-hidden bg-background text-foreground">
             {/* Mobile backdrop */}
             {sidebarOpen && (
                 <div
@@ -34,7 +34,7 @@ export function AppShell({ children }: AppShellProps) {
             </div>
 
             {/* Main content */}
-            <div className="flex flex-1 flex-col min-w-0 overflow-hidden">
+            <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                 {/* Mobile top bar */}
                 <header className="flex items-center gap-3 px-4 py-3 bg-background border-b border-border md:hidden">
                     <button
@@ -42,7 +42,7 @@ export function AppShell({ children }: AppShellProps) {
                         className="p-1.5 rounded-lg text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                         aria-label="Open menu"
                     >
-                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2} aria-hidden="true">
                             <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
                         </svg>
                     </button>
@@ -50,7 +50,7 @@ export function AppShell({ children }: AppShellProps) {
                 </header>
 
                 {/* Page content */}
-                <main className="flex-1 overflow-y-auto">
+                <main className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
                     {children}
                 </main>
             </div>

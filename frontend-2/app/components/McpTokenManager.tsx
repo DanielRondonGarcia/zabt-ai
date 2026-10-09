@@ -109,7 +109,7 @@ export function McpTokenManager() {
   }
 
   return (
-    <section className="space-y-4" aria-labelledby="mcp-tokens-heading">
+    <section className="min-w-0 space-y-4" aria-labelledby="mcp-tokens-heading">
       <div className="space-y-1">
         <h2 id="mcp-tokens-heading" className="text-lg font-semibold text-foreground">
           Read-only MCP access

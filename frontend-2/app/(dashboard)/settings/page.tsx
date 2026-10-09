@@ -6,7 +6,7 @@ import { AIProviderSettings } from "@/app/components/AIProviderSettings";
 
 export default function SettingsPage() {
   return (
-    <div className="mx-auto max-w-2xl space-y-8 overflow-x-hidden p-8">
+    <div className="mx-auto w-full max-w-2xl min-w-0 space-y-8 p-4 pb-10 sm:p-8 sm:pb-10">
       <h1 className="text-2xl font-semibold text-foreground">Settings</h1>
       <section className="space-y-3">
         <h2 className="text-lg font-semibold text-foreground">Transcription languages</h2>

@@ -43,10 +43,10 @@ export default function DashboardLayout({
 
     if (loading) {
         return (
-            <div className="flex items-center justify-center min-h-screen bg-stone-50">
+            <div className="flex min-h-dvh items-center justify-center bg-stone-50">
                 <div className="flex flex-col items-center gap-3">
                     <Spinner className="size-6 text-muted-foreground" />
-                    <p className="text-sm text-stone-400 font-medium">Authenticating...</p>
+                    <p className="text-sm font-medium text-stone-400">Authenticating…</p>
                 </div>
             </div>
         );
