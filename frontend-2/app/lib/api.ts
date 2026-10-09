@@ -898,6 +898,23 @@ export interface UpdateAIProviderConfiguration {
   use_for_chat: boolean;
 }
 
+export interface DiscoverAIProviderModelsRequest {
+  provider: CustomAIProvider;
+  base_url?: string;
+  api_key?: string;
+}
+
+export type AIProviderModelCatalogSource =
+  | "openai-compatible"
+  | "anthropic"
+  | "ollama-compatible"
+  | "ollama-tags";
+
+export interface AIProviderModelCatalog {
+  models: string[];
+  source: AIProviderModelCatalogSource;
+}
+
 export async function getAIProviderConfiguration(): Promise<AIProviderConfiguration> {
   const { data } = await apiClient.get<AIProviderConfiguration>("/users/me/ai-provider");
   return data;
@@ -908,6 +925,16 @@ export async function updateAIProviderConfiguration(
 ): Promise<AIProviderConfiguration> {
   const { data } = await apiClient.patch<AIProviderConfiguration>(
     "/users/me/ai-provider",
+    payload,
+  );
+  return data;
+}
+
+export async function discoverAIProviderModels(
+  payload: DiscoverAIProviderModelsRequest,
+): Promise<AIProviderModelCatalog> {
+  const { data } = await apiClient.post<AIProviderModelCatalog>(
+    "/users/me/ai-provider/models",
     payload,
   );
   return data;

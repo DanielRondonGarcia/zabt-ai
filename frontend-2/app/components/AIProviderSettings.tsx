@@ -2,15 +2,17 @@
 // Copyright (C) 2025-2026 Afeef Janjua
 "use client";
 
-import { useEffect, useState } from "react";
-import { AlertTriangle, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { AlertTriangle, RefreshCw, Trash2 } from "lucide-react";
 
 import {
   deleteAIProviderConfiguration,
+  discoverAIProviderModels,
   getAIProviderConfiguration,
   getApiErrorMessage,
   updateAIProviderConfiguration,
   type AIProviderConfiguration,
+  type AIProviderModelCatalog,
   type CustomAIProvider,
 } from "@/app/lib/api";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/app/components/ui/alert-dialog";
@@ -28,6 +30,13 @@ const PROVIDER_LABELS: Record<CustomAIProvider, string> = {
   openai: "OpenAI",
   anthropic: "Claude / Anthropic",
   ollama: "Ollama / OpenAI-compatible",
+};
+
+const MODEL_SOURCE_LABELS: Record<AIProviderModelCatalog["source"], string> = {
+  "openai-compatible": "OpenAI-compatible API",
+  anthropic: "Anthropic model API",
+  "ollama-compatible": "Ollama OpenAI-compatible API",
+  "ollama-tags": "Ollama native API",
 };
 
 function providerOrDefault(value: string): CustomAIProvider | "" {
@@ -60,6 +69,18 @@ export function AIProviderSettings() {
   const [pendingClear, setPendingClear] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
   const [error, setError] = useState("");
+  const [modelCatalog, setModelCatalog] = useState<AIProviderModelCatalog | null>(null);
+  const [modelCatalogLoading, setModelCatalogLoading] = useState(false);
+  const [modelCatalogError, setModelCatalogError] = useState("");
+  const modelDiscoveryRequest = useRef(0);
+  const autoLoadModelCatalog = useRef(false);
+
+  function resetModelCatalog() {
+    modelDiscoveryRequest.current += 1;
+    setModelCatalog(null);
+    setModelCatalogError("");
+    setModelCatalogLoading(false);
+  }
 
   function applyConfiguration(next: AIProviderConfiguration) {
     const nextProvider = next.provider ?? "";
@@ -71,6 +92,7 @@ export function AIProviderSettings() {
     setEnabled(next.provider ? next.enabled : true);
     setUseForSummary(next.provider ? next.use_for_summary : true);
     setUseForChat(next.provider ? next.use_for_chat : true);
+    resetModelCatalog();
   }
 
   useEffect(() => {
@@ -86,6 +108,8 @@ export function AIProviderSettings() {
     setStatusMessage("");
     setError("");
     setApiKey("");
+    resetModelCatalog();
+    autoLoadModelCatalog.current = false;
     if (nextProvider) {
       setModel(PROVIDER_DEFAULTS[nextProvider].model);
       setBaseUrl(PROVIDER_DEFAULTS[nextProvider].baseUrl);
@@ -94,6 +118,48 @@ export function AIProviderSettings() {
       setBaseUrl("");
     }
   }
+
+  async function loadModels() {
+    if (!provider) return;
+
+    const requestId = ++modelDiscoveryRequest.current;
+    const enteredApiKey = apiKey.trim();
+    setModelCatalogLoading(true);
+    setModelCatalogError("");
+    try {
+      const catalog = await discoverAIProviderModels({
+        provider,
+        base_url: baseUrl.trim() || PROVIDER_DEFAULTS[provider].baseUrl,
+        ...(enteredApiKey ? { api_key: enteredApiKey } : {}),
+      });
+      if (requestId !== modelDiscoveryRequest.current) return;
+      setModelCatalog(catalog);
+      if (catalog.models.length === 0) {
+        setModelCatalogError(
+          "The provider returned no models. Enter a model ID manually or check the provider.",
+        );
+      }
+    } catch (loadError) {
+      if (requestId !== modelDiscoveryRequest.current) return;
+      setModelCatalog(null);
+      setModelCatalogError(
+        readError(
+          loadError,
+          "Models could not be loaded. Check the provider URL and credentials, then try again.",
+        ),
+      );
+    } finally {
+      if (requestId === modelDiscoveryRequest.current) {
+        setModelCatalogLoading(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (loading || !provider || autoLoadModelCatalog.current) return;
+    autoLoadModelCatalog.current = true;
+    void loadModels();
+  }, [loading, provider]);
 
   async function save() {
     setSaving(true);
@@ -232,19 +298,70 @@ export function AIProviderSettings() {
             <>
               <div className="grid min-w-0 gap-3 sm:grid-cols-2">
                 <div className="min-w-0 space-y-1.5">
-                  <label htmlFor="ai-provider-model" className="text-sm font-medium text-card-foreground">
-                    Model
-                  </label>
-                  <Input
-                    id="ai-provider-model"
-                    name="ai-provider-model"
-                    value={model}
-                    onChange={(event) => setModel(event.target.value)}
-                    placeholder={PROVIDER_DEFAULTS[provider].model}
-                    autoComplete="off"
-                    maxLength={128}
-                    disabled={saving}
-                  />
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <label htmlFor="ai-provider-model" className="text-sm font-medium text-card-foreground">
+                      Model
+                    </label>
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={loadModels}
+                      loading={modelCatalogLoading}
+                      disabled={saving || modelCatalogLoading}
+                    >
+                      {!modelCatalogLoading && <RefreshCw className="size-3.5" aria-hidden="true" />}
+                      {modelCatalog ? "Refresh models" : "Load models"}
+                    </Button>
+                  </div>
+                  {modelCatalog && modelCatalog.models.length > 0 ? (
+                    <Select
+                      value={model || null}
+                      onValueChange={(value) => setModel(value ?? "")}
+                      disabled={saving || modelCatalogLoading}
+                      name="ai-provider-model"
+                    >
+                      <SelectTrigger id="ai-provider-model" aria-describedby="ai-provider-model-status">
+                        <SelectValue placeholder={PROVIDER_DEFAULTS[provider].model} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {model && !modelCatalog.models.includes(model) && (
+                          <SelectItem value={model} className="min-w-0 break-all">
+                            {model} (current)
+                          </SelectItem>
+                        )}
+                        {modelCatalog.models.map((value) => (
+                          <SelectItem key={value} value={value} className="min-w-0 break-all">
+                            {value}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <Input
+                      id="ai-provider-model"
+                      name="ai-provider-model"
+                      value={model}
+                      onChange={(event) => setModel(event.target.value)}
+                      placeholder={PROVIDER_DEFAULTS[provider].model}
+                      autoComplete="off"
+                      maxLength={128}
+                      disabled={saving}
+                      aria-describedby="ai-provider-model-status"
+                    />
+                  )}
+                  <p
+                    id="ai-provider-model-status"
+                    className={`break-words text-xs ${modelCatalogError ? "text-destructive" : "text-muted-foreground"}`}
+                    role={modelCatalogError ? "alert" : "status"}
+                    aria-live="polite"
+                  >
+                    {modelCatalogLoading
+                      ? "Loading models…"
+                      : modelCatalog && modelCatalog.models.length > 0
+                        ? `${modelCatalog.models.length} models loaded from ${MODEL_SOURCE_LABELS[modelCatalog.source]}.`
+                        : modelCatalogError || "Load models to choose from the provider catalog. Manual model IDs are supported if discovery is unavailable."}
+                  </p>
                 </div>
                 <div className="min-w-0 space-y-1.5">
                   <label htmlFor="ai-provider-base-url" className="text-sm font-medium text-card-foreground">
@@ -255,7 +372,10 @@ export function AIProviderSettings() {
                     name="ai-provider-base-url"
                     type="url"
                     value={baseUrl}
-                    onChange={(event) => setBaseUrl(event.target.value)}
+                    onChange={(event) => {
+                      setBaseUrl(event.target.value);
+                      resetModelCatalog();
+                    }}
                     placeholder={PROVIDER_DEFAULTS[provider].baseUrl}
                     autoComplete="url"
                     maxLength={2048}
@@ -274,7 +394,10 @@ export function AIProviderSettings() {
                   name="ai-provider-api-key"
                   type="password"
                   value={apiKey}
-                  onChange={(event) => setApiKey(event.target.value)}
+                  onChange={(event) => {
+                    setApiKey(event.target.value);
+                    resetModelCatalog();
+                  }}
                   placeholder="Enter a new API key…"
                   autoComplete="new-password"
                   maxLength={4096}
