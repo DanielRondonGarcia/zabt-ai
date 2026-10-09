@@ -2,7 +2,7 @@
 // Copyright (C) 2025-2026 Afeef Janjua
 "use client";
 
-import { use, useEffect, useMemo, useState } from "react";
+import { use, useEffect, useMemo, useState, type FormEvent } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -23,6 +23,8 @@ import {
   getGroup,
   getGroups,
   getMeetings,
+  reindexGroup,
+  updateGroup,
   type GroupSummary,
   type Meeting,
 } from "@/app/lib/api";
@@ -30,6 +32,7 @@ import { StatusBadge } from "@/app/components/status-badge";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
 import { GroupMembersDialog } from "@/app/components/group-members-dialog";
+import { ChatMarkdown } from "@/app/components/chat-markdown";
 
 const dateFormatter = new Intl.DateTimeFormat("en-US", {
   month: "short",
@@ -76,8 +79,37 @@ function getErrorMessage(error: unknown, fallback: string): string {
   if (typeof error === "object" && error !== null && "response" in error) {
     const response = (error as { response?: { data?: { detail?: unknown } } }).response;
     if (typeof response?.data?.detail === "string") return response.data.detail;
+    if (typeof response?.data?.detail === "object" && response.data.detail !== null && "message" in response.data.detail) {
+      const message = (response.data.detail as { message?: unknown }).message;
+      if (typeof message === "string") return message;
+    }
   }
   return error instanceof Error && error.message ? error.message : fallback;
+}
+
+interface GroupReindexPendingDetail {
+  code: "group_reindex_pending";
+  group_id: number;
+  message: string;
+}
+
+function getErrorDetail(error: unknown): unknown {
+  if (typeof error !== "object" || error === null || !("response" in error)) return undefined;
+  return (error as { response?: { data?: { detail?: unknown } } }).response?.data?.detail;
+}
+
+function getGroupReindexPending(error: unknown): GroupReindexPendingDetail | null {
+  const detail = getErrorDetail(error);
+  if (typeof detail !== "object" || detail === null) return null;
+  const value = detail as Partial<GroupReindexPendingDetail>;
+  if (value.code !== "group_reindex_pending" || typeof value.group_id !== "number" || typeof value.message !== "string") {
+    return null;
+  }
+  return {
+    code: value.code,
+    group_id: value.group_id,
+    message: value.message,
+  };
 }
 
 const linkActionClass =
@@ -222,6 +254,12 @@ export default function GroupDetailPage({
   const [savingMeetingIds, setSavingMeetingIds] = useState<Set<number>>(() => new Set());
   const [assignmentError, setAssignmentError] = useState<AssignmentError | null>(null);
   const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
+  const [editingIntroduction, setEditingIntroduction] = useState(false);
+  const [introductionDraft, setIntroductionDraft] = useState("");
+  const [savingIntroduction, setSavingIntroduction] = useState(false);
+  const [introductionError, setIntroductionError] = useState<string | null>(null);
+  const [reindexPending, setReindexPending] = useState<GroupReindexPendingDetail | null>(null);
+  const [reindexing, setReindexing] = useState(false);
   const [membersDialogOpen, setMembersDialogOpen] = useState(false);
 
   useEffect(() => {
@@ -248,6 +286,11 @@ export default function GroupDetailPage({
       setSavingMeetingIds(new Set());
       setAssignmentError(null);
       setSaveFeedback(null);
+      setEditingIntroduction(false);
+      setIntroductionDraft("");
+      setIntroductionError(null);
+      setReindexPending(null);
+      setReindexing(false);
 
       try {
         const [selectedGroup, selectedGroupMeetings, ownedMeetingData, groupData] = await Promise.all([
@@ -258,6 +301,7 @@ export default function GroupDetailPage({
         ]);
         if (!mounted) return;
         setGroup(selectedGroup);
+        setIntroductionDraft(selectedGroup.description ?? "");
         setGroupMeetings(selectedGroupMeetings);
         setOwnedMeetings(ownedMeetingData);
         setAccessibleGroups(groupData);
@@ -362,6 +406,85 @@ export default function GroupDetailPage({
     if (meeting) void handleAssignment(meeting, assignmentError.targetGroupId);
   };
 
+  const openIntroductionEditor = () => {
+    if (!group || !group.can_edit) return;
+    setIntroductionDraft(group.description ?? "");
+    setIntroductionError(null);
+    setReindexPending(null);
+    setSaveFeedback(null);
+    setEditingIntroduction(true);
+  };
+
+  const cancelIntroductionEdit = () => {
+    if (!group || savingIntroduction || reindexing) return;
+    setIntroductionDraft(group.description ?? "");
+    setIntroductionError(null);
+    setReindexPending(null);
+    setEditingIntroduction(false);
+  };
+
+  const handleSaveIntroduction = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!group || !group.can_edit || savingIntroduction || reindexing) return;
+
+    const description = introductionDraft.trim() || null;
+    const introductionChanged = group.description !== description;
+    setSavingIntroduction(true);
+    setIntroductionError(null);
+    setReindexPending(null);
+    setSaveFeedback(null);
+
+    try {
+      const saved = await updateGroup(group.id, { description });
+      setGroup(saved);
+      setAccessibleGroups((currentGroups) => currentGroups.map((currentGroup) => (
+        currentGroup.id === saved.id ? saved : currentGroup
+      )));
+      setIntroductionDraft(saved.description ?? "");
+      setEditingIntroduction(false);
+      setSaveFeedback(introductionChanged
+        ? "Group saved. The AI index refresh has been queued for the new human guidance."
+        : "Group saved.");
+    } catch (requestError) {
+      const pending = getGroupReindexPending(requestError);
+      if (!pending) {
+        setIntroductionError(getErrorMessage(requestError, "The group introduction could not be saved."));
+      } else {
+        setIntroductionError(pending.message);
+        setReindexPending(pending);
+        try {
+          const durableGroup = await getGroup(group.id);
+          setGroup(durableGroup);
+          setAccessibleGroups((currentGroups) => currentGroups.map((currentGroup) => (
+            currentGroup.id === durableGroup.id ? durableGroup : currentGroup
+          )));
+          setIntroductionDraft(durableGroup.description ?? "");
+          setSaveFeedback("Group saved. Its AI index is pending; retry the AI index below.");
+        } catch {
+          // Keep the entered notes and pending retry action if the refresh also fails.
+        }
+      }
+    } finally {
+      setSavingIntroduction(false);
+    }
+  };
+
+  const handleRetryIntroductionReindex = async () => {
+    if (!reindexPending || reindexing) return;
+    setReindexing(true);
+    setIntroductionError(null);
+    try {
+      await reindexGroup(reindexPending.group_id);
+      setReindexPending(null);
+      setEditingIntroduction(false);
+      setSaveFeedback("The saved group introduction is preserved. Its AI index refresh was queued.");
+    } catch (requestError) {
+      setIntroductionError(getErrorMessage(requestError, "The AI index could not be queued. Please retry."));
+    } finally {
+      setReindexing(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="mx-auto flex w-full max-w-6xl items-center justify-center p-6 lg:p-8">
@@ -431,9 +554,6 @@ export default function GroupDetailPage({
                 <span className="mt-2 inline-flex rounded-4xl border border-border bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">
                   {group.access_role === "owner" ? "Owner" : group.access_role === "editor" ? "Editor" : "Viewer"}
                 </span>
-                <p className="mt-2 max-w-2xl break-words text-sm text-muted-foreground">
-                  {group.description || "No AI introduction added yet."}
-                </p>
               </div>
             </div>
 
@@ -460,15 +580,6 @@ export default function GroupDetailPage({
                 Share
               </Button>
             )}
-            {group.can_edit && (
-              <Link
-                href={`/groups?edit=${group.id}`}
-                className={`${linkActionClass} border border-border bg-card text-foreground hover:bg-muted`}
-              >
-                <Pencil className="size-3.5" aria-hidden="true" />
-                Edit group
-              </Link>
-            )}
           </div>
         </div>
       </header>
@@ -476,6 +587,88 @@ export default function GroupDetailPage({
       <div aria-live="polite" className="min-h-5 text-sm text-muted-foreground">
         {saveFeedback}
       </div>
+
+      <section aria-labelledby="group-introduction-heading" className="min-w-0 rounded-lg border border-border bg-card p-4 sm:p-5">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h2 id="group-introduction-heading" className="text-lg font-semibold text-foreground">Group introduction</h2>
+            <p className="mt-1 max-w-3xl break-words text-sm text-muted-foreground">
+              Human notes and general guidelines for this group knowledge base, available to people and AI Chat.
+            </p>
+          </div>
+          {group.can_edit && !editingIntroduction && (
+            <Button type="button" variant="outline" onClick={openIntroductionEditor}>
+              <Pencil className="size-3.5" aria-hidden="true" />
+              Edit introduction
+            </Button>
+          )}
+        </div>
+
+        {editingIntroduction ? (
+          <form onSubmit={handleSaveIntroduction} className="mt-5 space-y-4">
+            <div className="space-y-1.5">
+              <label htmlFor="group-introduction" className="text-sm font-medium text-foreground">
+                Human notes &amp; general guidelines <span className="font-normal text-muted-foreground">(optional)</span>
+              </label>
+              <textarea
+                id="group-introduction"
+                name="group-introduction"
+                value={introductionDraft}
+                onChange={(event) => setIntroductionDraft(event.target.value)}
+                placeholder="e.g. Keep planning decisions tied to an owner and a date…"
+                maxLength={500}
+                rows={6}
+                autoComplete="off"
+                aria-describedby="group-introduction-help"
+                disabled={savingIntroduction || reindexing}
+                className="w-full resize-y rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
+              />
+              <p id="group-introduction-help" className="break-words text-xs text-muted-foreground">
+                Supports Markdown. These notes guide the group knowledge base and AI Chat. Up to 500 characters.
+              </p>
+            </div>
+
+            {introductionError && (
+              <p role="alert" aria-live="assertive" className="break-words rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                {introductionError}
+              </p>
+            )}
+            {reindexPending && (
+              <div className="space-y-2 rounded-lg border border-primary/25 bg-primary/10 px-3 py-2 text-sm text-foreground">
+                <p className="break-words">The saved introduction is preserved. Retry the AI index without changing it.</p>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => void handleRetryIntroductionReindex()}
+                  disabled={reindexing}
+                  loading={reindexing}
+                >
+                  Retry AI index
+                </Button>
+              </div>
+            )}
+
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button type="button" variant="outline" onClick={cancelIntroductionEdit} disabled={savingIntroduction || reindexing}>
+                Cancel
+              </Button>
+              <Button type="submit" loading={savingIntroduction} disabled={reindexing}>
+                Save introduction
+              </Button>
+            </div>
+          </form>
+        ) : group.description ? (
+          <div className="mt-5 max-h-[28rem] min-w-0 overflow-y-auto overscroll-contain rounded-lg border border-border bg-muted/30 p-4 sm:p-5">
+            {/* Omit citation data so human notes cannot turn model citation tokens into meeting links. */}
+            <ChatMarkdown content={group.description} />
+          </div>
+        ) : (
+          <p className="mt-5 rounded-lg border border-dashed border-border bg-muted/30 px-4 py-6 break-words text-sm text-muted-foreground">
+            No human notes or general guidelines have been added yet.
+            {group.can_edit ? " Add guidance to give this group a clear knowledge-base context." : ""}
+          </p>
+        )}
+      </section>
 
       <div className="grid min-w-0 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.15fr)]">
         <section aria-labelledby="assigned-meetings-heading" className="min-w-0 rounded-lg border border-border bg-card p-4 sm:p-5">

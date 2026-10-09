@@ -192,7 +192,7 @@ function GroupFormDialog({
         <DialogHeader>
           <DialogTitle>{isEditing ? "Edit group" : "Create a group"}</DialogTitle>
           <DialogDescription>
-            Groups organize meetings and provide the context used by AI Chat.
+            Groups organize meetings and provide shared context for the group knowledge base. Add human notes or general guidelines to help people and AI use it.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={handleSubmit} className="space-y-4">
@@ -215,20 +215,21 @@ function GroupFormDialog({
           </div>
           <div className="space-y-1.5">
             <label htmlFor="group-description" className="text-sm font-medium text-foreground">
-              Introduction / context for AI <span className="font-normal text-muted-foreground">(optional)</span>
+              Human notes &amp; general guidelines <span className="font-normal text-muted-foreground">(optional)</span>
             </label>
             <textarea
               id="group-description"
               name="group-description"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
-              placeholder="e.g. context for planning meetings…"
+              placeholder="e.g. Keep planning decisions tied to an owner and a date…"
               maxLength={500}
               disabled={saving || reindexing}
               rows={4}
+              autoComplete="off"
               className="w-full resize-none rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
             />
-            <p className="text-xs text-muted-foreground">This guides group-level AI queries. Up to 500 characters.</p>
+            <p className="text-xs text-muted-foreground">Supports Markdown and guides the group knowledge base and AI Chat. Up to 500 characters.</p>
           </div>
           {error && (
             <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">

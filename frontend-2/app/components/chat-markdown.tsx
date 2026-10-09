@@ -130,14 +130,14 @@ export function ChatMarkdown({ content, citations, className }: ChatMarkdownProp
         }
 
         return (
-          <div className="not-prose my-4 overflow-hidden rounded-lg border border-stone-200 bg-stone-50">
+          <div className="not-prose my-4 min-w-0 overflow-hidden rounded-lg border border-stone-200 bg-stone-50 dark:border-border dark:bg-muted">
             {language && (
-              <div className="border-b border-stone-200 px-4 py-1.5 font-mono text-xs text-stone-500">
+              <div className="border-b border-stone-200 px-4 py-1.5 font-mono text-xs text-stone-500 dark:border-border dark:text-muted-foreground">
                 {language}
               </div>
             )}
             <pre
-              className="overflow-x-auto p-4 font-mono text-xs leading-5 text-stone-800 [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-inherit"
+              className="max-w-full overflow-x-auto p-4 font-mono text-xs leading-5 text-stone-800 dark:text-foreground [&_code]:bg-transparent [&_code]:p-0 [&_code]:text-inherit"
               {...props}
             >
               {children}
@@ -147,7 +147,7 @@ export function ChatMarkdown({ content, citations, className }: ChatMarkdownProp
       },
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       table: ({ children, node: _node, ...props }) => (
-        <div className="my-4 overflow-x-auto rounded-lg border border-stone-200">
+        <div className="my-4 min-w-0 max-w-full overflow-x-auto rounded-lg border border-stone-200 dark:border-border">
           <table className="my-0 min-w-full" {...props}>
             {children}
           </table>
@@ -162,13 +162,13 @@ export function ChatMarkdown({ content, citations, className }: ChatMarkdownProp
       className={cn(
         "prose prose-stone prose-sm max-w-none break-words",
         "prose-headings:font-semibold prose-headings:text-stone-900 prose-p:text-stone-800",
-        "prose-a:text-primary prose-strong:text-stone-900",
-        "prose-code:rounded-md prose-code:bg-stone-100 prose-code:px-1 prose-code:py-0.5 prose-code:font-mono prose-code:font-normal prose-code:text-stone-800 prose-code:before:content-none prose-code:after:content-none",
+        "prose-a:text-primary prose-strong:text-stone-900 dark:prose-strong:text-foreground",
+        "prose-code:rounded-md prose-code:bg-stone-100 prose-code:px-1 prose-code:py-0.5 prose-code:font-mono prose-code:font-normal prose-code:text-stone-800 prose-code:before:content-none prose-code:after:content-none dark:prose-code:bg-muted dark:prose-code:text-foreground",
         "prose-th:text-stone-700 prose-td:align-top",
         className,
       )}
     >
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml components={components}>
         {markdown}
       </ReactMarkdown>
     </div>
