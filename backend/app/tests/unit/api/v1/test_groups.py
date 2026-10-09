@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine
 
 from app.api import deps
-from app.models import Group, User
+from app.models import Group, GroupMembership, User
 from app.services import base as base_module
 from app.services import group as group_module
 
@@ -24,7 +24,10 @@ def fixture_sqlite_engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    SQLModel.metadata.create_all(engine, tables=[Group.__table__])
+    SQLModel.metadata.create_all(
+        engine,
+        tables=[Group.__table__, GroupMembership.__table__],
+    )
     return engine
 
 
@@ -33,6 +36,7 @@ def fixture_test_client(sqlite_engine, monkeypatch: pytest.MonkeyPatch) -> Itera
     """Create a minimal FastAPI app with only the groups router."""
     monkeypatch.setattr(group_module, "engine", sqlite_engine)
     monkeypatch.setattr(base_module, "engine", sqlite_engine)
+    monkeypatch.setattr(group_module.GroupService, "_enqueue_group_reindex", staticmethod(lambda _group_id: None))
 
     from app.api.v1.endpoints import groups
 
@@ -159,6 +163,31 @@ def test_update_group_partial(test_client: TestClient) -> None:
     data = response.json()
     assert data["name"] == "Updated Name Only"
     assert data["description"] == "Original Desc"
+
+
+def test_update_group_reports_pending_reindex_without_losing_durable_update(
+    test_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    create_resp = test_client.post("/groups/", json={"name": "Original"})
+    group_id = create_resp.json()["id"]
+
+    def fail_enqueue(value: int) -> None:
+        raise group_module.GroupReindexEnqueueError(value)
+
+    monkeypatch.setattr(
+        group_module.GroupService,
+        "_enqueue_group_reindex",
+        staticmethod(fail_enqueue),
+    )
+
+    response = test_client.patch(
+        f"/groups/{group_id}",
+        json={"description": "Pending context"},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"]["code"] == "group_reindex_pending"
+    assert test_client.get(f"/groups/{group_id}").json()["description"] == "Pending context"
 
 
 def test_update_group_not_found(test_client: TestClient) -> None:

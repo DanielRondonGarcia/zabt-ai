@@ -9,7 +9,7 @@ import pytest
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel, Session, create_engine
 
-from app.models import Group
+from app.models import Group, GroupMembership
 from app.services import base as base_module
 from app.services import group as group_module
 from app.services.group import GroupService
@@ -23,7 +23,10 @@ def fixture_sqlite_engine():
         connect_args={"check_same_thread": False},
         poolclass=StaticPool,
     )
-    SQLModel.metadata.create_all(engine, tables=[Group.__table__])
+    SQLModel.metadata.create_all(
+        engine,
+        tables=[Group.__table__, GroupMembership.__table__],
+    )
     return engine
 
 

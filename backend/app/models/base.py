@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Optional, List, Literal
 from enum import Enum
 from sqlmodel import Field, SQLModel, Relationship
-from sqlalchemy import Column, String
+from sqlalchemy import Column, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 
 
@@ -55,6 +55,13 @@ class Group(SQLModel, table=True):
         back_populates="group",
         sa_relationship_kwargs={"passive_deletes": True},
     )
+    memberships: List["GroupMembership"] = Relationship(
+        back_populates="group",
+        sa_relationship_kwargs={
+            "cascade": "all, delete-orphan",
+            "passive_deletes": True,
+        },
+    )
 
 
 class SummaryTemplateRead(SQLModel):
@@ -82,16 +89,20 @@ class GroupRead(SQLModel):
     owner_id: int
     created_at: datetime
     updated_at: datetime
+    access_role: Literal["owner", "editor", "viewer"]
+    can_edit: bool
+    can_manage_members: bool
+    can_delete: bool
 
 
 class GroupCreate(SQLModel):
-    name: str
-    description: Optional[str] = None
+    name: str = Field(max_length=100)
+    description: Optional[str] = Field(default=None, max_length=500)
 
 
 class GroupUpdate(SQLModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
+    name: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=500)
 
 
 class LanguageEntry(SQLModel, table=True):
@@ -144,6 +155,74 @@ class User(UserBase, table=True):
         back_populates="user",
         sa_relationship_kwargs={"cascade": "all, delete-orphan"},
     )
+    group_memberships: List["GroupMembership"] = Relationship(
+        back_populates="user",
+        sa_relationship_kwargs={
+            "cascade": "all, delete-orphan",
+            "passive_deletes": True,
+        },
+    )
+
+
+class GroupMemberRole(str, Enum):
+    VIEWER = "viewer"
+    EDITOR = "editor"
+
+
+class GroupMembership(SQLModel, table=True):
+    """Direct access grant for a user on a group."""
+
+    __tablename__ = "groupmembership"
+    __table_args__ = (
+        UniqueConstraint(
+            "group_id",
+            "user_id",
+            name="uq_groupmembership_group_user",
+        ),
+        Index("ix_groupmembership_group_role", "group_id", "role"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    group_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("group.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    user_id: int = Field(
+        sa_column=Column(
+            Integer,
+            ForeignKey("user.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        )
+    )
+    role: GroupMemberRole = Field(
+        default=GroupMemberRole.VIEWER,
+        sa_column=Column(String(16), nullable=False),
+    )
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+
+    group: Optional[Group] = Relationship(back_populates="memberships")
+    user: Optional[User] = Relationship(back_populates="group_memberships")
+
+
+class GroupMemberRead(SQLModel):
+    user_id: int
+    email: str
+    full_name: Optional[str]
+    role: Literal["owner", "editor", "viewer"]
+    created_at: datetime
+    updated_at: datetime
+
+
+class GroupUserSearchRead(SQLModel):
+    user_id: int
+    email: str
+    full_name: Optional[str]
 
 
 class AuthSession(SQLModel, table=True):
@@ -345,6 +424,14 @@ class MeetingRead(MeetingBase):
     visual_breakdown_status: Optional[str] = None
     visual_breakdown_error: Optional[str] = None
     visual_breakdown_completed_at: Optional[datetime] = None
+    # Server-computed capabilities keep shared meeting UI state aligned with
+    # the current owner/editor/viewer authorization decision.
+    can_edit: bool = False
+    can_delete: bool = False
+    can_share_email: bool = False
+    can_retranscribe: bool = False
+    can_reprocess: bool = False
+    can_request_visual_breakdown: bool = False
 
 
 class MeetingSummaryUpdate(SQLModel):
