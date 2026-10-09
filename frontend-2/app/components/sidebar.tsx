@@ -67,7 +67,6 @@ export function Sidebar({ onNavClick }: SidebarProps) {
     const pathname = usePathname();
     const [userName, setUserName] = useState("User");
     const [userEmail, setUserEmail] = useState("");
-    const [channelsOpen, setChannelsOpen] = useState(true);
     const [dmOpen, setDmOpen] = useState(true);
     const [foldersOpen, setFoldersOpen] = useState(false);
 
@@ -140,28 +139,6 @@ export function Sidebar({ onNavClick }: SidebarProps) {
                     );
                 })}
             </nav>
-
-            {/* Channels */}
-            <div className="mt-1">
-                <button
-                    onClick={() => setChannelsOpen((v) => !v)}
-                    className="w-full flex items-center justify-between px-4 py-1.5 text-xs font-medium uppercase tracking-wide text-sidebar-foreground/55 hover:text-sidebar-foreground transition-colors"
-                >
-                    <span>Channels</span>
-                    <ChevronIcon open={channelsOpen} />
-                </button>
-                {channelsOpen && (
-                    <div className="px-2 pb-1 space-y-0.5">
-                        <Link
-                            href="/channels/general"
-                            onClick={onNavClick}
-                            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm text-sidebar-foreground/75 hover:bg-sidebar-accent hover:text-sidebar-accent-foreground transition-colors"
-                        >
-                            <HashIcon /> General
-                        </Link>
-                    </div>
-                )}
-            </div>
 
             {/* Direct Messages */}
             <div className="mt-1">
