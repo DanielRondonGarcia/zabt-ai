@@ -68,6 +68,8 @@ services:
       AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:-http://localhost:3001}
       BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3001}
       APP_URL: ${APP_URL:-http://localhost:3001}
+      # Public Streamable HTTP endpoint used by external MCP clients.
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-http://localhost:8000/api/v1/mcp}
       # Bootstrap credentials are read only by the API startup command. They
       # are never sent to worker or beat, and are not reapplied after creation.
       # Empty values allow restarts after provisioning; the bootstrap command

@@ -110,7 +110,7 @@ def get_mcp_status(
     _ = current_user
     return MCPStatus(
         enabled=True,
-        endpoint=f"{settings.API_V1_STR}/mcp",
+        endpoint=settings.MCP_PUBLIC_URL,
         auth_mode="bearer_token",
         tools=list(MCP_TOOL_NAMES),
     )

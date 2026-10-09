@@ -99,26 +99,32 @@ rejects invalid transport requests before MCP processing.
 
 ## External client configuration
 
-Use the configuration format supported by the client. Replace the placeholder
-with the token copied during creation; never commit a real token:
+Use the configuration format supported by the client. Define `ZABT_MCP_TOKEN` in
+the external client's environment with the token copied during creation; never
+commit a real token:
 
 ```json
 {
   "mcpServers": {
     "zabt": {
+      "type": "streamable-http",
       "url": "https://api.example.com/api/v1/mcp",
       "headers": {
-        "Authorization": "Bearer <token>"
+        "Authorization": "Bearer ${ZABT_MCP_TOKEN}"
       }
     }
   }
 }
 ```
 
-Cursor, Claude Desktop, and similar clients may name the same fields slightly
-differently, but the required HTTP behavior is the same: POST Streamable HTTP
-JSON-RPC requests to `/api/v1/mcp` with the bearer header. Do not paste the
-token into a repository, issue, screenshot, log, or support message.
+If the client has a field named **Bearer token environment variable**, enter only
+`ZABT_MCP_TOKEN`, not the raw token or `Bearer ...`. Choose Streamable HTTP, not
+STDIO. Cursor, Claude Desktop, and similar clients may name the same fields
+slightly differently, but the required HTTP behavior is the same: POST
+Streamable HTTP JSON-RPC requests to `/api/v1/mcp` with the bearer header. After
+saving, reconnect or reopen the chat if the client does not discover the tools.
+Do not paste the token into a repository, issue, screenshot, log, or support
+message.
 
 ## Verification
 

@@ -12,6 +12,7 @@
 #   TRANSCRIPTION_BACKEND=runpod
 #   RUNPOD_API_KEY=... RUNPOD_ENDPOINT_ID=...
 #   APP_URL=https://app.your-domain    NEXT_PUBLIC_API_URL=https://api.your-domain/api/v1
+#   MCP_PUBLIC_URL=https://api.your-domain/api/v1/mcp
 #
 # The frontend (web) is typically hosted separately (e.g. Vercel) in this topology, so
 # it is not started here; run it locally with COMPOSE_PROFILES=local if you want it in

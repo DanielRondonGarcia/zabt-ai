@@ -107,6 +107,13 @@ intentionally unavailable without a configured delivery provider.
 | `NEXT_PUBLIC_FRONTEND_URL` | `http://localhost:3001` | |
 | `APP_URL` | `http://localhost:3001` | Used in email deep-links. |
 | `BACKEND_CORS_ORIGINS` | `http://localhost:3001` | Comma-separated allowed origins. |
+| `MCP_PUBLIC_URL` | `http://localhost:8000/api/v1/mcp` | Public URL for the stateless Streamable HTTP MCP endpoint. Set the externally reachable URL in cloud deployments. |
+
+The MCP endpoint is mounted exactly at `/api/v1/mcp`. Create a bearer token from **Settings →
+Read-only MCP access**; the raw value is returned once and is never stored by Zabt. External MCP
+clients should read that value from an environment variable such as `ZABT_MCP_TOKEN`, rather than
+persisting it in a configuration file or entering it into a field that expects an environment
+variable name.
 
 ## LLM (summarization)
 

@@ -27,6 +27,24 @@ function formatDate(value: string): string {
   return dateFormatter.format(new Date(value));
 }
 
+function buildMcpConnectionExample(endpoint: string): string {
+  return JSON.stringify(
+    {
+      mcpServers: {
+        zabt: {
+          type: "streamable-http",
+          url: endpoint,
+          headers: {
+            Authorization: "Bearer ${ZABT_MCP_TOKEN}",
+          },
+        },
+      },
+    },
+    null,
+    2,
+  );
+}
+
 export function McpTokenManager() {
   const [status, setStatus] = useState<McpStatus | null>(null);
   const [tokens, setTokens] = useState<McpTokenMetadata[]>([]);
@@ -34,7 +52,8 @@ export function McpTokenManager() {
   const [expiresInDays, setExpiresInDays] = useState("30");
   const [newToken, setNewToken] = useState<McpTokenCreated | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<McpTokenMetadata | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [copiedToken, setCopiedToken] = useState(false);
+  const [copiedExample, setCopiedExample] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [revoking, setRevoking] = useState(false);
@@ -67,7 +86,7 @@ export function McpTokenManager() {
 
     setSaving(true);
     setError(null);
-    setCopied(false);
+    setCopiedToken(false);
     try {
       const created = await createMcpToken(label, Number(expiresInDays));
       setNewToken(created);
@@ -85,10 +104,21 @@ export function McpTokenManager() {
     if (!newToken) return;
     try {
       await navigator.clipboard.writeText(newToken.token);
-      setCopied(true);
+      setCopiedToken(true);
       setAnnouncement("Token copied. Keep it private; it will not be shown after leaving this page.");
     } catch {
       setError("Copying failed. Select the token manually and store it securely.");
+    }
+  }
+
+  async function copyConnectionExample() {
+    if (!status) return;
+    try {
+      await navigator.clipboard.writeText(buildMcpConnectionExample(status.endpoint));
+      setCopiedExample(true);
+      setAnnouncement("MCP connection example copied.");
+    } catch {
+      setError("Copying the connection example failed. Select the JSON manually and try again.");
     }
   }
 
@@ -126,10 +156,10 @@ export function McpTokenManager() {
         <>
           <div className="rounded-lg border border-border bg-card p-4 text-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
+              <div className="min-w-0">
                 <p className="font-medium text-card-foreground">Endpoint</p>
                 <code className="break-all text-xs text-muted-foreground" translate="no">
-                  {status?.endpoint ?? "/api/v1/mcp"}
+                  {status?.endpoint ?? "Unavailable"}
                 </code>
               </div>
               <div>
@@ -141,6 +171,35 @@ export function McpTokenManager() {
               OAuth 2.1 metadata and PKCE can be added later. Do not use your Microsoft or OIDC token here.
             </p>
           </div>
+
+          {status && (
+            <div className="min-w-0 space-y-3 overflow-hidden rounded-lg border border-border bg-card p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <h3 className="font-medium text-card-foreground">Connection example</h3>
+                  <p className="text-sm text-muted-foreground">
+                    Define <code className="font-mono text-xs" translate="no">ZABT_MCP_TOKEN</code> in the external client with the one-time token value.
+                    If it has a “Bearer token environment variable” field, enter only <code className="font-mono text-xs" translate="no">ZABT_MCP_TOKEN</code>, not the raw token or <code className="font-mono text-xs" translate="no">Bearer …</code>.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  onClick={copyConnectionExample}
+                  aria-label={copiedExample ? "MCP connection example copied" : "Copy MCP connection example"}
+                >
+                  {copiedExample ? <Check className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
+                </Button>
+              </div>
+              <pre className="max-w-full overflow-x-auto rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed text-foreground" translate="no">
+                <code>{buildMcpConnectionExample(status.endpoint)}</code>
+              </pre>
+              <p className="text-xs text-muted-foreground">
+                Use Streamable HTTP, not STDIO. Reconnect or reopen the chat after saving so the client discovers the tools.
+              </p>
+            </div>
+          )}
 
           <form className="space-y-3 rounded-lg border border-border bg-card p-4" onSubmit={handleCreate}>
             <div className="flex items-center gap-2">
@@ -202,8 +261,8 @@ export function McpTokenManager() {
                 <code className="min-w-0 flex-1 break-all rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-foreground" translate="no">
                   {newToken.token}
                 </code>
-                <Button type="button" variant="outline" size="icon" onClick={copyToken} aria-label="Copy MCP token">
-                  {copied ? <Check className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
+                <Button type="button" variant="outline" size="icon" onClick={copyToken} aria-label={copiedToken ? "MCP token copied" : "Copy MCP token"}>
+                  {copiedToken ? <Check className="size-4" aria-hidden="true" /> : <Copy className="size-4" aria-hidden="true" />}
                 </Button>
               </div>
             </div>

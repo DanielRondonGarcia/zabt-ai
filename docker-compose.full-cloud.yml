@@ -24,6 +24,7 @@ x-backend-environment: &backend-environment
   AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:?AUTH_ALLOWED_ORIGINS must be set for full-cloud deployment}
   BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:?BACKEND_CORS_ORIGINS must be set for full-cloud deployment}
   APP_URL: ${APP_URL:?APP_URL must be set for full-cloud deployment}
+  MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:?MCP_PUBLIC_URL must be set for full-cloud deployment}
 
   # External S3-compatible object storage. S3_PUBLIC_URL must be reachable by
   # browsers because upload and download URLs are signed for direct access.

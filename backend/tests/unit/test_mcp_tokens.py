@@ -113,7 +113,15 @@ def mcp_management_client(mcp_database, monkeypatch: pytest.MonkeyPatch):
         yield client
 
 
-def test_management_routes_return_raw_token_only_on_create(mcp_management_client):
+def test_management_routes_return_raw_token_only_on_create(
+    mcp_management_client,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        mcp.settings,
+        "MCP_PUBLIC_URL",
+        "https://mcp.example.com/api/v1/mcp",
+    )
     created = mcp_management_client.post(
         "/mcp/tokens",
         json={"label": "Cursor", "expires_in_days": 30},
@@ -136,7 +144,7 @@ def test_management_routes_return_raw_token_only_on_create(mcp_management_client
     assert status_response.status_code == 200
     assert status_response.json() == {
         "enabled": True,
-        "endpoint": "/api/v1/mcp",
+        "endpoint": "https://mcp.example.com/api/v1/mcp",
         "auth_mode": "bearer_token",
         "tools": [
             "list_groups",

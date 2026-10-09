@@ -29,6 +29,7 @@ x-cloud-backend-environment: &cloud-backend-environment
   AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:?AUTH_ALLOWED_ORIGINS must be set for cloud production}
   BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:?BACKEND_CORS_ORIGINS must be set for cloud production}
   APP_URL: ${APP_URL:?APP_URL must be set for cloud production}
+  MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:?MCP_PUBLIC_URL must be set for cloud production}
 
   # Text summaries use the first-party OpenAI endpoint.
   OPENAI_BASE_URL: https://api.openai.com/v1
