@@ -278,6 +278,9 @@ export const linkMicrosoftOidcToken = async (
 
 // ── Groups and AI chat ────────────────────────────────────────────────────────
 
+export type GroupAccessRole = "owner" | "editor" | "viewer";
+export type GroupMemberRole = "editor" | "viewer";
+
 export interface GroupSummary {
   id: number;
   name: string;
@@ -285,6 +288,10 @@ export interface GroupSummary {
   owner_id: number;
   created_at: string;
   updated_at: string;
+  access_role: GroupAccessRole;
+  can_edit: boolean;
+  can_manage_members: boolean;
+  can_delete: boolean;
 }
 
 export interface GroupPayload {
@@ -340,6 +347,21 @@ export interface GroupReindexResponse {
   task_id: string;
 }
 
+export interface GroupUserSearchResult {
+  user_id: number;
+  email: string;
+  full_name: string | null;
+}
+
+export interface GroupMember {
+  user_id: number;
+  email: string;
+  full_name: string | null;
+  role: GroupAccessRole;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface McpTokenMetadata {
   id: number;
   label: string;
@@ -373,10 +395,16 @@ export interface AskAiChatPayload {
 export const getApiErrorStatus = (error: unknown): number | undefined =>
   axios.isAxiosError(error) ? error.response?.status : undefined;
 
-export const getApiErrorMessage = (error: unknown): string | undefined =>
-  axios.isAxiosError(error) && typeof error.response?.data?.detail === "string"
-    ? error.response.data.detail
-    : undefined;
+export const getApiErrorMessage = (error: unknown): string | undefined => {
+  if (!axios.isAxiosError(error)) return undefined;
+  const detail = error.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (typeof detail === "object" && detail !== null && "message" in detail) {
+    const message = (detail as { message?: unknown }).message;
+    return typeof message === "string" ? message : undefined;
+  }
+  return undefined;
+};
 
 export const getGroups = async (): Promise<GroupSummary[]> => {
   const { data } = await apiClient.get<GroupSummary[]>("/groups/");
@@ -408,6 +436,51 @@ export const deleteGroup = async (groupId: number): Promise<void> => {
 export const reindexGroup = async (groupId: number): Promise<GroupReindexResponse> => {
   const { data } = await apiClient.post<GroupReindexResponse>(`/groups/${groupId}/reindex`);
   return data;
+};
+
+export const searchGroupUsers = async (
+  groupId: number,
+  query: string,
+  limit = 10,
+): Promise<GroupUserSearchResult[]> => {
+  const { data } = await apiClient.get<GroupUserSearchResult[]>(
+    `/groups/${groupId}/members/search`,
+    { params: { q: query, limit } },
+  );
+  return data;
+};
+
+export const listGroupMembers = async (groupId: number): Promise<GroupMember[]> => {
+  const { data } = await apiClient.get<GroupMember[]>(`/groups/${groupId}/members`);
+  return data;
+};
+
+export const addGroupMember = async (
+  groupId: number,
+  userId: number,
+  role: GroupMemberRole,
+): Promise<GroupMember> => {
+  const { data } = await apiClient.post<GroupMember>(`/groups/${groupId}/members`, {
+    user_id: userId,
+    role,
+  });
+  return data;
+};
+
+export const updateGroupMember = async (
+  groupId: number,
+  userId: number,
+  role: GroupMemberRole,
+): Promise<GroupMember> => {
+  const { data } = await apiClient.patch<GroupMember>(
+    `/groups/${groupId}/members/${userId}`,
+    { role },
+  );
+  return data;
+};
+
+export const removeGroupMember = async (groupId: number, userId: number): Promise<void> => {
+  await apiClient.delete(`/groups/${groupId}/members/${userId}`);
 };
 
 export const getMcpStatus = async (): Promise<McpStatus> => {
@@ -443,6 +516,16 @@ export const assignMeetingGroup = async (
     `/meetings/${meetingId}/assign-group`,
     { group_id: groupId },
   );
+  return data;
+};
+
+export interface MeetingReindexResponse {
+  status: "accepted";
+  task_id: string;
+}
+
+export const reindexMeeting = async (meetingId: number): Promise<MeetingReindexResponse> => {
+  const { data } = await apiClient.post<MeetingReindexResponse>(`/meetings/${meetingId}/reindex`);
   return data;
 };
 
@@ -552,11 +635,16 @@ export const submitYoutubeUrl = async (url: string, transcriptionType: string = 
 
 export const getMeetings = async (
   skip = 0,
-  limit = 20
+  limit = 20,
+  groupId?: number,
 ): Promise<Meeting[]> => {
-  const res = await apiClient.get<Meeting[]>(
-    `/meetings/?skip=${skip}&limit=${limit}`
-  );
+  const res = await apiClient.get<Meeting[]>("/meetings/", {
+    params: {
+      skip,
+      limit,
+      ...(groupId !== undefined ? { group_id: groupId } : {}),
+    },
+  });
   return res.data;
 };
 

@@ -14,6 +14,7 @@ import {
   Loader2,
   Pencil,
   Search,
+  Share2,
   Video,
 } from "lucide-react";
 import {
@@ -28,6 +29,7 @@ import {
 import { StatusBadge } from "@/app/components/status-badge";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
+import { GroupMembersDialog } from "@/app/components/group-members-dialog";
 
 const dateFormatter = new Intl.DateTimeFormat("en-US", {
   month: "short",
@@ -97,6 +99,7 @@ interface MeetingRowProps {
   assignmentError: AssignmentError | null;
   onAssign: (meeting: Meeting, targetGroupId: number | null) => void;
   onRetry: () => void;
+  canManage: boolean;
 }
 
 function MeetingRow({
@@ -109,6 +112,7 @@ function MeetingRow({
   assignmentError,
   onAssign,
   onRetry,
+  canManage,
 }: MeetingRowProps) {
   const currentGroupName = meeting.group_id !== null && meeting.group_id !== currentGroupId
     ? groupNames.get(meeting.group_id) ?? "another group"
@@ -181,17 +185,19 @@ function MeetingRow({
           Open meeting
           <ArrowRight className="size-3.5" aria-hidden="true" />
         </Link>
-        <Button
-          type="button"
-          size="sm"
-          variant={isRemoveAction ? "outline" : "default"}
-          className={isRemoveAction ? "text-destructive hover:text-destructive" : undefined}
-          onClick={() => onAssign(meeting, actionTarget)}
-          disabled={saving || meeting.group_id === actionTarget}
-          loading={saving}
-        >
-          {actionLabel}
-        </Button>
+        {canManage && (
+          <Button
+            type="button"
+            size="sm"
+            variant={isRemoveAction ? "outline" : "default"}
+            className={isRemoveAction ? "text-destructive hover:text-destructive" : undefined}
+            onClick={() => onAssign(meeting, actionTarget)}
+            disabled={saving || meeting.group_id === actionTarget}
+            loading={saving}
+          >
+            {actionLabel}
+          </Button>
+        )}
       </div>
     </article>
   );
@@ -205,8 +211,9 @@ export default function GroupDetailPage({
   const { id } = use(params);
   const groupId = parseGroupId(id);
   const [group, setGroup] = useState<GroupSummary | null>(null);
-  const [ownedGroups, setOwnedGroups] = useState<GroupSummary[]>([]);
-  const [meetings, setMeetings] = useState<Meeting[]>([]);
+  const [accessibleGroups, setAccessibleGroups] = useState<GroupSummary[]>([]);
+  const [groupMeetings, setGroupMeetings] = useState<Meeting[]>([]);
+  const [ownedMeetings, setOwnedMeetings] = useState<Meeting[]>([]);
   const [loading, setLoading] = useState(groupId !== null);
   const [notFound, setNotFound] = useState(groupId === null);
   const [error, setError] = useState<string | null>(null);
@@ -215,6 +222,7 @@ export default function GroupDetailPage({
   const [savingMeetingIds, setSavingMeetingIds] = useState<Set<number>>(() => new Set());
   const [assignmentError, setAssignmentError] = useState<AssignmentError | null>(null);
   const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
+  const [membersDialogOpen, setMembersDialogOpen] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -233,23 +241,26 @@ export default function GroupDetailPage({
       setNotFound(false);
       setError(null);
       setGroup(null);
-      setOwnedGroups([]);
-      setMeetings([]);
+      setAccessibleGroups([]);
+      setGroupMeetings([]);
+      setOwnedMeetings([]);
       setSearchTerm("");
       setSavingMeetingIds(new Set());
       setAssignmentError(null);
       setSaveFeedback(null);
 
       try {
-        const [selectedGroup, meetingData, groupData] = await Promise.all([
+        const [selectedGroup, selectedGroupMeetings, ownedMeetingData, groupData] = await Promise.all([
           getGroup(groupId),
+          getMeetings(0, 100, groupId),
           getMeetings(0, 100),
           getGroups(),
         ]);
         if (!mounted) return;
         setGroup(selectedGroup);
-        setMeetings(meetingData);
-        setOwnedGroups(groupData);
+        setGroupMeetings(selectedGroupMeetings);
+        setOwnedMeetings(ownedMeetingData);
+        setAccessibleGroups(groupData);
       } catch (requestError) {
         if (!mounted) return;
         if (getApiErrorStatus(requestError) === 404) {
@@ -273,18 +284,18 @@ export default function GroupDetailPage({
   }, [groupId, reloadKey]);
 
   const groupNames = useMemo(() => {
-    const names = new Map(ownedGroups.map((ownedGroup) => [ownedGroup.id, ownedGroup.name]));
+    const names = new Map(accessibleGroups.map((accessibleGroup) => [accessibleGroup.id, accessibleGroup.name]));
     if (group) names.set(group.id, group.name);
     return names;
-  }, [group, ownedGroups]);
+  }, [accessibleGroups, group]);
 
   const assignedMeetings = useMemo(
-    () => meetings.filter((meeting) => meeting.group_id === groupId),
-    [groupId, meetings],
+    () => groupMeetings.filter((meeting) => meeting.group_id === groupId),
+    [groupId, groupMeetings],
   );
   const availableMeetings = useMemo(
-    () => meetings.filter((meeting) => meeting.group_id !== groupId),
-    [groupId, meetings],
+    () => ownedMeetings.filter((meeting) => meeting.group_id !== groupId),
+    [groupId, ownedMeetings],
   );
   const filteredAvailableMeetings = useMemo(() => {
     const normalizedSearch = searchTerm.trim().toLowerCase();
@@ -313,8 +324,17 @@ export default function GroupDetailPage({
 
     try {
       const updatedMeeting = await assignMeetingGroup(meeting.id, targetGroupId);
-      setMeetings((currentMeetings) => currentMeetings.map((currentMeeting) => (
-        currentMeeting.id === updatedMeeting.id ? updatedMeeting : currentMeeting
+      setGroupMeetings((currentMeetings) => {
+        if (targetGroupId === group.id) {
+          const alreadyListed = currentMeetings.some((item) => item.id === updatedMeeting.id);
+          return alreadyListed
+            ? currentMeetings.map((item) => item.id === updatedMeeting.id ? updatedMeeting : item)
+            : [updatedMeeting, ...currentMeetings];
+        }
+        return currentMeetings.filter((item) => item.id !== updatedMeeting.id);
+      });
+      setOwnedMeetings((currentMeetings) => currentMeetings.map((item) => (
+        item.id === updatedMeeting.id ? updatedMeeting : item
       )));
       setSaveFeedback(targetGroupId === null
         ? `${meeting.title} was removed from ${group.name}.`
@@ -338,7 +358,7 @@ export default function GroupDetailPage({
 
   const retryAssignment = () => {
     if (!assignmentError) return;
-    const meeting = meetings.find((currentMeeting) => currentMeeting.id === assignmentError.meetingId);
+    const meeting = [...groupMeetings, ...ownedMeetings].find((currentMeeting) => currentMeeting.id === assignmentError.meetingId);
     if (meeting) void handleAssignment(meeting, assignmentError.targetGroupId);
   };
 
@@ -408,8 +428,11 @@ export default function GroupDetailPage({
               </div>
               <div className="min-w-0">
                 <h1 className="break-words text-2xl font-semibold text-foreground">{group.name}</h1>
+                <span className="mt-2 inline-flex rounded-4xl border border-border bg-muted px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                  {group.access_role === "owner" ? "Owner" : group.access_role === "editor" ? "Editor" : "Viewer"}
+                </span>
                 <p className="mt-2 max-w-2xl break-words text-sm text-muted-foreground">
-                  {group.description || "No description added yet."}
+                  {group.description || "No AI introduction added yet."}
                 </p>
               </div>
             </div>
@@ -430,13 +453,23 @@ export default function GroupDetailPage({
             </dl>
           </div>
 
-          <Link
-            href={`/groups?edit=${group.id}`}
-            className={`${linkActionClass} w-fit shrink-0 border border-border bg-card text-foreground hover:bg-muted`}
-          >
-            <Pencil className="size-3.5" aria-hidden="true" />
-            Edit group
-          </Link>
+          <div className="flex flex-wrap items-center gap-2">
+            {group.can_manage_members && (
+              <Button type="button" variant="outline" onClick={() => setMembersDialogOpen(true)}>
+                <Share2 className="size-3.5" aria-hidden="true" />
+                Share
+              </Button>
+            )}
+            {group.can_edit && (
+              <Link
+                href={`/groups?edit=${group.id}`}
+                className={`${linkActionClass} border border-border bg-card text-foreground hover:bg-muted`}
+              >
+                <Pencil className="size-3.5" aria-hidden="true" />
+                Edit group
+              </Link>
+            )}
+          </div>
         </div>
       </header>
 
@@ -480,6 +513,7 @@ export default function GroupDetailPage({
                   assignmentError={assignmentError}
                   onAssign={handleAssignment}
                   onRetry={retryAssignment}
+                  canManage={group.can_edit}
                 />
               ))}
             </div>
@@ -488,13 +522,15 @@ export default function GroupDetailPage({
 
         <section aria-labelledby="add-meetings-heading" className="min-w-0 rounded-lg border border-border bg-muted/30 p-4 sm:p-5">
           <div className="min-w-0">
-            <h2 id="add-meetings-heading" className="text-lg font-semibold text-foreground">Add meetings</h2>
+            <h2 id="add-meetings-heading" className="text-lg font-semibold text-foreground">{group.can_edit ? "Manage meetings" : "View-only access"}</h2>
             <p className="mt-1 break-words text-sm text-muted-foreground">
-              Add unassigned meetings or move a meeting from another group.
+              {group.can_edit
+                ? "Add your meetings or move one from another group."
+                : "You can read meetings in this group and ask AI Chat questions, but you cannot change group content."}
             </p>
           </div>
 
-          <div className="mt-5 space-y-1.5">
+          {group.can_edit && <div className="mt-5 space-y-1.5">
             <label htmlFor="meeting-search" className="text-sm font-medium text-foreground">
               Search available meetings
             </label>
@@ -511,9 +547,9 @@ export default function GroupDetailPage({
                 className="pl-8"
               />
             </div>
-          </div>
+          </div>}
 
-          {availableMeetings.length === 0 ? (
+          {group.can_edit && (availableMeetings.length === 0 ? (
             <div className="mt-5 rounded-lg border border-dashed border-border bg-card px-4 py-8 text-center">
               <p className="break-words text-sm text-muted-foreground">
                 There are no available meetings. Create or upload one from the Meetings page.
@@ -543,12 +579,19 @@ export default function GroupDetailPage({
                   assignmentError={assignmentError}
                   onAssign={handleAssignment}
                   onRetry={retryAssignment}
+                  canManage={group.can_edit}
                 />
               ))}
             </div>
-          )}
+          ))}
         </section>
       </div>
+      <GroupMembersDialog
+        open={membersDialogOpen}
+        groupId={group.id}
+        groupName={group.name}
+        onOpenChange={setMembersDialogOpen}
+      />
     </div>
   );
 }

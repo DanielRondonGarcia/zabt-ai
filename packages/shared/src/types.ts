@@ -28,6 +28,7 @@ export type MediaType = "audio" | "video";
 
 export interface Meeting {
   id: number;
+  owner_id?: number;
   title: string;
   description: string | null;
   file_path: string;
@@ -67,6 +68,13 @@ export interface Meeting {
   visual_breakdown_status?: VisualBreakdownStatus | null;
   visual_breakdown_error?: string | null;
   visual_breakdown_completed_at?: string | null;
+  /** Server-computed permissions for meeting actions. */
+  can_edit?: boolean;
+  can_delete?: boolean;
+  can_share_email?: boolean;
+  can_retranscribe?: boolean;
+  can_reprocess?: boolean;
+  can_request_visual_breakdown?: boolean;
 }
 
 export interface VisualTranscriptLine {

@@ -7,7 +7,9 @@ import Link from "next/link";
 import {
   createGroup,
   deleteGroup,
+  getGroup,
   getGroups,
+  reindexGroup,
   updateGroup,
   type GroupPayload,
   type GroupSummary,
@@ -34,10 +36,37 @@ import {
 } from "@/app/components/ui/dialog";
 import { ArrowRight, FolderOpen, Pencil, Plus, Trash2, Users } from "lucide-react";
 
+interface GroupReindexPendingDetail {
+  code: "group_reindex_pending";
+  group_id: number;
+  message: string;
+}
+
+function getErrorDetail(error: unknown): unknown {
+  if (typeof error !== "object" || error === null || !("response" in error)) return undefined;
+  return (error as { response?: { data?: { detail?: unknown } } }).response?.data?.detail;
+}
+
+function getGroupReindexPending(error: unknown): GroupReindexPendingDetail | null {
+  const detail = getErrorDetail(error);
+  if (typeof detail !== "object" || detail === null) return null;
+  const value = detail as Partial<GroupReindexPendingDetail>;
+  if (value.code !== "group_reindex_pending" || typeof value.group_id !== "number" || typeof value.message !== "string") {
+    return null;
+  }
+  return {
+    code: value.code,
+    group_id: value.group_id,
+    message: value.message,
+  };
+}
+
 function getErrorMessage(error: unknown, fallback: string): string {
-  if (typeof error === "object" && error !== null && "response" in error) {
-    const response = (error as { response?: { data?: { detail?: unknown } } }).response;
-    if (typeof response?.data?.detail === "string") return response.data.detail;
+  const detail = getErrorDetail(error);
+  if (typeof detail === "string") return detail;
+  if (typeof detail === "object" && detail !== null && "message" in detail) {
+    const message = (detail as { message?: unknown }).message;
+    if (typeof message === "string") return message;
   }
   return error instanceof Error && error.message ? error.message : fallback;
 }
@@ -55,7 +84,12 @@ interface GroupFormDialogProps {
   open: boolean;
   group: GroupSummary | null;
   onOpenChange: (open: boolean) => void;
-  onSaved: (group: GroupSummary, mode: "create" | "update") => void;
+  onSaved: (
+    group: GroupSummary,
+    mode: "create" | "update",
+    introductionChanged: boolean,
+    feedback?: string,
+  ) => void;
 }
 
 function GroupFormDialog({
@@ -69,6 +103,18 @@ function GroupFormDialog({
   const [description, setDescription] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [reindexPending, setReindexPending] = useState<GroupReindexPendingDetail | null>(null);
+  const [reindexing, setReindexing] = useState(false);
+  const [reindexFeedback, setReindexFeedback] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setName(group?.name ?? "");
+    setDescription(group?.description ?? "");
+    setError(null);
+    setReindexPending(null);
+    setReindexFeedback(null);
+  }, [group, open]);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -80,6 +126,8 @@ function GroupFormDialog({
 
     setSaving(true);
     setError(null);
+    setReindexPending(null);
+    setReindexFeedback(null);
     const payload: GroupPayload = {
       name: trimmedName,
       description: description.trim() || null,
@@ -89,12 +137,52 @@ function GroupFormDialog({
       const saved = isEditing && group
         ? await updateGroup(group.id, payload)
         : await createGroup(payload);
-      onSaved(saved, isEditing ? "update" : "create");
+      onSaved(
+        saved,
+        isEditing ? "update" : "create",
+        Boolean(isEditing && group && group.description !== payload.description),
+      );
       onOpenChange(false);
     } catch (requestError) {
-      setError(getErrorMessage(requestError, "The group could not be saved."));
+      const pending = getGroupReindexPending(requestError);
+      if (!pending) {
+        setError(getErrorMessage(requestError, "The group could not be saved."));
+      } else {
+        setError(pending.message);
+        setReindexPending(pending);
+        if (group) {
+          try {
+            const durableGroup = await getGroup(group.id);
+            onSaved(
+              durableGroup,
+              "update",
+              false,
+              "Group saved. Its AI index is pending; retry the index in this dialog.",
+            );
+          } catch {
+            // Keep the entered description and pending retry action if the refresh also fails.
+          }
+        }
+      }
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleRetryReindex = async () => {
+    if (!reindexPending || reindexing) return;
+    setReindexing(true);
+    setError(null);
+    setReindexFeedback(null);
+    try {
+      await reindexGroup(reindexPending.group_id);
+      setReindexPending(null);
+      setReindexFeedback("The saved group introduction is preserved. Its AI index refresh was queued.");
+      onOpenChange(false);
+    } catch (requestError) {
+      setError(getErrorMessage(requestError, "The AI index could not be queued. Please retry."));
+    } finally {
+      setReindexing(false);
     }
   };
 
@@ -121,37 +209,56 @@ function GroupFormDialog({
               maxLength={100}
               autoFocus
               autoComplete="off"
-              disabled={saving}
+              disabled={saving || reindexing}
             />
             <p className="text-xs text-muted-foreground">Up to 100 characters.</p>
           </div>
           <div className="space-y-1.5">
             <label htmlFor="group-description" className="text-sm font-medium text-foreground">
-              Description <span className="font-normal text-muted-foreground">(optional)</span>
+              Introduction / context for AI <span className="font-normal text-muted-foreground">(optional)</span>
             </label>
             <textarea
               id="group-description"
               name="group-description"
               value={description}
               onChange={(event) => setDescription(event.target.value)}
-              placeholder="What meetings belong here?…"
+              placeholder="e.g. context for planning meetings…"
               maxLength={500}
-              disabled={saving}
+              disabled={saving || reindexing}
               rows={4}
               className="w-full resize-none rounded-lg border border-input bg-transparent px-2.5 py-2 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50"
             />
-            <p className="text-xs text-muted-foreground">Up to 500 characters.</p>
+            <p className="text-xs text-muted-foreground">This guides group-level AI queries. Up to 500 characters.</p>
           </div>
           {error && (
             <p role="alert" className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive">
               {error}
             </p>
           )}
+          {reindexPending && (
+            <div className="space-y-2 rounded-lg border border-primary/25 bg-primary/10 px-3 py-2 text-sm text-foreground">
+              <p>The saved description is preserved. Retry the AI index without changing it.</p>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void handleRetryReindex()}
+                disabled={reindexing}
+                loading={reindexing}
+              >
+                Retry AI index
+              </Button>
+            </div>
+          )}
+          {reindexFeedback && (
+            <p role="status" aria-live="polite" className="text-sm text-muted-foreground">
+              {reindexFeedback}
+            </p>
+          )}
           <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
+            <Button type="button" variant="outline" onClick={() => onOpenChange(false)} disabled={saving || reindexing}>
               Cancel
             </Button>
-            <Button type="submit" loading={saving}>
+            <Button type="submit" loading={saving} disabled={reindexing}>
               {isEditing ? "Save changes" : "Create group"}
             </Button>
           </DialogFooter>
@@ -170,6 +277,7 @@ export default function GroupsPage() {
   const [deletingGroup, setDeletingGroup] = useState<GroupSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [saveFeedback, setSaveFeedback] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
@@ -182,7 +290,7 @@ export default function GroupsPage() {
           const groupToEdit = editGroupId === null
             ? null
             : data.find((group) => group.id === editGroupId) ?? null;
-          if (groupToEdit) {
+          if (groupToEdit?.can_edit) {
             setEditingGroup(groupToEdit);
             setFormOpen(true);
           }
@@ -209,11 +317,21 @@ export default function GroupsPage() {
     setFormOpen(true);
   };
 
-  const handleSaved = (saved: GroupSummary, mode: "create" | "update") => {
+  const handleSaved = (
+    saved: GroupSummary,
+    mode: "create" | "update",
+    introductionChanged: boolean,
+    feedback?: string,
+  ) => {
     setGroups((current) => mode === "create"
       ? [saved, ...current]
       : current.map((group) => (group.id === saved.id ? saved : group)));
     setError(null);
+    setSaveFeedback(feedback ?? (
+      introductionChanged
+        ? "Group saved. The AI index refresh has been queued for the new introduction."
+        : "Group saved."
+    ));
   };
 
   const handleDelete = async () => {
@@ -244,7 +362,7 @@ export default function GroupsPage() {
           </div>
           <h1 className="text-2xl font-semibold text-foreground">Groups</h1>
           <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-            Organize meetings into owner-only groups so retrieval and AI Chat can use the right context.
+            Organize meetings into shared context groups and guide AI Chat with an optional introduction.
           </p>
         </div>
         <Button onClick={openCreateDialog}>
@@ -258,6 +376,8 @@ export default function GroupsPage() {
           {error}
         </div>
       )}
+
+      <div aria-live="polite" className="min-h-5 text-sm text-muted-foreground">{saveFeedback}</div>
 
       {loading ? (
         <div className="rounded-lg border border-border bg-card px-6 py-12 text-center text-sm text-muted-foreground">
@@ -278,7 +398,7 @@ export default function GroupsPage() {
       ) : (
         <section aria-labelledby="groups-heading" className="space-y-3">
           <div className="flex items-center justify-between">
-            <h2 id="groups-heading" className="text-lg font-semibold text-foreground">Your groups</h2>
+            <h2 id="groups-heading" className="text-lg font-semibold text-foreground">Available groups</h2>
             <span className="text-sm text-muted-foreground">{groups.length} {groups.length === 1 ? "group" : "groups"}</span>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
@@ -288,14 +408,19 @@ export default function GroupsPage() {
                   <div className="min-w-0">
                     <h3 className="truncate text-base font-semibold text-foreground">{group.name}</h3>
                     <p className="mt-1 min-h-10 break-words text-sm text-muted-foreground">
-                      {group.description || "No description added yet."}
+                      {group.description || "No AI introduction added yet."}
                     </p>
                   </div>
                   <Users className="mt-0.5 size-5 shrink-0 text-muted-foreground" aria-hidden="true" />
                 </div>
                 <div className="mt-5 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
-                  <span className="text-xs text-muted-foreground">Created {formatDate(group.created_at)}</span>
-                  <div className="flex flex-wrap items-center justify-end gap-1">
+                   <div className="flex flex-wrap items-center gap-2">
+                     <span className="rounded-4xl border border-border bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                       {group.access_role === "owner" ? "Owner" : group.access_role === "editor" ? "Editor" : "Viewer"}
+                     </span>
+                     <span className="text-xs text-muted-foreground">Created {formatDate(group.created_at)}</span>
+                   </div>
+                   <div className="flex flex-wrap items-center justify-end gap-1">
                     <Link
                       href={`/groups/${group.id}`}
                       aria-label={`Open group ${group.name}`}
@@ -304,22 +429,26 @@ export default function GroupsPage() {
                       Open group
                       <ArrowRight className="size-3.5" aria-hidden="true" />
                     </Link>
-                    <Button variant="ghost" size="sm" onClick={() => openEditDialog(group)}>
-                      <Pencil className="size-3.5" aria-hidden="true" />
-                      Edit
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="text-destructive hover:text-destructive"
-                      onClick={() => {
-                        setDeleteError(null);
-                        setDeletingGroup(group);
-                      }}
-                    >
-                      <Trash2 className="size-3.5" aria-hidden="true" />
-                      Delete
-                    </Button>
+                     {group.can_edit && (
+                       <Button variant="ghost" size="sm" onClick={() => openEditDialog(group)}>
+                         <Pencil className="size-3.5" aria-hidden="true" />
+                         Edit
+                       </Button>
+                     )}
+                     {group.can_delete && (
+                       <Button
+                         variant="ghost"
+                         size="sm"
+                         className="text-destructive hover:text-destructive"
+                         onClick={() => {
+                           setDeleteError(null);
+                           setDeletingGroup(group);
+                         }}
+                       >
+                         <Trash2 className="size-3.5" aria-hidden="true" />
+                         Delete
+                       </Button>
+                     )}
                   </div>
                 </div>
               </article>
