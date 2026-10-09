@@ -5,6 +5,7 @@ import type { Meeting } from "@/app/lib/api";
 export type UserStage =
   | "uploaded"
   | "transcribing"
+  | "transcription_skipped"
   | "aligning"
   | "diarizing"
   | "analyzing_video"
@@ -16,6 +17,7 @@ export type UserStage =
 export const STAGE_ORDER: UserStage[] = [
   "uploaded",
   "transcribing",
+  "transcription_skipped",
   "aligning",
   "diarizing",
   "analyzing_video",
@@ -27,6 +29,7 @@ export const STAGE_ORDER: UserStage[] = [
 export const STAGE_LABELS: Record<UserStage, string> = {
   uploaded: "Uploaded",
   transcribing: "Transcribing…",
+  transcription_skipped: "No audio track; continuing…",
   aligning: "Aligning…",
   diarizing: "Diarizing…",
   analyzing_video: "Analyzing video…",
@@ -56,6 +59,8 @@ export function getUserStage(meeting: Pick<Meeting, "status" | "sub_status">): U
     case "preparing_audio":
     case "transcribing_chunk":
       return "transcribing";
+    case "transcription_skipped_no_audio":
+      return "transcription_skipped";
     case "aligning":
       return "aligning";
     case "diarizing":

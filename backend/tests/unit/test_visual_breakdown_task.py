@@ -277,6 +277,43 @@ def test_summary_preserves_legacy_transcript_when_segments_are_absent(meeting_wi
     assert summarize.call_args.kwargs["context"] is None
 
 
+def test_summary_uses_visual_context_without_transcript(meeting_with_file, db: Session):
+    db.add(
+        VisualSegment(
+            meeting_id=meeting_with_file,
+            start_time=0.0,
+            end_time=5.0,
+            screenshot_s3_key="users/1/meetings/X/visual/silent.jpg",
+            caption="A dashboard with a warning banner",
+            sequence=0,
+            confidence=0.9,
+        )
+    )
+    db.commit()
+
+    with (
+        patch("app.worker.style_service.get_style_examples", return_value=[]),
+        patch("app.worker.template_service.get_active_default", return_value=None),
+        patch("app.worker.get_completion_client", return_value=MagicMock()),
+        patch("app.worker.summarize_transcript", return_value="Visual-only summary") as summarize,
+        patch("app.services.ai_agent.infer_title", return_value=None),
+        patch("app.worker.analytics.capture"),
+        patch("app.worker.notify"),
+        patch("app.services.email.email_service.send_summary_email"),
+    ):
+        out = stage_summarize(meeting_with_file)
+
+    assert out == meeting_with_file
+    assert summarize.call_args.args[0] == ""
+    context = summarize.call_args.kwargs["context"]
+    assert context is not None
+    assert any(
+        item.source == "visual"
+        for chunk in context.chunks
+        for item in chunk.items
+    )
+
+
 def test_summary_waits_for_transcript_intelligence_before_completion(meeting_with_file, db: Session):
     meeting = db.get(Meeting, meeting_with_file)
     meeting.transcript_text = "Transcript for intelligence extraction"

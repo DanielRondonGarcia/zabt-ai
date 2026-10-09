@@ -81,6 +81,16 @@ describe("completed meeting stage mapping", () => {
 });
 
 describe("processing stage mapping", () => {
+  it("shows silent-video transcription as a non-error continuation", () => {
+    expect(
+      getUserStage({
+        status: "processing",
+        sub_status: "transcription_skipped_no_audio",
+        visual_breakdown_status: null,
+      })
+    ).toBe("transcription_skipped");
+  });
+
   it.each([
     "preparing_audio",
     "transcribing_chunk",

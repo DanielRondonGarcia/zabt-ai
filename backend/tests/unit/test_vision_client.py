@@ -509,7 +509,7 @@ def _direct_service_config():
     )
 
 
-def test_direct_visual_service_downloads_media_and_persists_compatible_artifacts():
+def test_direct_visual_service_accepts_video_without_audio_and_persists_artifacts():
     storage = _FakeVisualStorage()
     service = DirectVisionService(
         storage_provider=storage,
@@ -517,7 +517,13 @@ def test_direct_visual_service_downloads_media_and_persists_compatible_artifacts
         config=_direct_service_config(),
     )
     service._probe_media = MagicMock(
-        return_value=SimpleNamespace(duration_s=2.0, has_video=True, video_codec="h264", media_format="mp4")
+        return_value=SimpleNamespace(
+            duration_s=2.0,
+            has_video=True,
+            has_audio=False,
+            video_codec="h264",
+            media_format="mp4",
+        )
     )
     service._extract_frames = MagicMock(return_value=[b"frame-0", b"frame-1"])
     service._extract_thumbnails = MagicMock(return_value=[b"\x00" * 8, b"\xff" * 8])

@@ -107,6 +107,54 @@ def test_stage_embedding_builds_points_and_upserts(monkeypatch):
     assert all("text" not in props for _, _, props in telemetry)
 
 
+def test_stage_embedding_indexes_summary_without_transcript(monkeypatch):
+    worker = _worker()
+    meeting = SimpleNamespace(
+        id=11,
+        owner_id=21,
+        group_id=31,
+        source_type="upload",
+        transcript_text=None,
+        transliterated_text=None,
+        summary_text="A visual-only summary",
+        original_summary_text=None,
+        structured_output=None,
+        structured_output_status="pending",
+    )
+    upserts = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def exec(self, statement):
+            assert getattr(statement, "_for_update_arg", None) is not None
+            return SimpleNamespace(first=lambda: meeting)
+
+    monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
+    monkeypatch.setattr(worker.meeting_service, "get", lambda model, meeting_id: meeting)
+    monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+    monkeypatch.setattr(worker, "_get_group_introduction", lambda group_id: None)
+    monkeypatch.setattr(
+        worker,
+        "get_embedding_provider",
+        lambda: SimpleNamespace(embed=lambda texts: [[1.0, 2.0, 3.0] for _ in texts]),
+    )
+    monkeypatch.setattr(
+        worker,
+        "get_vector_store",
+        lambda: SimpleNamespace(upsert_points=lambda points: upserts.append(points)),
+    )
+    monkeypatch.setattr(worker.analytics, "capture", lambda *args, **kwargs: None)
+
+    assert worker.stage_embedding.run(11) == 11
+    assert [point.kind for point in upserts[0]] == ["summary"]
+    assert upserts[0][0].text == "A visual-only summary"
+
+
 def test_pipeline_embedding_stage_is_not_linked_to_meeting_failure():
     worker = _worker()
 

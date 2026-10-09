@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+import json
 import os
 import re
+import subprocess
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta
-from math import ceil
+from math import ceil, isfinite
 
 from celery import Celery, chain
 from celery.signals import task_failure, task_prerun, task_success, worker_shutdown
@@ -28,6 +31,7 @@ from app.models import (
     User,
     VisualSegment,
 )
+from app.models.meeting_intelligence import MeetingHighlight
 from app.services.meeting import meeting_service
 from app.services.storage import storage
 from app.services.transcription import (
@@ -57,7 +61,7 @@ from app.services.meeting_processing_audit import meeting_processing_audit
 from app.services.visual_breakdown.direct_service import DirectVisionService
 
 from sqlalchemy import func
-from sqlmodel import Session, select
+from sqlmodel import Session, delete, select
 
 
 @worker_shutdown.connect
@@ -107,6 +111,125 @@ def _temp_path_for(meeting_id: int, source_key: str | None = None) -> str:
     """Return a stable temp path while preserving the source file extension."""
     suffix = os.path.splitext(source_key or "")[1] or ".audio"
     return os.path.join(TEMP_DIR, f"zabt_meeting_{meeting_id}{suffix}")
+
+
+_LOCAL_MEDIA_PROBE_TIMEOUT_SECONDS = 10.0
+_TRANSCRIPTION_SKIPPED_NO_AUDIO = "transcription_skipped_no_audio"
+
+
+@dataclass(frozen=True)
+class _LocalMediaProbe:
+    has_video: bool
+    has_audio: bool
+    duration_seconds: float | None
+
+
+def _probe_local_media(path: str) -> _LocalMediaProbe | None:
+    """Best-effort stream inspection for media that is already local.
+
+    Probe failures intentionally fall through to the existing provider path so
+    this guard cannot turn a previously supported media format into a pipeline
+    failure.
+    """
+    try:
+        completed = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-print_format",
+                "json",
+                "-show_streams",
+                "-show_format",
+                path,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_LOCAL_MEDIA_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("local media stream probe timed out path=%s", path)
+        return None
+    except OSError as exc:
+        logger.warning("local media stream probe unavailable path=%s error=%s", path, exc)
+        return None
+
+    if completed.returncode != 0:
+        logger.warning(
+            "local media stream probe failed path=%s returncode=%s",
+            path,
+            completed.returncode,
+        )
+        return None
+
+    try:
+        payload = json.loads(completed.stdout or "")
+        streams = payload.get("streams") or []
+        if not isinstance(streams, list):
+            return None
+    except (AttributeError, TypeError, ValueError):
+        logger.warning("local media stream probe returned invalid metadata path=%s", path)
+        return None
+
+    format_data = payload.get("format") or {}
+    if not isinstance(format_data, dict):
+        format_data = {}
+
+    duration_seconds: float | None = None
+    duration_values = [
+        format_data.get("duration"),
+        *(stream.get("duration") for stream in streams if isinstance(stream, dict)),
+    ]
+    for value in duration_values:
+        try:
+            candidate = float(value)
+        except (TypeError, ValueError):
+            continue
+        if isfinite(candidate) and candidate > 0:
+            duration_seconds = candidate
+            break
+
+    return _LocalMediaProbe(
+        has_video=any(
+            isinstance(stream, dict) and stream.get("codec_type") == "video"
+            for stream in streams
+        ),
+        has_audio=any(
+            isinstance(stream, dict) and stream.get("codec_type") == "audio"
+            for stream in streams
+        ),
+        duration_seconds=duration_seconds,
+    )
+
+
+def _clear_transcription_for_no_audio(
+    meeting_id: int,
+    duration_seconds: float | None,
+) -> None:
+    """Remove stale spoken output before continuing with video-only stages."""
+    with Session(engine) as session:
+        meeting = session.get(Meeting, meeting_id)
+        if meeting is None:
+            return
+
+        session.exec(delete(TranscriptSegment).where(TranscriptSegment.meeting_id == meeting_id))
+        session.exec(delete(MeetingHighlight).where(MeetingHighlight.meeting_id == meeting_id))
+
+        meeting.transcript_text = None
+        meeting.transliterated_text = None
+        meeting.summary_text = None
+        meeting.original_summary_text = None
+        meeting.summary_edited = False
+        meeting.action_items_text = None
+        meeting.structured_output = None
+        meeting.structured_output_status = "pending"
+        if duration_seconds is not None:
+            meeting.duration_seconds = int(duration_seconds)
+        session.add(meeting)
+        session.commit()
+
+    meeting_service.update_sub_status(meeting_id, _TRANSCRIPTION_SKIPPED_NO_AUDIO)
 
 
 _AUDITED_STAGE_TASKS = {
@@ -413,6 +536,21 @@ def stage_transcribe(meeting_id: int) -> int:
             # Look up user tier for provider routing
             user: User | None = session.get(User, meeting.owner_id) if meeting.owner_id else None
             user_tier = user.tier if user else None
+
+        if not is_runpod:
+            media_probe = _probe_local_media(temp_audio_path)
+            if media_probe and media_probe.has_video and not media_probe.has_audio:
+                logger.info(
+                    "stage_transcribe skipped: local media has no audio stream "
+                    "meeting_id=%s duration_seconds=%s",
+                    meeting_id,
+                    media_probe.duration_seconds,
+                )
+                _clear_transcription_for_no_audio(
+                    meeting_id,
+                    media_probe.duration_seconds,
+                )
+                return meeting_id
 
         # Resolve language preferences for this meeting
         with Session(engine) as session:
@@ -727,8 +865,9 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
 
     summary_text = None
     active_template = None
+    completion_client = None
 
-    if meeting.transcript_text:
+    if meeting.transcript_text or visual_segments:
         style_examples = style_service.get_style_examples()
 
         # Resolve template: explicit override → user default → system default
@@ -752,7 +891,7 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             fallback_model=settings.OPENAI_MODEL,
         )
         summary_text = summarize_transcript(
-            meeting.transcript_text,
+            meeting.transcript_text or "",
             style_examples=style_examples,
             template_body=template_body,
             template_id=str(active_template.id) if active_template else None,
