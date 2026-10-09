@@ -7,6 +7,7 @@ from types import ModuleType, SimpleNamespace
 
 def _install_storage_stub():
     module = ModuleType("app.services.storage")
+    module.StorageProvider = object
     module.storage = SimpleNamespace(
         get_presigned_download_url=lambda *a, **k: "http://example.invalid/audio",
         upload_file=lambda *a, **k: None,
@@ -67,20 +68,10 @@ def test_assignment_indexing_reindex_unassignment_and_group_delete_cleanup(monke
     monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
     monkeypatch.setattr(worker.settings, "EMBEDDING_MODEL", "fake-model")
     monkeypatch.setattr(worker.meeting_service, "get", lambda model, meeting_id: meetings.get(meeting_id))
+    monkeypatch.setattr(worker, "_get_group_introduction", lambda group_id: None)
     monkeypatch.setattr(worker, "get_embedding_provider", lambda: SimpleNamespace(embed=lambda texts: [[float(i + 1)] for i, _ in enumerate(texts)]))
     monkeypatch.setattr(worker, "get_vector_store", lambda: vector_store)
     monkeypatch.setattr(worker.stage_embedding, "delay", lambda meeting_id: enqueued.append(meeting_id))
-
-    # Group assignment: grouped meetings index with owner_id+group_id payload tags.
-    meeting.group_id = 30
-    assert worker.stage_embedding.run(101) == 101
-    first_ids = sorted(vector_store.points_by_id)
-    assert first_ids
-    assert all(point.owner_id == 7 and point.group_id == 30 and point.meeting_id == 101 for point in vector_store.points_by_id.values())
-
-    # Deterministic reindex: re-running the same content produces the same IDs and enqueues the assigned meeting.
-    assert worker.stage_embedding.run(101) == 101
-    assert sorted(vector_store.points_by_id) == first_ids
 
     class FakeSession:
         def __enter__(self):
@@ -93,9 +84,21 @@ def test_assignment_indexing_reindex_unassignment_and_group_delete_cleanup(monke
             return SimpleNamespace(id=group_id, owner_id=7)
 
         def exec(self, statement):
-            return SimpleNamespace(all=lambda: [101])
+            return SimpleNamespace(first=lambda: meeting, all=lambda: [101])
 
     monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+
+    # Group assignment: grouped meetings index with owner_id+group_id payload tags.
+    meeting.group_id = 30
+    assert worker.stage_embedding.run(101) == 101
+    first_ids = sorted(vector_store.points_by_id)
+    assert first_ids
+    assert all(point.owner_id == 7 and point.group_id == 30 and point.meeting_id == 101 for point in vector_store.points_by_id.values())
+
+    # Deterministic reindex: re-running the same content produces the same IDs and enqueues the assigned meeting.
+    assert worker.stage_embedding.run(101) == 101
+    assert sorted(vector_store.points_by_id) == first_ids
+
     assert worker.reindex_group.run(30) == 30
     assert enqueued == [101]
 
@@ -109,5 +112,5 @@ def test_assignment_indexing_reindex_unassignment_and_group_delete_cleanup(monke
     worker.stage_embedding.run(101)
     assert vector_store.points_by_id
     assert worker.delete_group_vectors.run(30) == 30
-    assert vector_store.deletes[-1] == {"owner_id": 7, "group_id": 30, "meeting_id": None}
+    assert vector_store.deletes[-1] == {"owner_id": None, "group_id": 30, "meeting_id": None}
     assert vector_store.points_by_id == {}

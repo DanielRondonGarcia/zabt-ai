@@ -51,7 +51,7 @@ def test_search_authorizes_before_provider_or_vector_calls(monkeypatch):
     )
 
     assert [event[0] for event in events] == ["authorize", "embed", "search"]
-    assert events[2][1]["owner_id"] == 3
+    assert events[2][1]["owner_id"] is None
     assert events[2][1]["group_id"] == 7
     assert results == [
         {

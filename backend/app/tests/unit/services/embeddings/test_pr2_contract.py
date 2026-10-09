@@ -45,6 +45,18 @@ def test_chunking_uses_overlap_and_stable_ids():
     )
 
 
+def test_group_introduction_is_embedding_context_without_changing_citation_text():
+    chunks = build_meeting_chunks(
+        meeting_id=123,
+        summary_text="short summary",
+        group_introduction="This group covers product planning and customer feedback.",
+    )
+
+    assert chunks[0].text == "short summary"
+    assert "Group introduction: This group covers product planning and customer feedback." in chunks[0].embedding_text
+    assert chunks[0].id == point_id_for(123, "summary", 0)
+
+
 def test_long_summary_and_structured_output_use_conservative_windows():
     summary = " ".join(f"summary{i}" for i in range(CONTENT_CHUNK_WORDS + 1))
     structured = {"notes": " ".join(f"structured{i}" for i in range(CONTENT_CHUNK_WORDS + 1))}

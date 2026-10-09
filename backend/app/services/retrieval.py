@@ -20,7 +20,7 @@ _RETRIEVAL_UNAVAILABLE = "retrieval unavailable"
 
 
 class GroupRetrievalService:
-    """Search only vectors authorized by server-side group ownership checks."""
+    """Search only vectors authorized by server-side group membership checks."""
 
     def search(
         self,
@@ -50,7 +50,7 @@ class GroupRetrievalService:
                 raise RuntimeError("embedding provider returned no query vector")
             raw_results = get_vector_store().search_filtered(
                 vectors[0],
-                owner_id=user_id,
+                owner_id=None,
                 group_id=group_id,
                 kinds=kinds,
                 limit=limit,

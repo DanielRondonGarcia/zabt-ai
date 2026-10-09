@@ -143,12 +143,12 @@ class QdrantVectorStoreClient:
         self,
         embedding: list[float],
         *,
-        owner_id: int,
+        owner_id: int | None = None,
         group_id: int,
         kinds: list[str] | None = None,
         limit: int = 10,
     ) -> list[dict[str, Any]]:
-        """Search with server-side owner + group filters and optional kind filter."""
+        """Search with a mandatory group boundary and optional owner filter."""
         self.ensure_collection()
         query_filter = self._filter(owner_id, group_id, None, kinds=kinds)
         if hasattr(self.client, "search"):

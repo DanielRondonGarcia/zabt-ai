@@ -99,25 +99,13 @@ const mapProseSegments = (answer: string, transform: (segment: string) => string
     .join("\n");
 };
 
-/** Returns only the prose text of the answer (all code removed). */
-const proseOnly = (answer: string): string => {
-  const kept: string[] = [];
-  mapProseSegments(answer, (segment) => {
-    kept.push(segment);
-    return segment;
-  });
-  return kept.join("\n");
-};
-
 /**
  * Builds a single numbering shared by the answer's inline citations and its sources list.
- * Returned sources are numbered first (deduplicated, in API order); citations that reference
- * a chunk missing from the sources are appended so every badge still gets a stable number.
- * Tokens inside fenced, indented, or inline code are ignored, matching `linkifyCitations`.
+ * Returned sources are numbered first and deduplicated in API order. Model tokens that do not
+ * match a returned source are intentionally not added to the index.
  */
 export const buildCitationIndex = (
   sources: AIChatSource[],
-  answer: string,
 ): Map<string, NumberedCitation> => {
   const index = new Map<string, NumberedCitation>();
 
@@ -133,17 +121,6 @@ export const buildCitationIndex = (
     });
   }
 
-  for (const match of proseOnly(answer).matchAll(CITATION_TOKEN_RE)) {
-    const ref: CitationRef = {
-      meeting_id: Number(match[1]),
-      kind: match[2],
-      chunk_index: Number(match[3]),
-    };
-    const key = citationKey(ref);
-    if (index.has(key)) continue;
-    index.set(key, { ...ref, number: index.size + 1, text: null });
-  }
-
   return index;
 };
 
@@ -156,15 +133,16 @@ export const linkifyCitations = (
   index: Map<string, NumberedCitation>,
 ): string =>
   mapProseSegments(answer, (segment) =>
-    segment.replace(CITATION_TOKEN_RE, (_token, meetingId: string, kind: string, chunk: string) => {
+    segment.replace(CITATION_TOKEN_RE, (token: string, meetingId: string, kind: string, chunk: string) => {
       const ref: CitationRef = {
         meeting_id: Number(meetingId),
         kind,
         chunk_index: Number(chunk),
       };
-      const number = index.get(citationKey(ref))?.number;
+      const citation = index.get(citationKey(ref));
+      if (!citation) return token;
       // Escaped brackets keep the visible `[n]` label from being parsed as a nested link.
-      const label = number !== undefined ? `\\[${number}\\]` : `\\[${ref.kind}\\]`;
+      const label = `\\[${citation.number}\\]`;
       return `[${label}](${citationHref(ref)})`;
     }),
   );

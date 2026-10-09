@@ -24,6 +24,7 @@ class MeetingContentChunk:
     text: str
     chunk_index: int
     chunk_count: int
+    embedding_text: str | None = None
 
 
 def point_id_for(meeting_id: int, kind: str, chunk_index: int) -> str:
@@ -56,10 +57,17 @@ def _window_text(
     return chunks
 
 
-def _chunked_text(meeting_id: int, kind: str, text: str) -> list[MeetingContentChunk]:
+def _chunked_text(
+    meeting_id: int,
+    kind: str,
+    text: str,
+    *,
+    embedding_context: str | None = None,
+) -> list[MeetingContentChunk]:
     canonical = canonicalize_text(text)
     windows = _window_text(canonical)
     count = len(windows)
+    context = canonicalize_text(embedding_context or "")
     return [
         MeetingContentChunk(
             id=point_id_for(meeting_id, kind, index),
@@ -68,6 +76,11 @@ def _chunked_text(meeting_id: int, kind: str, text: str) -> list[MeetingContentC
             text=window,
             chunk_index=index,
             chunk_count=count,
+            embedding_text=(
+                f"Group introduction: {context}\n\n{window}"
+                if context
+                else None
+            ),
         )
         for index, window in enumerate(windows)
         if window
@@ -83,19 +96,42 @@ def build_meeting_chunks(
     original_summary_text: str | None = None,
     structured_output: Any | None = None,
     structured_output_status: str | None = None,
+    group_introduction: str | None = None,
 ) -> list[MeetingContentChunk]:
-    """Build deterministic embedding chunks from the supported Meeting text fields."""
+    """Build citation-safe chunks with optional group context for embedding only."""
     chunks: list[MeetingContentChunk] = []
     summary = summary_text or original_summary_text
-    chunks.extend(_chunked_text(meeting_id, "summary", summary or ""))
-    chunks.extend(_chunked_text(meeting_id, "transcript", transcript_text or ""))
-    chunks.extend(_chunked_text(meeting_id, "transliterated", transliterated_text or ""))
+    chunks.extend(
+        _chunked_text(
+            meeting_id,
+            "summary",
+            summary or "",
+            embedding_context=group_introduction,
+        )
+    )
+    chunks.extend(
+        _chunked_text(
+            meeting_id,
+            "transcript",
+            transcript_text or "",
+            embedding_context=group_introduction,
+        )
+    )
+    chunks.extend(
+        _chunked_text(
+            meeting_id,
+            "transliterated",
+            transliterated_text or "",
+            embedding_context=group_introduction,
+        )
+    )
     if structured_output_status == "completed" and structured_output is not None:
         chunks.extend(
             _chunked_text(
                 meeting_id,
                 "structured",
                 flatten_structured_output(structured_output),
+                embedding_context=group_introduction,
             )
         )
     return chunks

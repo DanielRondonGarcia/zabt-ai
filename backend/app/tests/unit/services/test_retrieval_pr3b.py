@@ -33,7 +33,7 @@ def test_foreign_group_returns_403_before_provider_or_vector_calls(monkeypatch):
     assert exc_info.value.status_code == 403
 
 
-def test_cross_owner_and_cross_group_results_are_filtered_server_side(monkeypatch):
+def test_group_boundary_allows_shared_retrieval_but_blocks_other_groups(monkeypatch):
     from app.services import retrieval as retrieval_module
 
     corpus = [
@@ -57,7 +57,7 @@ def test_cross_owner_and_cross_group_results_are_filtered_server_side(monkeypatc
             return [
                 item
                 for item in corpus
-                if item["payload"]["owner_id"] == owner_id and item["payload"]["group_id"] == group_id
+                if item["payload"]["group_id"] == group_id
             ][:limit]
 
     monkeypatch.setattr(retrieval_module.settings, "INDEXING_ENABLED", True)
@@ -67,9 +67,10 @@ def test_cross_owner_and_cross_group_results_are_filtered_server_side(monkeypatc
 
     results = retrieval_module.GroupRetrievalService().search(group_id=10, user_id=1, query="allowed")
 
-    assert observed_filters == [{"owner_id": 1, "group_id": 10, "kinds": None, "limit": 10}]
+    assert observed_filters == [{"owner_id": None, "group_id": 10, "kinds": None, "limit": 10}]
     assert results == [
-        {"meeting_id": 101, "kind": "summary", "chunk_index": 0, "score": 0.99, "text": "allowed"}
+        {"meeting_id": 101, "kind": "summary", "chunk_index": 0, "score": 0.99, "text": "allowed"},
+        {"meeting_id": 201, "kind": "summary", "chunk_index": 0, "score": 0.98, "text": "foreign owner"},
     ]
 
 
@@ -86,7 +87,7 @@ def test_cross_group_search_returns_empty_when_no_authorized_group_vectors(monke
 
     class FilteringStore:
         def search_filtered(self, embedding, *, owner_id, group_id, kinds=None, limit=10):
-            assert owner_id == 1
+            assert owner_id is None
             assert group_id == 20
             return []
 

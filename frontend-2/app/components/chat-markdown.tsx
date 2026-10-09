@@ -42,14 +42,14 @@ const textContent = (node: ElementContent): string => {
 };
 
 interface CitationBadgeProps {
-  citation: NumberedCitation | null;
+  citation: NumberedCitation;
   meetingId: number;
   kind: string;
   chunkIndex: number;
 }
 
 function CitationBadge({ citation, meetingId, kind, chunkIndex }: CitationBadgeProps) {
-  const label = citation ? String(citation.number) : kind;
+  const label = String(citation.number);
   const description = `Meeting ${meetingId} · ${kind} · chunk ${chunkIndex + 1}`;
 
   return (
@@ -98,9 +98,11 @@ export function ChatMarkdown({ content, citations, className }: ChatMarkdownProp
       a: ({ href, children, node: _node, ...props }) => {
         const ref = parseCitationHref(href);
         if (ref) {
+          const citation = citations?.get(citationKey(ref));
+          if (!citation) return <>{children}</>;
           return (
             <CitationBadge
-              citation={citations?.get(citationKey(ref)) ?? null}
+              citation={citation}
               meetingId={ref.meeting_id}
               kind={ref.kind}
               chunkIndex={ref.chunk_index}

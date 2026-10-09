@@ -21,6 +21,7 @@ if settings.LOGFIRE_TOKEN:
     logfire.instrument_celery()
 from app.db.engine import engine
 from app.models import (
+    Group,
     Meeting,
     TranscriptSegment,
     TranscriptionType,
@@ -1461,6 +1462,58 @@ def _capture_embedding_event(owner_id: int | None, event_name: str, properties: 
         logger.warning("embedding telemetry capture failed event=%s", event_name, exc_info=True)
 
 
+def _get_group_introduction(group_id: int) -> str | None:
+    with Session(engine) as session:
+        return session.exec(
+            select(Group.description).where(Group.id == group_id)
+        ).first()
+
+
+def _get_locked_meeting(session: Session, meeting_id: int) -> Meeting | None:
+    """Read the assignment under the same row lock used by assignment writes."""
+    statement = (
+        select(Meeting)
+        .where(Meeting.id == meeting_id)
+        .with_for_update()
+    )
+    return session.exec(statement).first()
+
+
+def _requeue_stale_meeting_index(
+    meeting_id: int,
+    snapshot: Meeting,
+    current: Meeting,
+) -> None:
+    """Discard a stale snapshot and make the current assignment converge."""
+    logger.warning(
+        "discarding stale meeting embedding meeting_id=%s "
+        "snapshot_owner_id=%s current_owner_id=%s snapshot_group_id=%s current_group_id=%s",
+        meeting_id,
+        snapshot.owner_id,
+        current.owner_id,
+        snapshot.group_id,
+        current.group_id,
+    )
+    _capture_embedding_event(
+        snapshot.owner_id,
+        "embedding_index_stale",
+        {"meeting_id": meeting_id, "group_id": current.group_id},
+    )
+    try:
+        # Reindex, rather than only stage_embedding, also removes vectors from a
+        # previous group when the current assignment is ungrouped or changed.
+        reindex_meeting.delay(meeting_id)
+    except Exception as exc:
+        logger.exception(
+            "fresh meeting reindex enqueue failed meeting_id=%s group_id=%s",
+            meeting_id,
+            current.group_id,
+        )
+        raise RuntimeError(
+            f"Fresh reindex could not be queued for meeting {meeting_id}."
+        ) from exc
+
+
 @celery_app.task(
     name="stage_embedding",
     autoretry_for=_EMBEDDING_RETRY_EXCEPTIONS,
@@ -1497,6 +1550,7 @@ def stage_embedding(meeting_id: int) -> int:
     )
 
     try:
+        group_introduction = _get_group_introduction(meeting.group_id)
         chunks = build_meeting_chunks(
             meeting_id=meeting.id,
             transcript_text=meeting.transcript_text,
@@ -1505,35 +1559,59 @@ def stage_embedding(meeting_id: int) -> int:
             original_summary_text=meeting.original_summary_text,
             structured_output=meeting.structured_output,
             structured_output_status=meeting.structured_output_status,
+            group_introduction=group_introduction,
         )
-        if not chunks:
-            logger.info("stage_embedding skipped no content meeting_id=%s", meeting_id)
-            _capture_embedding_event(
-                meeting.owner_id,
-                "embedding_index_completed",
-                {"meeting_id": meeting_id, "group_id": meeting.group_id, "point_count": 0},
+        points: list[EmbeddingPoint] = []
+        if chunks:
+            provider = get_embedding_provider()
+            vectors = provider.embed(
+                [chunk.embedding_text or chunk.text for chunk in chunks]
             )
-            return meeting_id
+            points = [
+                EmbeddingPoint(
+                    id=chunk.id,
+                    vector=vector,
+                    text=chunk.text,
+                    owner_id=meeting.owner_id,
+                    group_id=meeting.group_id,
+                    meeting_id=meeting.id,
+                    kind=chunk.kind,
+                    chunk_index=chunk.chunk_index,
+                    chunk_count=chunk.chunk_count,
+                    source_type=meeting.source_type or "upload",
+                    model=settings.EMBEDDING_MODEL,
+                )
+                for chunk, vector in zip(chunks, vectors)
+            ]
 
-        provider = get_embedding_provider()
-        vectors = provider.embed([chunk.text for chunk in chunks])
-        points = [
-            EmbeddingPoint(
-                id=chunk.id,
-                vector=vector,
-                text=chunk.text,
-                owner_id=meeting.owner_id,
-                group_id=meeting.group_id,
-                meeting_id=meeting.id,
-                kind=chunk.kind,
-                chunk_index=chunk.chunk_index,
-                chunk_count=chunk.chunk_count,
-                source_type=meeting.source_type or "upload",
-                model=settings.EMBEDDING_MODEL,
-            )
-            for chunk, vector in zip(chunks, vectors)
-        ]
-        get_vector_store().upsert_points(points)
+        # Keep the assignment row locked across the destructive delete and the
+        # upsert. The API takes the same lock before committing reassignment, so
+        # an old snapshot cannot write after a newer assignment commits.
+        stale_assignment: Meeting | None = None
+        with Session(engine) as session:
+            current = _get_locked_meeting(session, meeting_id)
+            if current is None:
+                logger.warning("stage_embedding skipped missing meeting_id=%s", meeting_id)
+                return meeting_id
+            if (
+                current.owner_id != meeting.owner_id
+                or current.group_id != meeting.group_id
+            ):
+                stale_assignment = current
+            else:
+                vector_store = get_vector_store()
+                delete_by_filter = getattr(vector_store, "delete_by_filter", None)
+                if delete_by_filter is not None:
+                    delete_by_filter(
+                        owner_id=current.owner_id,
+                        group_id=current.group_id,
+                        meeting_id=current.id,
+                    )
+                if points:
+                    vector_store.upsert_points(points)
+        if stale_assignment is not None:
+            _requeue_stale_meeting_index(meeting_id, meeting, stale_assignment)
+            return meeting_id
     except Exception:
         logger.exception(
             "stage_embedding failed meeting_id=%s owner_id=%s group_id=%s",
@@ -1567,26 +1645,57 @@ def delete_meeting_vectors(meeting_id: int) -> int:
     """Delete all vectors tagged with a meeting id."""
     if not settings.INDEXING_ENABLED:
         return meeting_id
-    meeting = meeting_service.get(Meeting, meeting_id)
-    owner_id = getattr(meeting, "owner_id", None)
-    group_id = getattr(meeting, "group_id", None)
-    logger.info(
-        "delete_meeting_vectors started meeting_id=%s owner_id=%s group_id=%s",
-        meeting_id,
-        owner_id,
-        group_id,
-    )
+    owner_id = None
+    group_id = None
     try:
-        if meeting and meeting.owner_id:
-            get_vector_store().delete_by_filter(owner_id=meeting.owner_id, meeting_id=meeting_id)
-        else:
-            get_vector_store().delete_by_filter(meeting_id=meeting_id)
+        # Re-read owner and assignment under the assignment row lock before
+        # deleting. Assignment writes use the same lock, preventing cleanup
+        # from racing a reassignment commit.
+        with Session(engine) as session:
+            meeting = _get_locked_meeting(session, meeting_id)
+            owner_id = getattr(meeting, "owner_id", None)
+            group_id = getattr(meeting, "group_id", None)
+            logger.info(
+                "delete_meeting_vectors started meeting_id=%s owner_id=%s group_id=%s",
+                meeting_id,
+                owner_id,
+                group_id,
+            )
+            if meeting and meeting.owner_id:
+                get_vector_store().delete_by_filter(owner_id=meeting.owner_id, meeting_id=meeting_id)
+            else:
+                get_vector_store().delete_by_filter(meeting_id=meeting_id)
     except Exception:
         logger.exception("delete_meeting_vectors failed meeting_id=%s owner_id=%s", meeting_id, owner_id)
         _capture_embedding_event(owner_id, "embedding_delete_failed", {"meeting_id": meeting_id, "group_id": group_id})
         raise
     logger.info("delete_meeting_vectors complete meeting_id=%s", meeting_id)
     _capture_embedding_event(owner_id, "embedding_delete_completed", {"meeting_id": meeting_id, "group_id": group_id})
+    return meeting_id
+
+
+@celery_app.task(
+    name="reindex_meeting",
+    autoretry_for=_EMBEDDING_RETRY_EXCEPTIONS,
+    max_retries=3,
+    retry_backoff=True,
+)
+def reindex_meeting(meeting_id: int) -> int:
+    """Delete a meeting's vectors, then index its current group assignment."""
+    if not settings.INDEXING_ENABLED:
+        return meeting_id
+
+    # Keep deletion and indexing in one task so an old assignment cleanup can
+    # never be delivered after the new assignment's upsert.
+    delete_meeting_vectors.run(meeting_id)
+    meeting = meeting_service.get(Meeting, meeting_id)
+    if meeting and meeting.group_id:
+        stage_embedding.run(meeting_id)
+    logger.info(
+        "reindex_meeting complete meeting_id=%s grouped=%s",
+        meeting_id,
+        bool(meeting and meeting.group_id),
+    )
     return meeting_id
 
 
@@ -1607,7 +1716,7 @@ def delete_group_vectors(group_id: int) -> int:
         owner_id = getattr(group, "owner_id", None)
     logger.info("delete_group_vectors started group_id=%s owner_id=%s", group_id, owner_id)
     try:
-        get_vector_store().delete_by_filter(owner_id=owner_id, group_id=group_id)
+        get_vector_store().delete_by_filter(group_id=group_id)
     except Exception:
         logger.exception("delete_group_vectors failed group_id=%s owner_id=%s", group_id, owner_id)
         _capture_embedding_event(owner_id, "embedding_group_delete_failed", {"group_id": group_id})
@@ -1617,7 +1726,12 @@ def delete_group_vectors(group_id: int) -> int:
     return group_id
 
 
-@celery_app.task(name="reindex_group")
+@celery_app.task(
+    name="reindex_group",
+    autoretry_for=_EMBEDDING_RETRY_EXCEPTIONS,
+    max_retries=3,
+    retry_backoff=True,
+)
 def reindex_group(group_id: int) -> int:
     """Re-run indexing for all meetings currently assigned to a group."""
     if not settings.INDEXING_ENABLED:
