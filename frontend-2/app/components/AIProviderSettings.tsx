@@ -16,6 +16,7 @@ import {
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/app/components/ui/alert-dialog";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/app/components/ui/select";
 
 const PROVIDER_DEFAULTS: Record<CustomAIProvider, { model: string; baseUrl: string }> = {
   openai: { model: "gpt-4o-mini", baseUrl: "https://api.openai.com/v1" },
@@ -209,19 +210,22 @@ export function AIProviderSettings() {
             <label htmlFor="ai-provider" className="text-sm font-medium text-card-foreground">
               Provider
             </label>
-            <select
-              id="ai-provider"
-              name="ai-provider"
-              value={provider}
-              onChange={(event) => handleProviderChange(event.target.value)}
+            <Select
+              value={provider || null}
+              onValueChange={(value) => handleProviderChange(value ?? "")}
               disabled={saving}
-              className="h-8 w-full rounded-lg border border-input bg-background px-2.5 text-sm text-foreground outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 dark:bg-input/30"
+              name="ai-provider"
             >
-              <option value="">Application default</option>
-              {(Object.keys(PROVIDER_LABELS) as CustomAIProvider[]).map((value) => (
-                <option key={value} value={value}>{PROVIDER_LABELS[value]}</option>
-              ))}
-            </select>
+              <SelectTrigger id="ai-provider">
+                <SelectValue placeholder="Application default" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={null}>Application default</SelectItem>
+                {(Object.keys(PROVIDER_LABELS) as CustomAIProvider[]).map((value) => (
+                  <SelectItem key={value} value={value}>{PROVIDER_LABELS[value]}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
 
           {hasCustomProvider && (
