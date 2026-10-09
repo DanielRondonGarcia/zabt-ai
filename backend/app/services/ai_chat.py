@@ -9,10 +9,15 @@ from html import escape
 from typing import Any, Literal
 
 from fastapi import HTTPException, status
-from langfuse.openai import OpenAI
 
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.services.ai_provider import (
+    AIProviderError,
+    OpenAICompatibleCompletionClient,
+    build_openai_client,
+    get_completion_client,
+)
 from app.services.ai_chat_conversations import (
     DEFAULT_MEMORY_MAX_CHARS,
     DEFAULT_MEMORY_MAX_TURNS,
@@ -72,12 +77,16 @@ _SPANISH_MARKERS = frozenset({
 })
 
 
-def build_ai_chat_client(config=settings, *, client_factory=OpenAI):
+def build_ai_chat_client(config=settings, *, client_factory=None):
     """Build the chat client, falling back to the shared OpenAI key when needed."""
 
     base_url = (getattr(config, "AI_CHAT_BASE_URL", "") or getattr(config, "OPENAI_BASE_URL", "")).strip()
     api_key = (getattr(config, "AI_CHAT_API_KEY", "") or getattr(config, "OPENAI_API_KEY", "")).strip()
-    return client_factory(base_url=base_url, api_key=api_key)
+    return build_openai_client(
+        base_url=base_url,
+        api_key=api_key,
+        client_factory=client_factory,
+    )
 
 
 def _is_casual_message(message: str) -> bool:
@@ -130,12 +139,13 @@ class AIChatService:
         self,
         *,
         retrieval_service=default_retrieval_service,
-        client=_client,
+        client=None,
         model: str | None = None,
         conversation_service=default_conversation_service,
         group_service=default_group_service,
         memory_max_turns: int = DEFAULT_MEMORY_MAX_TURNS,
         memory_max_chars: int = DEFAULT_MEMORY_MAX_CHARS,
+        provider_resolver=None,
     ):
         self.retrieval_service = retrieval_service
         self.client = client
@@ -144,6 +154,7 @@ class AIChatService:
         self.group_service = group_service
         self.memory_max_turns = memory_max_turns
         self.memory_max_chars = memory_max_chars
+        self.provider_resolver = provider_resolver or get_completion_client
 
     def chat(
         self,
@@ -239,9 +250,20 @@ class AIChatService:
         group_introduction: str | None = None,
     ) -> str:
         try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[
+            if self.client is not None:
+                completion_client = OpenAICompatibleCompletionClient(
+                    self.client,
+                    model=self.model,
+                )
+            else:
+                completion_client = self.provider_resolver(
+                    user_id,
+                    purpose="chat",
+                    fallback_client=_client,
+                    fallback_model=self.model,
+                )
+            answer = completion_client.complete(
+                [
                     {"role": "system", "content": CHAT_SYSTEM_PROMPT},
                     *memory,
                     {
@@ -255,16 +277,21 @@ class AIChatService:
                 ],
                 temperature=0.2,
             )
-            answer = (response.choices[0].message.content or "").strip()
         except HTTPException:
             raise
+        except AIProviderError:
+            logger.error("ai chat provider unavailable group_id=%s user_id=%s", group_id, user_id)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=_CHAT_UNAVAILABLE,
+            ) from None
         except Exception:
             logger.exception("ai chat unavailable group_id=%s user_id=%s", group_id, user_id)
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=_CHAT_UNAVAILABLE,
             ) from None
-        return answer or _NO_EVIDENCE_ANSWER
+        return answer.strip() or _NO_EVIDENCE_ANSWER
 
     def _build_user_prompt(
         self,

@@ -12,6 +12,7 @@ from alembic import context
 from app.core.config import settings
 from sqlmodel import SQLModel
 from app.models import (  # Import models to register them
+    AIProviderConfiguration,
     AuthenticationConfiguration,
     AuthSession,
     CalendarEvent,

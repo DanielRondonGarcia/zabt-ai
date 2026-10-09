@@ -114,6 +114,11 @@ from app.models.authentication_configuration import (
     UserLoginMode,
 )
 
+from app.models.ai_provider import (
+    AIProviderConfiguration,
+    CustomAIProvider,
+)
+
 __all__ = [
     # base
     "TranscriptionType",
@@ -199,4 +204,7 @@ __all__ = [
     # authentication mode
     "AuthenticationConfiguration",
     "UserLoginMode",
+    # per-user AI provider
+    "AIProviderConfiguration",
+    "CustomAIProvider",
 ]

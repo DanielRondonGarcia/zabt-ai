@@ -39,7 +39,9 @@ from app.services.transcription import (
 from app.services.transcription.contracts import ProviderName
 from app.services.transcription.source import AudioSourceResolver
 from app.services.styles import style_service
+from app.services import ai_agent
 from app.services.ai_agent import summarize_transcript
+from app.services.ai_provider import get_completion_client
 from app.services.template import template_service
 from app.services import analytics
 from app.services.notifications import notify
@@ -743,6 +745,12 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
                 active_template = None
 
         template_body = active_template.body if active_template else None
+        completion_client = get_completion_client(
+            meeting.owner_id,
+            purpose="summary",
+            fallback_client=ai_agent._client,
+            fallback_model=settings.OPENAI_MODEL,
+        )
         summary_text = summarize_transcript(
             meeting.transcript_text,
             style_examples=style_examples,
@@ -751,6 +759,7 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             upload_date=meeting.created_at.strftime("%B %d, %Y") if meeting.created_at else None,
             context=context_result,
             output_language=meeting.requested_language,
+            completion_client=completion_client,
         )
 
     # Infer a meaningful title from the summary via LLM
@@ -760,6 +769,7 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
         inferred_title = infer_title(
             summary_text,
             output_language=meeting.requested_language,
+            completion_client=completion_client,
         )
 
     meeting_service.save_summary(

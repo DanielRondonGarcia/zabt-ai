@@ -162,9 +162,11 @@ def test_default_chat_client_and_model_use_chat_specific_settings(monkeypatch) -
     configured_clients = []
 
     class FakeConfiguredClient:
-        def __init__(self, *, base_url: str, api_key: str):
+        def __init__(self, *, base_url: str, api_key: str, timeout: float, max_retries: int):
             self.base_url = base_url
             self.api_key = api_key
+            self.timeout = timeout
+            self.max_retries = max_retries
             configured_clients.append(self)
 
     class FakeSettings:
@@ -180,6 +182,10 @@ def test_default_chat_client_and_model_use_chat_specific_settings(monkeypatch) -
     assert client is configured_clients[0]
     assert client.base_url == "https://api.openai.com/v1"
     assert client.api_key == "chat-key"
+    from app.services import ai_provider
+
+    assert client.timeout == ai_provider.PROVIDER_TIMEOUT_SECONDS
+    assert client.max_retries == ai_provider.MAX_PROVIDER_RETRIES
 
     monkeypatch.setattr(ai_chat, "settings", FakeSettings)
     service = AIChatService(retrieval_service=FakeRetrieval([]), client=FakeClient())
@@ -193,8 +199,13 @@ def test_chat_client_falls_back_to_shared_openai_key() -> None:
     configured = {}
 
     class FakeConfiguredClient:
-        def __init__(self, *, base_url: str, api_key: str):
-            configured.update(base_url=base_url, api_key=api_key)
+        def __init__(self, *, base_url: str, api_key: str, timeout: float, max_retries: int):
+            configured.update(
+                base_url=base_url,
+                api_key=api_key,
+                timeout=timeout,
+                max_retries=max_retries,
+            )
 
     class FakeSettings:
         AI_CHAT_BASE_URL = "https://api.openai.com/v1"
@@ -204,9 +215,13 @@ def test_chat_client_falls_back_to_shared_openai_key() -> None:
 
     ai_chat.build_ai_chat_client(FakeSettings, client_factory=FakeConfiguredClient)
 
+    from app.services import ai_provider
+
     assert configured == {
         "base_url": "https://api.openai.com/v1",
         "api_key": "shared-openai-key",
+        "timeout": ai_provider.PROVIDER_TIMEOUT_SECONDS,
+        "max_retries": ai_provider.MAX_PROVIDER_RETRIES,
     }
 
 

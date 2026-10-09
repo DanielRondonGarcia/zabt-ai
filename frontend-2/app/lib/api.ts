@@ -874,6 +874,49 @@ export async function fetchCurrentUser(): Promise<User> {
   return data;
 }
 
+// ── User AI provider ─────────────────────────────────────────────────────────
+
+export type CustomAIProvider = "openai" | "anthropic" | "ollama";
+
+export interface AIProviderConfiguration {
+  provider: CustomAIProvider | null;
+  model: string | null;
+  base_url: string | null;
+  api_key_configured: boolean;
+  enabled: boolean;
+  use_for_summary: boolean;
+  use_for_chat: boolean;
+}
+
+export interface UpdateAIProviderConfiguration {
+  provider: CustomAIProvider;
+  model: string;
+  base_url?: string;
+  api_key?: string;
+  enabled: boolean;
+  use_for_summary: boolean;
+  use_for_chat: boolean;
+}
+
+export async function getAIProviderConfiguration(): Promise<AIProviderConfiguration> {
+  const { data } = await apiClient.get<AIProviderConfiguration>("/users/me/ai-provider");
+  return data;
+}
+
+export async function updateAIProviderConfiguration(
+  payload: UpdateAIProviderConfiguration,
+): Promise<AIProviderConfiguration> {
+  const { data } = await apiClient.patch<AIProviderConfiguration>(
+    "/users/me/ai-provider",
+    payload,
+  );
+  return data;
+}
+
+export async function deleteAIProviderConfiguration(): Promise<void> {
+  await apiClient.delete("/users/me/ai-provider");
+}
+
 // ── Languages ─────────────────────────────────────────────────────────────────
 
 export type LanguageEntry = {

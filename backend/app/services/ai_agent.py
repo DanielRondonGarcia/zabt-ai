@@ -3,9 +3,14 @@
 from collections.abc import Iterable
 from typing import List, Optional
 from pydantic import BaseModel, Field
-from langfuse.openai import OpenAI
 from app.core.config import settings
 from app.core.logging import get_logger
+from app.services.ai_provider import (
+    AIProviderError,
+    CompletionClient,
+    OpenAICompatibleCompletionClient,
+    build_openai_client,
+)
 from app.services.multimodal_context import ContextBuildResult, ContextChunk, ContextItem, build_context
 
 logger = get_logger(__name__)
@@ -83,7 +88,7 @@ class MeetingMinutes(BaseModel):
 
 # ── LLM client setup ────────────────────────────────────────────────────────
 
-_client = OpenAI(
+_client = build_openai_client(
     base_url=settings.OPENAI_BASE_URL,
     api_key=settings.OPENAI_API_KEY,
 )
@@ -245,16 +250,24 @@ def _append_template_instruction(system_prompt: str, template_body: str | None) 
     )
 
 
-def _completion_text(system_prompt: str, user_content: str, *, temperature: float) -> str:
-    response = _client.chat.completions.create(
+def _completion_text(
+    system_prompt: str,
+    user_content: str,
+    *,
+    temperature: float,
+    completion_client: CompletionClient | None = None,
+) -> str:
+    client = completion_client or OpenAICompatibleCompletionClient(
+        _client,
         model=settings.OPENAI_MODEL,
-        messages=[
+    )
+    return client.complete(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
         temperature=temperature,
-    )
-    return response.choices[0].message.content or "Summary could not be generated."
+    ) or "Summary could not be generated."
 
 
 def summarize_context(
@@ -264,6 +277,7 @@ def summarize_context(
     template_body: str | None = None,
     upload_date: str | None = None,
     output_language: str | None = None,
+    completion_client: CompletionClient | None = None,
 ) -> str:
     """Generate a hierarchical summary from complete, ephemeral context chunks."""
     system_prompt = _build_system_prompt(style_examples)
@@ -299,6 +313,7 @@ def summarize_context(
             + format_context_chunk(context.chunks[0])
             + warning_text,
             temperature=0.3,
+            completion_client=completion_client,
         )
 
     partials: list[str] = []
@@ -312,6 +327,7 @@ def summarize_context(
                 "Keep every source reference needed for later synthesis.\n"
                 + format_context_chunk(chunk),
                 temperature=0.2,
+                completion_client=completion_client,
             )
         )
 
@@ -329,12 +345,14 @@ def summarize_context(
         + partial_context
         + warning_text,
         temperature=0.3,
+        completion_client=completion_client,
     )
 
 
 def infer_title(
     summary_text: str,
     output_language: str | None = None,
+    completion_client: CompletionClient | None = None,
 ) -> str | None:
     """Ask the LLM for a short, specific meeting title based on the summary."""
     try:
@@ -348,18 +366,25 @@ def infer_title(
             ),
             output_language,
         )
-        response = _client.chat.completions.create(
+        client = completion_client or OpenAICompatibleCompletionClient(
+            _client,
             model=settings.OPENAI_MODEL,
-            messages=[
+        )
+        title = client.complete(
+            [
                 {"role": "system", "content": title_system_prompt},
                 {"role": "user", "content": summary_text[:2000]},
             ],
             temperature=0.1,
             max_tokens=50,
         )
-        title = (response.choices[0].message.content or "").strip().strip('"\'# ')
+        title = title.strip().strip('"\'# ')
         if title and 3 < len(title) < 120:
             return title
+    except AIProviderError as exc:
+        if exc.configured:
+            raise
+        logger.exception("infer_title failed")
     except Exception:
         logger.exception("infer_title failed")
     return None
@@ -375,6 +400,7 @@ def summarize_transcript(
     spoken_segments: Iterable[object] | None = None,
     visual_segments: Iterable[object] | None = None,
     output_language: str | None = None,
+    completion_client: CompletionClient | None = None,
 ) -> str:
     """Generate a markdown summary from transcript-only or ephemeral context."""
     if context is None and (spoken_segments is not None or visual_segments is not None):
@@ -391,6 +417,7 @@ def summarize_transcript(
             template_body=template_body,
             upload_date=upload_date,
             output_language=output_language,
+            completion_client=completion_client,
         )
 
     system_prompt = _build_system_prompt(style_examples)
@@ -402,12 +429,14 @@ def summarize_transcript(
         )
     system_prompt = _append_template_instruction(system_prompt, template_body)
     system_prompt = _append_output_language_instruction(system_prompt, output_language)
-    response = _client.chat.completions.create(
+    client = completion_client or OpenAICompatibleCompletionClient(
+        _client,
         model=settings.OPENAI_MODEL,
-        messages=[
+    )
+    return client.complete(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": transcript_text},
         ],
         temperature=0.3,
-    )
-    return response.choices[0].message.content or "Summary could not be generated."
+    ) or "Summary could not be generated."
