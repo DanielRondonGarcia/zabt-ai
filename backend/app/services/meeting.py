@@ -4,10 +4,14 @@ import logging
 import uuid
 from datetime import datetime
 from typing import List, Optional
+from fastapi import HTTPException, status
 from sqlalchemy import delete, func
 from sqlmodel import Session, select
 from sqlalchemy.orm import selectinload
 from app.models import (
+    Group,
+    GroupMemberRole,
+    GroupMembership,
     Meeting,
     MeetingCreate,
     TranscriptSegment,
@@ -74,7 +78,106 @@ class MeetingService(BaseService):
             )
             return session.exec(statement).first()
 
-    def get_meetings(self, owner_id: int, skip: int = 0, limit: int = 100) -> List[Meeting]:
+    def get_meeting_for_access(
+        self, meeting_id: int, user_id: int
+    ) -> Optional[Meeting]:
+        """Authorize before loading full meeting content for an owner or member."""
+
+        with Session(engine) as session:
+            metadata = session.exec(
+                select(Meeting.owner_id, Meeting.group_id).where(
+                    Meeting.id == meeting_id
+                )
+            ).first()
+            if metadata is None:
+                return None
+
+            owner_id, group_id = metadata
+            if owner_id != user_id:
+                if group_id is None:
+                    return None
+                self._require_group_access_in_session(session, group_id, user_id)
+
+            statement = (
+                select(Meeting)
+                .where(Meeting.id == meeting_id)
+                .options(selectinload(Meeting.segments))
+            )
+            return session.exec(statement).first()
+
+    @staticmethod
+    def _require_group_access_in_session(
+        session: Session, group_id: int, user_id: int
+    ) -> None:
+        group = session.get(Group, group_id)
+        if group is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found.")
+        if group.owner_id == user_id:
+            return
+        membership = session.exec(
+            select(GroupMembership).where(
+                GroupMembership.group_id == group_id,
+                GroupMembership.user_id == user_id,
+            )
+        ).first()
+        if membership is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not enough permissions")
+
+    @classmethod
+    def _require_editor_in_session(
+        cls, session: Session, meeting: Meeting, user_id: int
+    ) -> None:
+        if meeting.owner_id == user_id:
+            return
+        if meeting.group_id is None:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Editor access is required.")
+
+        cls.require_group_editor_in_session(session, meeting.group_id, user_id)
+
+    @classmethod
+    def require_group_editor_in_session(
+        cls, session: Session, group_id: int, user_id: int
+    ) -> None:
+        group = session.get(Group, group_id)
+        if group is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found.")
+        if group.owner_id == user_id:
+            return
+
+        membership = session.exec(
+            select(GroupMembership).where(
+                GroupMembership.group_id == group_id,
+                GroupMembership.user_id == user_id,
+            )
+        ).first()
+        role = membership.role.value if isinstance(membership and membership.role, GroupMemberRole) else str(
+            membership.role if membership is not None else ""
+        )
+        if membership is None or role != GroupMemberRole.EDITOR.value:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Editor access is required.")
+
+    def require_editor_in_session(
+        self, session: Session, meeting_id: int, user_id: int
+    ) -> Meeting:
+        meeting = session.get(Meeting, meeting_id)
+        if meeting is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Meeting not found")
+        self._require_editor_in_session(session, meeting, user_id)
+        return meeting
+
+    def require_editor_for_user(self, meeting_id: int, user_id: int) -> Meeting:
+        """Revalidate editor access against current membership state."""
+
+        with Session(engine) as session:
+            return self.require_editor_in_session(session, meeting_id, user_id)
+
+    def get_meetings(
+        self,
+        owner_id: int,
+        skip: int = 0,
+        limit: int = 100,
+        group_id: int | None = None,
+    ) -> List[Meeting]:
         """List meetings without heavy text columns. summary_text is truncated to 300 chars."""
         with Session(engine) as session:
             # Select lightweight columns + truncated summary
@@ -103,17 +206,20 @@ class MeetingService(BaseService):
                 Meeting.visual_breakdown_status,
                 func.left(Meeting.summary_text, 300).label("summary_text"),
             ]
+            statement = select(*light_cols)
+            if group_id is None:
+                statement = statement.where(Meeting.owner_id == owner_id)
+            else:
+                statement = statement.where(Meeting.group_id == group_id)
             statement = (
-                select(*light_cols)
-                .where(Meeting.owner_id == owner_id)
-                .order_by(Meeting.created_at.desc())
+                statement.order_by(Meeting.created_at.desc())
                 .offset(skip)
                 .limit(limit)
             )
             return session.exec(statement).all()
 
     def get_group_meetings(self, group_id: int, owner_id: int, limit: int = 100):
-        """Return bounded meeting metadata for an owner-scoped group."""
+        """Return bounded meeting metadata for an accessible group."""
 
         with Session(engine) as session:
             statement = (
@@ -129,10 +235,7 @@ class MeetingService(BaseService):
                     Meeting.sub_status,
                     func.substr(Meeting.summary_text, 1, 300).label("summary_text"),
                 )
-                .where(
-                    Meeting.owner_id == owner_id,
-                    Meeting.group_id == group_id,
-                )
+                .where(Meeting.group_id == group_id)
                 .order_by(Meeting.created_at.desc(), Meeting.id.desc())
                 .limit(limit)
             )
@@ -183,6 +286,35 @@ class MeetingService(BaseService):
         if status == "processing":
             self.touch_processing_heartbeat(meeting_id)
 
+        self._publish_sub_status(meeting_id, sub_status)
+        return meeting
+
+    def update_sub_status_for_user(
+        self,
+        meeting_id: int,
+        user_id: int,
+        sub_status: str,
+        status: str = "processing",
+    ) -> Optional[Meeting]:
+        """Update processing state only after an in-transaction editor check."""
+
+        with Session(engine) as session:
+            meeting = self.require_editor_in_session(session, meeting_id, user_id)
+            meeting.status = status
+            meeting.sub_status = sub_status
+            if status in {"queued", "processing"}:
+                meeting.processing_heartbeat_at = datetime.utcnow()
+            session.add(meeting)
+            session.commit()
+            session.refresh(meeting)
+
+        if status == "processing":
+            self.touch_processing_heartbeat(meeting_id)
+        self._publish_sub_status(meeting_id, sub_status)
+        return meeting
+
+    @staticmethod
+    def _publish_sub_status(meeting_id: int, sub_status: str) -> None:
         # Fire-and-forget Redis Pub/Sub (non-blocking, best-effort)
         try:
             import redis
@@ -192,7 +324,7 @@ class MeetingService(BaseService):
         except Exception as e:
             logger.warning("Failed to publish to Redis for meeting %s: %s", meeting_id, e)
 
-        return meeting
+        return None
 
     def touch_processing_heartbeat(
         self, meeting_id: int, *, heartbeat_at: datetime | None = None
@@ -265,7 +397,9 @@ class MeetingService(BaseService):
             meeting.template_name = template_name
         return self.save(meeting)
 
-    def queue_visual_breakdown(self, meeting_id: int) -> tuple[str, bool]:
+    def queue_visual_breakdown(
+        self, meeting_id: int, user_id: int | None = None
+    ) -> tuple[str, bool]:
         """Create a new visual run epoch while holding the meeting row lock.
 
         The epoch is kept in the existing JSONB parameters column instead of a
@@ -282,6 +416,8 @@ class MeetingService(BaseService):
             meeting = session.exec(statement).first()
             if meeting is None:
                 raise RuntimeError(f"Meeting {meeting_id} not found")
+            if user_id is not None:
+                self._require_editor_in_session(session, meeting, user_id)
 
             params = dict(meeting.visual_breakdown_params or {})
             current_epoch = params.get("run_epoch")
@@ -537,6 +673,24 @@ class MeetingService(BaseService):
         )
         return self.save(segment)
 
+    def add_segment_for_user(
+        self, meeting_id: int, user_id: int, start: float, end: float, text: str
+    ) -> TranscriptSegment:
+        """Append a realtime segment only while the caller still has editor access."""
+
+        with Session(engine) as session:
+            self.require_editor_in_session(session, meeting_id, user_id)
+            segment = TranscriptSegment(
+                meeting_id=meeting_id,
+                start_time=start,
+                end_time=end,
+                text=text,
+            )
+            session.add(segment)
+            session.commit()
+            session.refresh(segment)
+            return segment
+
     def initiate_processing(self, file_key: str) -> Optional[Meeting]:
         """
         Called by webhook handler. Looks up meeting by file_path,
@@ -573,14 +727,26 @@ class MeetingService(BaseService):
         meeting.summary_text = summary_text
         meeting.summary_edited = True
         saved = self.save(meeting)
-        if saved and saved.group_id:
-            try:
-                from app.worker import stage_embedding
-
-                stage_embedding.delay(meeting_id)
-            except Exception:
-                pass
+        self._enqueue_embedding(saved)
         return saved
+
+    def update_summary_for_user(
+        self, meeting_id: int, user_id: int, summary_text: str
+    ) -> Optional[Meeting]:
+        """Persist a summary only after an in-transaction editor check."""
+
+        with Session(engine) as session:
+            meeting = self.require_editor_in_session(session, meeting_id, user_id)
+            if meeting.original_summary_text is None and meeting.summary_text is not None:
+                meeting.original_summary_text = meeting.summary_text
+            meeting.summary_text = summary_text
+            meeting.summary_edited = True
+            session.add(meeting)
+            session.commit()
+            session.refresh(meeting)
+
+        self._enqueue_embedding(meeting)
+        return meeting
 
     def restore_summary(self, meeting_id: int) -> Optional[Meeting]:
         """Restore the original AI-generated summary."""
@@ -592,14 +758,41 @@ class MeetingService(BaseService):
         meeting.summary_text = meeting.original_summary_text
         meeting.summary_edited = False
         saved = self.save(meeting)
-        if saved and saved.group_id:
-            try:
-                from app.worker import stage_embedding
-
-                stage_embedding.delay(meeting_id)
-            except Exception:
-                pass
+        self._enqueue_embedding(saved)
         return saved
+
+    def restore_summary_for_user(
+        self, meeting_id: int, user_id: int
+    ) -> Optional[Meeting]:
+        """Restore a summary only after an in-transaction editor check."""
+
+        with Session(engine) as session:
+            meeting = self.require_editor_in_session(session, meeting_id, user_id)
+            if meeting.original_summary_text is None:
+                return None
+            meeting.summary_text = meeting.original_summary_text
+            meeting.summary_edited = False
+            session.add(meeting)
+            session.commit()
+            session.refresh(meeting)
+
+        self._enqueue_embedding(meeting)
+        return meeting
+
+    @staticmethod
+    def _enqueue_embedding(meeting: Meeting) -> None:
+        if not meeting.group_id:
+            return
+        try:
+            from app.worker import stage_embedding
+
+            stage_embedding.delay(meeting.id)
+        except Exception:
+            logger.warning(
+                "Failed to enqueue meeting embedding meeting_id=%s",
+                meeting.id,
+                exc_info=True,
+            )
 
     def create_from_youtube(self, url: str, owner_id: int) -> Meeting:
         """Create a meeting record for YouTube ingestion.
@@ -636,13 +829,21 @@ class MeetingService(BaseService):
             session.add(meeting)
             session.commit()
             session.refresh(meeting)
-            if field in {"transcript_text", "transliterated_text", "summary_text", "structured_output", "structured_output_status"} and meeting.group_id:
-                try:
-                    from app.worker import stage_embedding
+            if field in {"transcript_text", "transliterated_text", "summary_text", "structured_output", "structured_output_status"}:
+                self._enqueue_embedding(meeting)
+            return meeting
 
-                    stage_embedding.delay(meeting_id)
-                except Exception:
-                    pass
+    def update_field_for_user(
+        self, meeting_id: int, user_id: int, field: str, value
+    ) -> Optional[Meeting]:
+        """Update a user-facing meeting field after an in-transaction editor check."""
+
+        with Session(engine) as session:
+            meeting = self.require_editor_in_session(session, meeting_id, user_id)
+            setattr(meeting, field, value)
+            session.add(meeting)
+            session.commit()
+            session.refresh(meeting)
             return meeting
 
     def delete_meeting(self, meeting_id: int) -> bool:

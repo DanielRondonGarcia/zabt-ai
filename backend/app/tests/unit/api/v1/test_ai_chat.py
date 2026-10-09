@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import datetime
+from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException, status
 from fastapi.testclient import TestClient
@@ -22,7 +23,7 @@ from app.models import (
 
 
 @pytest.fixture(name="test_client")
-def fixture_test_client() -> Iterator[TestClient]:
+def fixture_test_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClient]:
     from app.api.v1.endpoints import ai_chat
 
     app = FastAPI(title="Test AI Chat API")
@@ -35,7 +36,20 @@ def fixture_test_client() -> Iterator[TestClient]:
         deps.get_current_active_user
     ] = override_get_current_active_user
 
+    class FakeGroupService:
+        def __init__(self) -> None:
+            self.allowed = True
+
+        def get_accessible(self, group_id: int, user_id: int):
+            if not self.allowed:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+            return object()
+
+    group_access = FakeGroupService()
+    monkeypatch.setattr(ai_chat, "group_service", group_access)
+
     with TestClient(app) as client:
+        client.app_state = {"group_access": group_access}  # type: ignore[attr-defined]
         yield client
 
     app.dependency_overrides.clear()
@@ -272,6 +286,14 @@ class FakeConversationService:
             ],
         )
 
+    def get_owned(self, conversation_id: int, owner_id: int):
+        self.calls.append(("authorize", conversation_id, owner_id))
+        if conversation_id == 404:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
+        if conversation_id == 403:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+        return SimpleNamespace(group_id=12)
+
     def delete(self, conversation_id: int, owner_id: int) -> None:
         self.calls.append(("delete", conversation_id, owner_id))
         if conversation_id == 403:
@@ -322,7 +344,7 @@ def test_get_conversation_returns_ordered_messages_with_evidence_status(
     assert body["messages"][1]["sources"] == [
         {"meeting_id": 9, "kind": "summary", "chunk_index": 1, "score": 0.88, "text": "src"}
     ]
-    assert conversations.calls == [("get", 3, 5)]
+    assert conversations.calls == [("authorize", 3, 5), ("get", 3, 5)]
 
 
 @pytest.mark.parametrize(("conversation_id", "expected"), [(404, 404), (403, 403)])
@@ -346,4 +368,21 @@ def test_delete_conversation_returns_204_and_preserves_403(
     assert deleted.status_code == 204, deleted.text
     assert deleted.content == b""
     assert forbidden.status_code == 403, forbidden.text
-    assert conversations.calls == [("delete", 3, 5), ("delete", 403, 5)]
+    assert conversations.calls == [
+        ("authorize", 3, 5),
+        ("delete", 3, 5),
+        ("authorize", 403, 5),
+    ]
+
+
+def test_detail_and_delete_recheck_revoked_group_access(
+    test_client: TestClient, conversations: FakeConversationService
+) -> None:
+    test_client.app_state["group_access"].allowed = False  # type: ignore[attr-defined]
+
+    detail = test_client.get("/ai-chat/conversations/3")
+    deleted = test_client.delete("/ai-chat/conversations/3")
+
+    assert detail.status_code == 403, detail.text
+    assert deleted.status_code == 403, deleted.text
+    assert conversations.calls == [("authorize", 3, 5), ("authorize", 3, 5)]

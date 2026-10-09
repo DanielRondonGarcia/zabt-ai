@@ -87,7 +87,36 @@ def _signed_download_url(
     raise RuntimeError("Storage provider cannot generate a signed URL")
 
 
-def _build_meeting_response(meeting: Meeting) -> MeetingRead:
+def _meeting_capabilities(meeting: Meeting, user_id: int | None) -> dict[str, bool]:
+    capabilities = {
+        "can_edit": False,
+        "can_delete": False,
+        "can_share_email": False,
+        "can_retranscribe": False,
+        "can_reprocess": False,
+        "can_request_visual_breakdown": False,
+    }
+    if user_id is None:
+        return capabilities
+
+    if meeting.owner_id == user_id:
+        return {key: True for key in capabilities}
+
+    if meeting.group_id is None:
+        return capabilities
+
+    access = group_service.get_access(meeting.group_id, user_id)
+    if access.role in {"editor", "owner"}:
+        capabilities.update(
+            can_edit=True,
+            can_retranscribe=True,
+            can_reprocess=True,
+            can_request_visual_breakdown=True,
+        )
+    return capabilities
+
+
+def _build_meeting_response(meeting: Meeting, user_id: int | None = None) -> MeetingRead:
     """Map Meeting + DB segments to MeetingRead with frontend-compatible field names."""
     segments = []
     speaker_durations: dict[str, float] = {}
@@ -179,7 +208,15 @@ def _build_meeting_response(meeting: Meeting) -> MeetingRead:
         visual_breakdown_status=meeting.visual_breakdown_status,
         visual_breakdown_error=meeting.visual_breakdown_error,
         visual_breakdown_completed_at=meeting.visual_breakdown_completed_at,
+        **_meeting_capabilities(meeting, user_id),
     )
+
+
+def _get_meeting_for_access(meeting_id: int, user_id: int) -> Meeting:
+    meeting = meeting_service.get_meeting_for_access(meeting_id, user_id)
+    if meeting is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return meeting
 
 class MeetingCreateWithKey(MeetingCreate):
     file_key: str
@@ -263,12 +300,20 @@ def create_meeting(
 def read_meetings(
     skip: int = 0,
     limit: int = 100,
+    group_id: int | None = Query(default=None, ge=1),
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """
     Retrieve meetings (without segments — use GET /{meeting_id} for full detail).
     """
-    rows = meeting_service.get_meetings(owner_id=current_user.id, skip=skip, limit=limit)
+    if group_id is not None:
+        group_service.get_accessible(group_id, current_user.id)
+    rows = meeting_service.get_meetings(
+        owner_id=current_user.id,
+        skip=skip,
+        limit=limit,
+        group_id=group_id,
+    )
     meetings = []
     for row in rows:
         row_data = row._asdict()
@@ -285,12 +330,8 @@ def read_meeting(
     """
     Get meeting by ID.
     """
-    meeting = meeting_service.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=400, detail="Not enough permissions")
-    return _build_meeting_response(meeting)
+    meeting = _get_meeting_for_access(meeting_id, current_user.id)
+    return _build_meeting_response(meeting, current_user.id)
 
 
 @router.get("/{meeting_id}/processing-audit", response_model=MeetingProcessingAuditRead)
@@ -298,13 +339,11 @@ def read_meeting_processing_audit(
     meeting_id: int,
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
-    """Return the owner-scoped durable processing audit for a meeting."""
-    meeting = meeting_service.get_meeting(meeting_id)
-    if meeting is None or meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Meeting not found")
+    """Return the durable processing audit for an accessible meeting."""
+    meeting = _get_meeting_for_access(meeting_id, current_user.id)
     return meeting_processing_audit.list_for_meeting(
         meeting_id=meeting_id,
-        owner_id=current_user.id,
+        owner_id=meeting.owner_id,
     )
 
 
@@ -315,11 +354,7 @@ def export_meeting_pdf(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Response:
     """Generate and download a PDF of the meeting summary or transcript."""
-    meeting = meeting_service.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
+    meeting = _get_meeting_for_access(meeting_id, current_user.id)
     if meeting.status != "completed":
         raise HTTPException(
             status_code=400,
@@ -396,12 +431,9 @@ def delete_meeting(
     """
     Permanently delete a meeting and its associated file.
     """
-    meeting = meeting_service.get_meeting(meeting_id)
+    meeting = meeting_service.get_meeting_for_owner(meeting_id, current_user.id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
-
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
 
     if meeting.status in ["processing", "queued"]:
         raise HTTPException(
@@ -438,11 +470,7 @@ def update_meeting_summary(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """Update the summary text of a completed meeting."""
-    meeting = meeting_service.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
+    meeting = _get_meeting_for_access(meeting_id, current_user.id)
     if meeting.status in ("processing", "queued"):
         raise HTTPException(
             status_code=400,
@@ -451,7 +479,9 @@ def update_meeting_summary(
     if not body.summary_text.strip():
         raise HTTPException(status_code=400, detail="Summary text cannot be empty.")
 
-    updated = meeting_service.update_summary(meeting_id, body.summary_text)
+    updated = meeting_service.update_summary_for_user(
+        meeting_id, current_user.id, body.summary_text
+    )
     return {
         "id": updated.id,
         "summary_text": updated.summary_text,
@@ -466,18 +496,14 @@ def restore_meeting_summary(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """Restore the original AI-generated summary."""
-    meeting = meeting_service.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
+    meeting = _get_meeting_for_access(meeting_id, current_user.id)
     if meeting.original_summary_text is None:
         raise HTTPException(
             status_code=400,
             detail="No original summary available to restore.",
         )
 
-    restored = meeting_service.restore_summary(meeting_id)
+    restored = meeting_service.restore_summary_for_user(meeting_id, current_user.id)
     return {
         "id": restored.id,
         "summary_text": restored.summary_text,
@@ -569,17 +595,15 @@ def resummarize_meeting(
     """Trigger re-summarization of a meeting using a specified (or default) template."""
     from celery import chain
     from app.worker import stage_extract_intelligence, stage_summarize
-    meeting = meeting_service.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
+    meeting = _get_meeting_for_access(meeting_id, current_user.id)
     if meeting.status in ("processing", "queued"):
         raise HTTPException(
             status_code=400,
             detail="Meeting is currently being processed. Try again when processing is complete.",
         )
-    meeting_service.update_sub_status(meeting_id, "summarizing")
+    meeting_service.update_sub_status_for_user(
+        meeting_id, current_user.id, "summarizing"
+    )
     chain(
         stage_summarize.s(template_id=body.template_id),
         stage_extract_intelligence.s(),
@@ -604,9 +628,9 @@ def re_transcribe_meeting(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """Update the requested language and re-dispatch the transcription pipeline."""
-    meeting = db.get(Meeting, meeting_id)
-    if meeting is None or meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Meeting not found")
+    meeting = meeting_service.require_editor_in_session(
+        db, meeting_id, current_user.id
+    )
 
     if not lang_catalog.code_exists(db, payload.language):
         raise HTTPException(
@@ -650,7 +674,7 @@ def re_transcribe_meeting(
         )
 
     dispatch_transcription_job(meeting.id)
-    return _build_meeting_response(meeting)
+    return _build_meeting_response(meeting, current_user.id)
 
 
 @router.post("/{meeting_id}/reprocess", response_model=MeetingRead)
@@ -660,9 +684,9 @@ def reprocess_failed_meeting(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """Re-run the stored media pipeline for a failed meeting."""
-    meeting = db.get(Meeting, meeting_id)
-    if meeting is None or meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=404, detail="Meeting not found")
+    meeting = meeting_service.require_editor_in_session(
+        db, meeting_id, current_user.id
+    )
 
     if meeting.status != "failed":
         raise HTTPException(
@@ -708,7 +732,7 @@ def reprocess_failed_meeting(
 
     meeting_processing_audit.create_run(meeting.id, trigger="reprocess")
     dispatch_transcription_job(meeting.id)
-    return _build_meeting_response(meeting)
+    return _build_meeting_response(meeting, current_user.id)
 
 
 class PresignedUploadRequest(BaseModel):
@@ -751,11 +775,9 @@ def confirm_upload(
     Confirm that a file upload to S3/R2 is complete and trigger the transcription pipeline.
     Used when STORAGE_PROVIDER=s3 (MinIO uses webhooks instead).
     """
-    meeting = meeting_service.get_meeting(meeting_id)
+    meeting = meeting_service.get_meeting_for_owner(meeting_id, current_user.id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
     if meeting.status != "pending_upload":
         raise HTTPException(status_code=400, detail="Meeting is not awaiting upload")
 
@@ -780,11 +802,9 @@ def share_meeting_via_email(
     from app.worker import send_meeting_summary_emails
 
     # Ownership check
-    meeting = meeting_service.get_meeting(meeting_id)
+    meeting = meeting_service.get_meeting_for_owner(meeting_id, current_user.id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
     if meeting.status != "completed":
         raise HTTPException(
             status_code=400,
@@ -835,11 +855,9 @@ def list_meeting_shares(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """List past email shares for a meeting."""
-    meeting = meeting_service.get_meeting(meeting_id)
+    meeting = meeting_service.get_meeting_for_owner(meeting_id, current_user.id)
     if not meeting:
         raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
 
     return email_share_service.get_shares_for_meeting(meeting_id, current_user.id)
 
@@ -853,11 +871,7 @@ def request_visual_breakdown(
     overwrites prior segments. Requires the meeting's video file to still be in S3."""
     from app.worker import stage_visual_breakdown
 
-    meeting = meeting_service.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
+    meeting = _get_meeting_for_access(meeting_id, current_user.id)
     if not meeting.file_path:
         raise HTTPException(status_code=400, detail="Meeting has no video file")
     if meeting.visual_breakdown_status in ("queued", "processing"):
@@ -868,7 +882,7 @@ def request_visual_breakdown(
 
     # Mark queued and persist a new run epoch in the same locked transaction.
     # The Celery task transitions to "processing" once it picks up the job.
-    meeting_service.queue_visual_breakdown(meeting_id)
+    meeting_service.queue_visual_breakdown(meeting_id, user_id=current_user.id)
 
     stage_visual_breakdown.apply_async(args=[meeting_id])
     return {
@@ -914,11 +928,7 @@ def get_visual_segments(
     Returns empty `visual_segments` and null status when no breakdown has been run."""
     from app.services.visual_segments import VisualSegmentService
 
-    meeting = meeting_service.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
+    meeting = _get_meeting_for_access(meeting_id, current_user.id)
 
     aligned = VisualSegmentService().get_with_transcript_alignment(meeting_id)
     return VisualBreakdownResponse(
@@ -954,20 +964,24 @@ class AssignGroupPayload(BaseModel):
     group_id: int | None
 
 
+class MeetingReindexResponse(BaseModel):
+    status: Literal["accepted"]
+    task_id: str
+
+
+def _enqueue_meeting_reindex(meeting_id: int):
+    from app.worker import reindex_meeting
+
+    return reindex_meeting.delay(meeting_id)
+
+
 def _enqueue_group_assignment_indexing(
     meeting_id: int,
     old_group_id: int | None,
     new_group_id: int | None,
 ) -> None:
-    """Dispatch idempotent vector indexing/cleanup after assignment commits."""
-    if old_group_id != new_group_id and old_group_id is not None:
-        from app.worker import delete_meeting_vectors
-
-        delete_meeting_vectors.delay(meeting_id)
-    if new_group_id is not None:
-        from app.worker import stage_embedding
-
-        stage_embedding.delay(meeting_id)
+    """Dispatch cleanup and indexing after every durable assignment request."""
+    _enqueue_meeting_reindex(meeting_id)
 
 
 @router.patch("/{meeting_id}/assign-group", response_model=MeetingRead)
@@ -977,29 +991,66 @@ def assign_group_to_meeting(
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
     """Assign or unassign a group to a meeting."""
-    meeting = meeting_service.get_meeting(meeting_id)
-    if not meeting:
-        raise HTTPException(status_code=404, detail="Meeting not found")
-    if meeting.owner_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Not enough permissions")
-
-    group_id = None
-    if payload.group_id is not None:
-        group = group_service.get_accessible(payload.group_id, current_user.id)
-        group_id = group.id
+    group_id = payload.group_id
 
     with Session(engine) as session:
-        meeting_for_update = session.get(Meeting, meeting_id)
+        meeting_for_update = session.exec(
+            sqlmodel_select(Meeting)
+            .where(Meeting.id == meeting_id)
+            .with_for_update()
+        ).first()
         if meeting_for_update is None:
             raise HTTPException(status_code=404, detail="Meeting not found")
-        if meeting_for_update.owner_id != current_user.id:
-            raise HTTPException(status_code=403, detail="Not enough permissions")
-
         old_group_id = meeting_for_update.group_id
+        meeting_service.require_editor_in_session(session, meeting_id, current_user.id)
+        if group_id is not None:
+            meeting_service.require_group_editor_in_session(
+                session, group_id, current_user.id
+            )
         meeting_for_update.group_id = group_id
         session.add(meeting_for_update)
         session.commit()
         session.refresh(meeting_for_update)
 
-        _enqueue_group_assignment_indexing(meeting_id, old_group_id, group_id)
-        return _build_meeting_response(meeting_for_update)
+        try:
+            _enqueue_group_assignment_indexing(meeting_id, old_group_id, group_id)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "code": "meeting_reindex_pending",
+                    "meeting_id": meeting_id,
+                    "group_id": group_id,
+                    "message": (
+                        "The meeting assignment was saved, but its AI index is pending. "
+                        "Retry the meeting index operation."
+                    ),
+                },
+            ) from exc
+        return _build_meeting_response(meeting_for_update, current_user.id)
+
+
+@router.post(
+    "/{meeting_id}/reindex",
+    response_model=MeetingReindexResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def reindex_meeting_endpoint(
+    meeting_id: int,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> MeetingReindexResponse:
+    """Queue a retryable meeting index refresh for an authorized editor."""
+    with Session(engine) as session:
+        meeting_service.require_editor_in_session(session, meeting_id, current_user.id)
+    try:
+        async_result = _enqueue_meeting_reindex(meeting_id)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "meeting_reindex_pending",
+                "meeting_id": meeting_id,
+                "message": "The meeting index could not be queued. Please retry.",
+            },
+        ) from exc
+    return MeetingReindexResponse(status="accepted", task_id=str(async_result.id))

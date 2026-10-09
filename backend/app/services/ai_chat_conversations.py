@@ -23,6 +23,7 @@ from app.models.ai_chat import (
     AIChatMessageRead,
 )
 from app.services.base import BaseService
+from app.services.group import group_service as default_group_service
 
 DEFAULT_MEMORY_MAX_TURNS = 6
 DEFAULT_MEMORY_MAX_CHARS = 4000
@@ -85,20 +86,30 @@ def bound_history(
 
 
 class AIChatConversationService(BaseService):
-    """Repository for owner-scoped conversations within a group."""
+    """Repository for owner-scoped conversations within an authorized group."""
 
-    def __init__(self, *, session_factory: Callable[[], Session] | None = None):
+    def __init__(
+        self,
+        *,
+        session_factory: Callable[[], Session] | None = None,
+        group_service=default_group_service,
+    ):
         self._session_factory = session_factory or (lambda: Session(engine))
+        self.group_service = group_service
 
     def _session(self) -> Session:
         return self._session_factory()
 
-    @staticmethod
-    def _authorize(conversation: AIChatConversation | None, owner_id: int) -> AIChatConversation:
+    def _authorize(
+        self, conversation: AIChatConversation | None, owner_id: int
+    ) -> AIChatConversation:
         if conversation is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found.")
         if conversation.owner_id != owner_id:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied.")
+        # Ownership is not sufficient for a conversation whose group access was
+        # revoked after the conversation was created.
+        self.group_service.get_accessible(conversation.group_id, owner_id)
         return conversation
 
     def list_for_group(self, owner_id: int, group_id: int) -> list[AIChatConversationSummary]:

@@ -13,6 +13,7 @@ from app.api import deps
 from app.models import AIChatConversationDetail, AIChatConversationSummary, User
 from app.services.ai_chat import EvidenceStatus, ai_chat_service
 from app.services.ai_chat_conversations import ai_chat_conversation_service
+from app.services.group import group_service
 
 router = APIRouter()
 
@@ -48,6 +49,12 @@ class AIChatResponse(BaseModel):
     evidence_status: EvidenceStatus
 
 
+def _authorize_conversation_access(conversation_id: int, user_id: int) -> None:
+    """Revalidate both conversation ownership and its current group access."""
+    conversation = ai_chat_conversation_service.get_owned(conversation_id, user_id)
+    group_service.get_accessible(conversation.group_id, user_id)
+
+
 @router.post("/", response_model=AIChatResponse)
 def chat(
     *,
@@ -70,6 +77,7 @@ def list_conversations(
     group_id: int = Query(..., ge=1),
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
+    group_service.get_accessible(group_id, current_user.id)
     return ai_chat_conversation_service.list_for_group(owner_id=current_user.id, group_id=group_id)
 
 
@@ -79,6 +87,7 @@ def get_conversation(
     conversation_id: int,
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
+    _authorize_conversation_access(conversation_id, current_user.id)
     return ai_chat_conversation_service.get_detail(conversation_id, current_user.id)
 
 
@@ -88,5 +97,6 @@ def delete_conversation(
     conversation_id: int,
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Response:
+    _authorize_conversation_access(conversation_id, current_user.id)
     ai_chat_conversation_service.delete(conversation_id, current_user.id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

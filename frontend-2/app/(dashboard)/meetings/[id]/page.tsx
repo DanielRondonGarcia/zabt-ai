@@ -5,7 +5,7 @@
 import { useState, useEffect, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import { usePostHog } from "posthog-js/react";
-import { assignMeetingGroup, getGroups, getMeeting, getMeetingProcessingAudit, updateMeetingSummary, restoreMeetingSummary, Meeting, updateMeetingType, reExtractIntelligence, listLanguages, reprocessMeeting, type GroupSummary, type LanguageEntry } from "@/app/lib/api";
+import { assignMeetingGroup, getGroups, getMeeting, getMeetingProcessingAudit, updateMeetingSummary, restoreMeetingSummary, Meeting, updateMeetingType, reExtractIntelligence, listLanguages, reprocessMeeting, reindexMeeting, type GroupSummary, type LanguageEntry } from "@/app/lib/api";
 import type { MeetingProcessingAudit, MeetingType } from "@/app/lib/api";
 import { ReTranscribeDialog } from "@/app/components/ReTranscribeDialog";
 import { StatusBadge } from "@/app/components/status-badge";
@@ -54,6 +54,47 @@ const romanSpeakerLabel = (s: string) => {
   return n !== undefined ? `Speaker ${parseInt(n) + 1}` : s;
 };
 
+type MeetingReindexPendingDetail = {
+  code: "meeting_reindex_pending";
+  meeting_id: number;
+  group_id: number | null;
+  message: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function getMeetingReindexPending(error: unknown): MeetingReindexPendingDetail | null {
+  if (!isRecord(error) || !isRecord(error.response) || !isRecord(error.response.data)) {
+    return null;
+  }
+
+  const detail = error.response.data.detail;
+  if (!isRecord(detail)) return null;
+
+  const meetingId = detail.meeting_id;
+  const groupId = detail.group_id;
+  if (
+    detail.code !== "meeting_reindex_pending"
+    || typeof meetingId !== "number"
+    || !Number.isSafeInteger(meetingId)
+    || meetingId <= 0
+    || (groupId !== null
+      && (typeof groupId !== "number" || !Number.isSafeInteger(groupId) || groupId <= 0))
+    || typeof detail.message !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    code: "meeting_reindex_pending",
+    meeting_id: meetingId,
+    group_id: groupId,
+    message: detail.message,
+  };
+}
+
 type RomanRow = { speaker: string | null; text: string };
 
 function parseRomanRows(text: string): RomanRow[] {
@@ -101,6 +142,9 @@ export default function MeetingDetailPage({
   const [groupsLoading, setGroupsLoading] = useState(true);
   const [groupSaving, setGroupSaving] = useState(false);
   const [groupError, setGroupError] = useState<string | null>(null);
+  const [groupReindexPending, setGroupReindexPending] = useState(false);
+  const [groupReindexRetrying, setGroupReindexRetrying] = useState(false);
+  const [groupFeedback, setGroupFeedback] = useState<string | null>(null);
   const [transcriptView, setTranscriptView] = useState<"original" | "roman">("original");
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
@@ -122,6 +166,16 @@ export default function MeetingDetailPage({
       && meeting.status === "completed"
       && meeting.segments?.length
       && (meeting.audio_url || meeting.file_path)
+  );
+  const currentMeetingGroup = meeting?.group_id === null || meeting?.group_id === undefined
+    ? null
+    : groups.find((group) => group.id === meeting.group_id) ?? null;
+  const canEditMeeting = meeting?.can_edit === true;
+  const canShareMeeting = meeting?.can_share_email === true;
+  const canReTranscribeMeeting = meeting?.can_retranscribe === true;
+  const canReprocessMeeting = meeting?.can_reprocess === true;
+  const assignableGroups = groups.filter(
+    (group) => group.can_edit || group.id === meeting?.group_id,
   );
 
   useEffect(() => {
@@ -149,14 +203,48 @@ export default function MeetingDetailPage({
     if (!meeting) return;
     setGroupSaving(true);
     setGroupError(null);
+    setGroupFeedback(null);
+    setGroupReindexPending(false);
     try {
       const updated = await assignMeetingGroup(meeting.id, groupId);
       setMeeting(updated);
     } catch (err) {
       console.error("Failed to update meeting group:", err);
-      setGroupError("The meeting group could not be updated.");
+      const pending = getMeetingReindexPending(err);
+      if (pending && pending.meeting_id === meeting.id && pending.group_id === groupId) {
+        setMeeting((current) => current ? { ...current, group_id: pending.group_id } : current);
+        setGroupReindexPending(true);
+      } else {
+        setGroupReindexPending(false);
+      }
+      setGroupError(getRequestErrorMessage(err, "The meeting group could not be updated."));
     } finally {
       setGroupSaving(false);
+    }
+  };
+
+  const handleRetryGroupReindex = async () => {
+    if (!meeting || groupReindexRetrying) return;
+    setGroupReindexRetrying(true);
+    setGroupError(null);
+    setGroupFeedback(null);
+    try {
+      await reindexMeeting(meeting.id);
+      try {
+        const updated = await getMeeting(meeting.id);
+        setMeeting(updated);
+        setGroupReindexPending(false);
+        setGroupFeedback("The meeting index refresh was queued.");
+      } catch (err) {
+        setGroupError(getRequestErrorMessage(
+          err,
+          "The meeting index was queued, but the meeting assignment could not be refreshed. Please retry.",
+        ));
+      }
+    } catch (err) {
+      setGroupError(getRequestErrorMessage(err, "The meeting index could not be queued. Please retry."));
+    } finally {
+      setGroupReindexRetrying(false);
     }
   };
 
@@ -265,6 +353,10 @@ export default function MeetingDetailPage({
     if (typeof err === "object" && err !== null && "response" in err) {
       const response = (err as { response?: { data?: { detail?: unknown } } }).response;
       if (typeof response?.data?.detail === "string") return response.data.detail;
+      if (typeof response?.data?.detail === "object" && response.data.detail !== null && "message" in response.data.detail) {
+        const message = (response.data.detail as { message?: unknown }).message;
+        if (typeof message === "string") return message;
+      }
     }
     return err instanceof Error && err.message ? err.message : fallback;
   };
@@ -423,10 +515,14 @@ export default function MeetingDetailPage({
               <span className="text-border">·</span>
               <MeetingGroupSelector
                 value={meeting.group_id ?? null}
-                groups={groups}
+                groups={assignableGroups}
                 loading={groupsLoading}
                 saving={groupSaving}
                 error={groupError}
+                feedback={groupFeedback}
+                onRetry={groupReindexPending ? handleRetryGroupReindex : undefined}
+                retrying={groupReindexRetrying}
+                editable={canEditMeeting}
                 onChange={handleGroupChange}
               />
             </div>
@@ -463,7 +559,7 @@ export default function MeetingDetailPage({
                   {meeting.sub_status || "The AI pipeline encountered an error for this meeting. Partial results may be available below."}
                 </p>
               </div>
-              <Button
+              {canReprocessMeeting && <Button
                 type="button"
                 variant="outline"
                 size="sm"
@@ -477,7 +573,7 @@ export default function MeetingDetailPage({
                   <RefreshCw className="size-3.5" />
                 )}
                 Reprocess
-              </Button>
+              </Button>}
             </div>
             {reprocessError && (
               <p className="rounded-lg border border-red-200 bg-white px-3 py-2 text-red-700 dark:border-red-800/60 dark:bg-red-950/40 dark:text-red-300">
@@ -517,10 +613,10 @@ export default function MeetingDetailPage({
               {/* Summary Toolbar — uniform bar with all actions */}
               {meeting.status === "completed" && !isEditing && !showOriginal && (
                 <div className="flex items-center gap-1 rounded-lg bg-muted/50 border border-border px-1.5 py-1">
-                  <Button variant="ghost" size="sm" onClick={() => setIsEditing(true)} disabled={isActive}>
-                    <Pencil className="size-3.5" />
-                    Edit
-                  </Button>
+                   {canEditMeeting && <Button variant="ghost" size="sm" onClick={() => setIsEditing(true)} disabled={isActive}>
+                     <Pencil className="size-3.5" />
+                     Edit
+                   </Button>}
                   <Separator orientation="vertical" className="h-4 mx-0.5" />
                   <DropdownMenu>
                     <DropdownMenuTrigger render={<Button variant="ghost" size="sm" disabled={isActive} />}>
@@ -553,7 +649,7 @@ export default function MeetingDetailPage({
                     </DropdownMenuContent>
                   </DropdownMenu>
                   <Separator orientation="vertical" className="h-4 mx-0.5" />
-                  <TemplateSelector
+                   {canEditMeeting && <TemplateSelector
                     meetingId={meeting.id}
                     currentTemplateId={meeting.template_id}
                     currentTemplateName={meeting.template_name}
@@ -562,8 +658,8 @@ export default function MeetingDetailPage({
                       startPolling();
                     }}
                     disabled={isActive}
-                  />
-                  {meeting.summary_edited && meeting.original_summary_text && (
+                   />}
+                   {canEditMeeting && meeting.summary_edited && meeting.original_summary_text && (
                     <>
                       <Separator orientation="vertical" className="h-4 mx-0.5" />
                       <Button variant="ghost" size="sm" onClick={() => setShowOriginal(true)}>
@@ -574,10 +670,10 @@ export default function MeetingDetailPage({
                   )}
                   <div className="flex-1" />
                   <Separator orientation="vertical" className="h-4 mx-0.5" />
-                  <Button variant="ghost" size="sm" onClick={() => setShowShareDialog(true)}>
-                    <Mail className="size-3.5" />
-                    Share
-                  </Button>
+                   {canShareMeeting && <Button variant="ghost" size="sm" onClick={() => setShowShareDialog(true)}>
+                     <Mail className="size-3.5" />
+                     Share
+                   </Button>}
                 </div>
               )}
               {/* Viewing original — show restore bar */}
@@ -588,15 +684,15 @@ export default function MeetingDetailPage({
                     View current
                   </Button>
                   <Separator orientation="vertical" className="h-4 mx-0.5" />
-                  <Button variant="ghost" size="sm" className="text-primary" onClick={handleRestoreSummary}>
+                   {canEditMeeting && <Button variant="ghost" size="sm" className="text-primary" onClick={handleRestoreSummary}>
                     <RotateCcw className="size-3.5" />
                     Restore original
-                  </Button>
+                   </Button>}
                 </div>
               )}
 
               {/* Editor or read-only content */}
-              {isEditing ? (
+              {isEditing && canEditMeeting ? (
                 <SummaryEditor
                   initialContent={meeting.summary_text ?? ""}
                   onSave={handleSaveSummary}
@@ -619,7 +715,7 @@ export default function MeetingDetailPage({
               ) : (
                 <div className="bg-white rounded-lg border border-stone-200 p-6">
                   <p className="text-sm text-stone-400 italic">No summary available yet.</p>
-                  {meeting.status === "completed" && (
+                   {meeting.status === "completed" && canEditMeeting && (
                     <Button
                       variant="ghost"
                       size="sm"
@@ -683,7 +779,7 @@ export default function MeetingDetailPage({
           {activeTab === "structured" && (
             <div className="space-y-4">
               {/* Structured output toolbar — same bar style */}
-              {meeting.status === "completed" && (
+              {meeting.status === "completed" && canEditMeeting && (
                 <div className="flex items-center gap-1 rounded-lg bg-muted/50 border border-border px-1.5 py-1">
                   <MeetingTypeSelector
                     value={(meeting.meeting_type as MeetingType) || "generic"}
@@ -703,7 +799,7 @@ export default function MeetingDetailPage({
                   status={(meeting.structured_output_status as any) || "pending"}
                   layoutHint={(meeting.layout_hint as any) || "list"}
                   meetingType={(meeting.meeting_type as MeetingType) || "generic"}
-                  onRetry={handleRetryExtraction}
+                   onRetry={canEditMeeting ? handleRetryExtraction : undefined}
                 />
               </div>
             </div>
@@ -752,14 +848,14 @@ export default function MeetingDetailPage({
                       </button>
                     </div>
                   )}
-                  <Button variant="ghost" size="sm" onClick={() => setShowShareDialog(true)}>
+                  {canShareMeeting && <Button variant="ghost" size="sm" onClick={() => setShowShareDialog(true)}>
                     <Mail className="size-3.5" />
                     Share
-                  </Button>
+                  </Button>}
                   <Separator orientation="vertical" className="h-4 mx-0.5" />
-                  <Button variant="ghost" size="sm" onClick={() => setReTranscribeOpen(true)} disabled={isActive}>
+                  {canReTranscribeMeeting && <Button variant="ghost" size="sm" onClick={() => setReTranscribeOpen(true)} disabled={isActive}>
                     Re-transcribe
-                  </Button>
+                  </Button>}
                 </div>
               )}
               <div className={`grid min-w-0 gap-4 lg:gap-6 ${shouldMountMediaPlayer ? "lg:grid-cols-[minmax(0,1.65fr)_minmax(20rem,0.85fr)]" : "lg:grid-cols-1"}`}>
@@ -883,7 +979,7 @@ export default function MeetingDetailPage({
       <ShareEmailDialog
         meetingId={meeting.id}
         attendees={[]}
-        open={showShareDialog}
+        open={showShareDialog && canShareMeeting}
         onOpenChange={setShowShareDialog}
       />
 
@@ -891,7 +987,7 @@ export default function MeetingDetailPage({
       <ReTranscribeDialog
         meetingId={meeting.id}
         currentLanguage={meeting.requested_language ?? null}
-        open={reTranscribeOpen}
+        open={reTranscribeOpen && canReTranscribeMeeting}
         onClose={() => setReTranscribeOpen(false)}
         onDispatched={(newLanguage) => {
           // Optimistically flip to queued so the progress banner appears immediately

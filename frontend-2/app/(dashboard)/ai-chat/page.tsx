@@ -97,8 +97,8 @@ interface AssistantMessageProps {
 
 function AssistantMessage({ message, onReindex }: AssistantMessageProps) {
   const citations = useMemo(
-    () => buildCitationIndex(message.sources, message.content),
-    [message.sources, message.content],
+    () => buildCitationIndex(message.sources),
+    [message.sources],
   );
 
   return (

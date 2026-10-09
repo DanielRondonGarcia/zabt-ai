@@ -134,6 +134,8 @@ class _FakeMeetingService:
             return None
         return self.meeting
 
+    get_meeting_for_access = get_meeting_for_owner
+
 
 @pytest.mark.asyncio
 async def test_tools_use_authenticated_owner_and_bound_context(

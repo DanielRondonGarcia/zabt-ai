@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect
 from sqlmodel import Session
 
 from app.db.engine import engine
@@ -61,9 +61,7 @@ async def websocket_endpoint(
             user = db.get(User, user_id)
         if user is None or not user.is_active:
             raise ValueError("Inactive or unknown user")
-        meeting = meeting_service.get_meeting(meeting_id)
-        if meeting is None or meeting.owner_id != user_id:
-            raise ValueError("Meeting not found")
+        meeting_service.require_editor_for_user(meeting_id, user_id)
     except Exception:
         await websocket.close(code=1008)
         return
@@ -82,6 +80,9 @@ async def websocket_endpoint(
         while True:
             # Check for binary audio data
             data = await websocket.receive_bytes()
+            # Membership can change while this socket remains open. Check
+            # before provider work and again atomically before inserting.
+            meeting_service.require_editor_for_user(meeting_id, user_id)
 
             # Start timer
             start_time = time.time()
@@ -93,8 +94,9 @@ async def websocket_endpoint(
 
             if text:
                 # Save segment
-                segment = meeting_service.add_segment(
+                segment = meeting_service.add_segment_for_user(
                     meeting_id=meeting_id,
+                    user_id=user_id,
                     start=start_time,
                     end=end_time,
                     text=text,
@@ -109,6 +111,8 @@ async def websocket_endpoint(
 
     except UnsupportedCapabilityError as exc:
         await websocket.close(code=1003, reason=str(exc))
+    except HTTPException as exc:
+        await websocket.close(code=1008, reason=str(exc.detail))
     except WebSocketDisconnect:
         print(f"Client disconnected from meeting {meeting_id}")
     except Exception as e:

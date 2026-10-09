@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-"""Read-only MCP server for owner-scoped groups and meeting context.
+"""Read-only MCP server for accessible groups and meeting context.
 
 The installed official MCP SDK is v2, where the former FastMCP class is named
 ``MCPServer``. It still provides the same high-level tool registration and
@@ -410,7 +410,7 @@ def _mcp_auth_settings() -> AuthSettings:
 mcp_server = MCPServer(
     name="zabt-readonly",
     title="Zabt read-only meeting context",
-    description="Read-only access to owner-scoped groups and indexed meeting context.",
+    description="Read-only access to accessible groups and indexed meeting context.",
     instructions="Use only the provided read-only tools. Never infer or request another user_id.",
     version=settings.VERSION,
     auth=_mcp_auth_settings(),
@@ -570,7 +570,7 @@ def _row_value(row: Any, name: str) -> Any:
 
 @mcp_server.tool(
     name="list_groups",
-    description="List the authenticated owner's groups and meeting counts.",
+    description="List the authenticated user's groups and meeting counts.",
     annotations=_MCP_READ_ANNOTATIONS,
 )
 async def list_groups() -> list[MCPGroup]:
@@ -607,7 +607,7 @@ async def list_groups() -> list[MCPGroup]:
 
 @mcp_server.tool(
     name="list_group_meetings",
-    description="List bounded meeting metadata for one owner-scoped group.",
+    description="List bounded meeting metadata for one accessible group.",
     annotations=_MCP_READ_ANNOTATIONS,
 )
 async def list_group_meetings(
@@ -663,7 +663,7 @@ async def list_group_meetings(
 
 @mcp_server.tool(
     name="search_group_meetings",
-    description="Search indexed meeting chunks inside one owner-scoped group.",
+    description="Search indexed meeting chunks inside one accessible group.",
     annotations=_MCP_READ_ANNOTATIONS,
 )
 async def search_group_meetings(
@@ -724,7 +724,7 @@ async def search_group_meetings(
 
 @mcp_server.tool(
     name="get_meeting_context",
-    description="Read an owner-scoped meeting summary and bounded transcript context.",
+    description="Read an accessible meeting summary and bounded transcript context.",
     annotations=_MCP_READ_ANNOTATIONS,
 )
 async def get_meeting_context(
@@ -733,9 +733,8 @@ async def get_meeting_context(
 ) -> MCPMeetingContext:
     owner_id = _owner_id_from_access_token()
     try:
-        # The service performs an owner-filtered authorization query before it
-        # loads the full meeting row and transcript segments.
-        meeting = meeting_service.get_meeting_for_owner(meeting_id, owner_id)
+        # The service authorizes the owner or the meeting's accessible group.
+        meeting = meeting_service.get_meeting_for_access(meeting_id, owner_id)
         if meeting is None:
             raise ToolError("The requested meeting is not available to this token.")
 
