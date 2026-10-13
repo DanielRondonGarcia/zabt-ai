@@ -576,7 +576,7 @@ def test_settings_reject_production_http_mcp_public_url():
     with pytest.raises(ValueError, match="MCP_PUBLIC_URL"):
         Settings(
             _env_file=None,
-            AUTH_JWT_SECRET="safe-test-secret-with-enough-diversity-123",
+            AUTH_JWT_SECRET="test-only-placeholder-not-a-credential-1234567890",
             AUTH_ENVIRONMENT="production",
             AUTH_COOKIE_SECURE=True,
             MCP_PUBLIC_URL="http://api.example/mcp",
