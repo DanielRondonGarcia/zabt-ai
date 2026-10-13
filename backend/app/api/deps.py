@@ -53,6 +53,24 @@ def get_current_active_user(
     return current_user
 
 
+def get_current_web_active_user(
+    request: Request,
+    db: Session = Depends(get_db),
+) -> User:
+    """Resolve only the first-party web cookie, never an Authorization bearer."""
+
+    if not request.cookies.get(settings.AUTH_ACCESS_COOKIE_NAME):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    current_user = _resolve_user(security.get_token_payload(request, None), db)
+    if not current_user.is_active:
+        raise HTTPException(status_code=403, detail="Inactive user")
+    return current_user
+
+
 def get_optional_current_active_user(
     request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(security.bearer_scheme),

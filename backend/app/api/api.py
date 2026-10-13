@@ -19,6 +19,7 @@ from app.api.v1.endpoints import (
     webhooks,
     billing,
     mcp,
+    mcp_oauth,
 )
 
 api_router = APIRouter()
@@ -39,3 +40,5 @@ api_router.include_router(devices.router, prefix="/devices", tags=["devices"])
 api_router.include_router(uploads.router, tags=["uploads"])
 api_router.include_router(languages.router, tags=["languages"])
 api_router.include_router(mcp.router, prefix="/mcp", tags=["mcp"])
+api_router.include_router(mcp_oauth.router, tags=["mcp-oauth"])
+api_router.include_router(mcp_oauth.metadata_router, tags=["mcp-oauth-metadata"])

@@ -109,6 +109,13 @@ from app.models.ai_chat import (
 
 from app.models.mcp_token import MCPToken
 
+from app.models.mcp_oauth import (
+    MCPAccessToken,
+    MCPClientRegistration,
+    MCPGrant,
+    MCPRefreshToken,
+)
+
 from app.models.authentication_configuration import (
     AuthenticationConfiguration,
     UserLoginMode,
@@ -201,6 +208,10 @@ __all__ = [
     "AIChatSourceRead",
     # MCP
     "MCPToken",
+    "MCPClientRegistration",
+    "MCPGrant",
+    "MCPAccessToken",
+    "MCPRefreshToken",
     # authentication mode
     "AuthenticationConfiguration",
     "UserLoginMode",

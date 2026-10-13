@@ -45,6 +45,8 @@ class MCPTokenCreated(MCPTokenMetadata):
 class MCPStatus(BaseModel):
     enabled: bool
     endpoint: str
+    # Kept stable for existing settings clients; OAuth discovery is exposed by
+    # the protected-resource and authorization-server metadata endpoints.
     auth_mode: Literal["bearer_token"]
     tools: list[str]
 

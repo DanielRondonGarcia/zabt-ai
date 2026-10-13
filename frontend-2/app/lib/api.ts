@@ -383,6 +383,33 @@ export interface McpStatus {
   tools: string[];
 }
 
+export interface McpOAuthConsentDetails {
+  status: "consent_required";
+  authorization_request_id: string;
+  client_name: string;
+  redirect_uri: string;
+  resource: string;
+  scope: string;
+}
+
+export interface McpOAuthApprovalResponse {
+  status: "approved" | "denied";
+  redirect_uri: string;
+  redirect_url: string;
+}
+
+export interface McpLinkedApp {
+  grant_id: number;
+  client_id: string;
+  client_name: string;
+  redirect_uris: string[];
+  resource: string;
+  scope: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+}
+
 export interface AskAiChatPayload {
   groupId: number;
   message: string;
@@ -405,6 +432,25 @@ export const getApiErrorMessage = (error: unknown): string | undefined => {
   }
   return undefined;
 };
+
+async function withWebSession<T>(operation: () => Promise<{ data: T }>): Promise<T> {
+  try {
+    return (await operation()).data;
+  } catch (error) {
+    if (!axios.isAxiosError(error) || error.response?.status !== 401) {
+      throw error;
+    }
+    try {
+      await authClient.post("/auth/refresh", { client: "web" });
+    } catch {
+      throw error;
+    }
+    return (await operation()).data;
+  }
+}
+
+export const getCurrentUserProfile = async (): Promise<User> =>
+  withWebSession(() => authClient.get<User>("/users/me"));
 
 export const getGroups = async (): Promise<GroupSummary[]> => {
   const { data } = await apiClient.get<GroupSummary[]>("/groups/");
@@ -506,6 +552,35 @@ export const createMcpToken = async (
 
 export const revokeMcpToken = async (tokenId: number): Promise<void> => {
   await apiClient.delete(`/mcp/tokens/${tokenId}`);
+};
+
+export const getMcpOAuthConsentDetails = async (
+  requestId: string,
+): Promise<McpOAuthConsentDetails> =>
+  (
+    await authClient.get<McpOAuthConsentDetails>(
+      `/mcp/oauth/authorize/request/${encodeURIComponent(requestId)}`,
+    )
+  ).data;
+
+export const approveMcpOAuthAuthorization = async (
+  requestId: string,
+  approved: boolean,
+): Promise<McpOAuthApprovalResponse> =>
+  withWebSession(() =>
+    authClient.post<McpOAuthApprovalResponse>("/mcp/oauth/authorize/approve", {
+      request_id: requestId,
+      approved,
+    }),
+  );
+
+export const getMcpOAuthApps = async (): Promise<McpLinkedApp[]> => {
+  const { data } = await apiClient.get<McpLinkedApp[]>("/mcp/oauth/apps");
+  return data;
+};
+
+export const revokeMcpOAuthApp = async (grantId: number): Promise<void> => {
+  await apiClient.delete(`/mcp/oauth/apps/${grantId}`);
 };
 
 export const assignMeetingGroup = async (

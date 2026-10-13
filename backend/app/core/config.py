@@ -2,6 +2,7 @@
 # Copyright (C) 2025-2026 Afeef Janjua
 import math
 import re
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional
 from urllib.parse import urlsplit
@@ -22,6 +23,7 @@ MICROSOFT_TENANT_GUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+_MCP_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 _KNOWN_INSECURE_AUTH_JWT_SECRETS = frozenset(
     {
         "local-development-only-change-me",
@@ -74,6 +76,55 @@ def validate_microsoft_tenant_id(value: str) -> str:
         f"{sorted(MICROSOFT_TENANT_ALIASES)}; domain tenant names require GUID resolution"
     )
 
+
+def is_loopback_hostname(hostname: str | None) -> bool:
+    """Return whether a hostname is a local loopback destination."""
+
+    if not isinstance(hostname, str):
+        return False
+    normalized = hostname.rstrip(".").casefold()
+    if normalized in _MCP_LOOPBACK_HOSTS:
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
+
+
+def validate_mcp_transport_url(
+    value: str,
+    *,
+    field_name: str,
+    environment: str,
+) -> str:
+    """Validate MCP URL syntax and require HTTPS outside local development."""
+
+    if not isinstance(value, str) or value != value.strip() or not value:
+        raise ValueError(f"{field_name} must be a valid absolute URL")
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a valid absolute URL") from exc
+    if (
+        parsed.scheme.casefold() not in {"http", "https"}
+        or not parsed.netloc
+        or hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{field_name} must be a valid absolute URL")
+    if (
+        environment != "development"
+        and parsed.scheme.casefold() == "http"
+        and not is_loopback_hostname(hostname)
+    ):
+        raise ValueError(f"{field_name} must use https outside development for non-loopback hosts")
+    return value
+
 # Some legacy modules (worker.py, api/upload.py, services/styles.py) read
 # directly from os.environ instead of going through this Settings class.
 # Eagerly load the root .env into os.environ so those reads succeed when
@@ -87,10 +138,13 @@ class Settings(BaseSettings):
     API_V1_STR: str = "/api/v1"
     BOOTSTRAP_SUPERUSER_EMAIL: Optional[str] = None
     BOOTSTRAP_SUPERUSER_PASSWORD: Optional[str] = None
-    # URL-shaped SDK auth setting used by the custom bearer verifier. This first
-    # version uses user-managed bearer tokens and does not expose OAuth metadata.
     # Deployments should set this to their externally reachable MCP URL.
     MCP_PUBLIC_URL: str = "http://localhost:8000/api/v1/mcp"
+    # Optional OAuth authorization-server issuer. When empty, the backend
+    # derives it as MCP_PUBLIC_URL + "/oauth".
+    MCP_OAUTH_ISSUER: str = ""
+    MCP_OAUTH_ACCESS_TOKEN_EXPIRE_SECONDS: int = Field(default=3600, ge=60, le=86_400)
+    MCP_OAUTH_REFRESH_TOKEN_EXPIRE_DAYS: int = Field(default=30, ge=1, le=365)
     # Comma-separated MCP transport allowlists. Empty values use safe local
     # defaults in development; production deployments must set their topology
     # explicitly and may not use wildcards.
@@ -111,7 +165,7 @@ class Settings(BaseSettings):
     MINIO_SECRET_KEY: str = "minioadmin"
     MINIO_BUCKET_NAME: str = "zabt-media"
     MINIO_SECURE: bool = False
-    MINIO_WEBHOOK_SECRET: str = "change-me-in-production"
+    MINIO_WEBHOOK_SECRET: str = Field(default="change-me-in-production", repr=False)
 
     # Storage Provider Toggle ("minio" or "s3")
     STORAGE_PROVIDER: str = "minio"
@@ -241,8 +295,30 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def _validate_minio_webhook_secret(self) -> "Settings":
+        if self.AUTH_ENVIRONMENT == "production":
+            secret = self.MINIO_WEBHOOK_SECRET.strip()
+            if not secret or secret.casefold() == "change-me-in-production":
+                raise ValueError(
+                    "MINIO_WEBHOOK_SECRET must be set to a non-default value in production"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _validate_mcp_transport_settings(self) -> "Settings":
-        """Reject malformed MCP allowlists and production wildcards."""
+        """Reject unsafe MCP URLs, malformed allowlists, and production wildcards."""
+
+        validate_mcp_transport_url(
+            self.MCP_PUBLIC_URL,
+            field_name="MCP_PUBLIC_URL",
+            environment=self.AUTH_ENVIRONMENT,
+        )
+        if self.MCP_OAUTH_ISSUER.strip():
+            validate_mcp_transport_url(
+                self.MCP_OAUTH_ISSUER,
+                field_name="MCP_OAUTH_ISSUER",
+                environment=self.AUTH_ENVIRONMENT,
+            )
 
         for field_name in ("MCP_ALLOWED_HOSTS", "MCP_ALLOWED_ORIGINS"):
             raw_value = getattr(self, field_name)

@@ -166,3 +166,52 @@ def test_production_requires_secure_cookie():
             AUTH_ENVIRONMENT="production",
             AUTH_COOKIE_SECURE=False,
         )
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "change-me-in-production",
+        "  CHANGE-ME-IN-PRODUCTION  ",
+        "",
+        " \t\n ",
+    ],
+)
+def test_production_rejects_default_or_empty_minio_webhook_secret(secret: str):
+    with pytest.raises(ValidationError) as exc_info:
+        Settings(
+            _env_file=None,
+            AUTH_JWT_SECRET=SAFE_TEST_SECRET,
+            AUTH_ENVIRONMENT="production",
+            AUTH_COOKIE_SECURE=True,
+            MINIO_WEBHOOK_SECRET=secret,
+        )
+
+    message = exc_info.value.errors()[0]["msg"]
+    assert message == (
+        "Value error, MINIO_WEBHOOK_SECRET must be set to a non-default value in production"
+    )
+    assert "change-me-in-production" not in str(exc_info.value).casefold()
+
+
+def test_production_accepts_unique_minio_webhook_secret():
+    production_settings = Settings(
+        _env_file=None,
+        AUTH_JWT_SECRET=SAFE_TEST_SECRET,
+        AUTH_ENVIRONMENT="production",
+        AUTH_COOKIE_SECURE=True,
+        MINIO_WEBHOOK_SECRET="deployment-specific-random-secret-934815",
+    )
+
+    assert production_settings.MINIO_WEBHOOK_SECRET == "deployment-specific-random-secret-934815"
+
+
+def test_development_keeps_default_minio_webhook_secret(monkeypatch):
+    monkeypatch.delenv("MINIO_WEBHOOK_SECRET", raising=False)
+    development_settings = Settings(
+        _env_file=None,
+        AUTH_JWT_SECRET=SAFE_TEST_SECRET,
+        AUTH_ENVIRONMENT="development",
+    )
+
+    assert development_settings.MINIO_WEBHOOK_SECRET == "change-me-in-production"

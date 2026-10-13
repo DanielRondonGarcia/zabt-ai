@@ -7,9 +7,12 @@ import { AlertTriangle, Check, Copy, KeyRound, Trash2 } from "lucide-react";
 
 import {
   createMcpToken,
+  getMcpOAuthApps,
   getMcpStatus,
   getMcpTokens,
+  revokeMcpOAuthApp,
   revokeMcpToken,
+  type McpLinkedApp,
   type McpStatus,
   type McpTokenCreated,
   type McpTokenMetadata,
@@ -25,6 +28,10 @@ const dateFormatter = new Intl.DateTimeFormat(undefined, {
 
 function formatDate(value: string): string {
   return dateFormatter.format(new Date(value));
+}
+
+function formatOptionalDate(value: string | null): string {
+  return value ? formatDate(value) : "Never";
 }
 
 function buildMcpConnectionExample(endpoint: string): string {
@@ -48,24 +55,32 @@ function buildMcpConnectionExample(endpoint: string): string {
 export function McpTokenManager() {
   const [status, setStatus] = useState<McpStatus | null>(null);
   const [tokens, setTokens] = useState<McpTokenMetadata[]>([]);
+  const [linkedApps, setLinkedApps] = useState<McpLinkedApp[]>([]);
   const [label, setLabel] = useState("");
   const [expiresInDays, setExpiresInDays] = useState("30");
   const [newToken, setNewToken] = useState<McpTokenCreated | null>(null);
   const [pendingRevoke, setPendingRevoke] = useState<McpTokenMetadata | null>(null);
+  const [pendingAppRevoke, setPendingAppRevoke] = useState<McpLinkedApp | null>(null);
   const [copiedToken, setCopiedToken] = useState(false);
   const [copiedExample, setCopiedExample] = useState(false);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [revoking, setRevoking] = useState(false);
+  const [revokingApp, setRevokingApp] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [announcement, setAnnouncement] = useState("");
 
   async function refresh() {
     setError(null);
     try {
-      const [nextStatus, nextTokens] = await Promise.all([getMcpStatus(), getMcpTokens()]);
+      const [nextStatus, nextTokens, nextApps] = await Promise.all([
+        getMcpStatus(),
+        getMcpTokens(),
+        getMcpOAuthApps(),
+      ]);
       setStatus(nextStatus);
       setTokens(nextTokens);
+      setLinkedApps(nextApps);
     } catch {
       setError("MCP settings could not be loaded. Refresh the page and try again.");
     } finally {
@@ -138,15 +153,31 @@ export function McpTokenManager() {
     }
   }
 
+  async function confirmAppRevoke() {
+    if (!pendingAppRevoke) return;
+    setRevokingApp(true);
+    setError(null);
+    try {
+      await revokeMcpOAuthApp(pendingAppRevoke.grant_id);
+      setAnnouncement(`${pendingAppRevoke.client_name} access revoked.`);
+      setPendingAppRevoke(null);
+      await refresh();
+    } catch {
+      setError("The linked app could not be revoked. Refresh the page and try again.");
+    } finally {
+      setRevokingApp(false);
+    }
+  }
+
   return (
     <section className="min-w-0 space-y-4" aria-labelledby="mcp-tokens-heading">
       <div className="space-y-1">
         <h2 id="mcp-tokens-heading" className="text-lg font-semibold text-foreground">
-          Read-only MCP access
+          MCP access
         </h2>
         <p className="text-sm text-muted-foreground">
-          Create bearer tokens for external MCP clients to read your groups and meeting context.
-          Tokens are shown only once and are never stored in the browser.
+          OAuth is preferred for compatible clients such as Codex. A browser authorization may appear
+          the first time a client connects. Bearer tokens remain available for clients that need them.
         </p>
       </div>
 
@@ -154,6 +185,69 @@ export function McpTokenManager() {
         <p className="text-sm text-muted-foreground" aria-live="polite">Loading…</p>
       ) : (
         <>
+          <div className="space-y-3 rounded-lg border border-border bg-card p-4">
+            <div className="space-y-1">
+              <h3 className="font-medium text-card-foreground">Linked OAuth apps</h3>
+              <p className="text-sm text-muted-foreground">
+                These apps can request read-only MCP access after you approve a browser authorization.
+                No access or refresh token values are shown here.
+              </p>
+            </div>
+            {linkedApps.length === 0 ? (
+              <p className="rounded-lg border border-dashed border-border px-4 py-5 text-sm text-muted-foreground">
+                No OAuth apps are linked yet.
+              </p>
+            ) : (
+              <ul className="min-w-0 space-y-2" aria-label="Linked MCP OAuth apps">
+                {linkedApps.map((app) => {
+                  const revoked = app.revoked_at !== null;
+                  return (
+                    <li key={app.grant_id} className="min-w-0 space-y-3 rounded-lg border border-border bg-background p-3">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 space-y-1">
+                          <p className="break-words font-medium text-foreground">{app.client_name}</p>
+                          <p className="text-xs text-muted-foreground">
+                            {revoked ? "Revoked" : "Active"} · created {formatDate(app.created_at)} · last used {formatOptionalDate(app.last_used_at)}
+                          </p>
+                        </div>
+                        {!revoked && (
+                          <Button type="button" variant="destructive" size="sm" onClick={() => setPendingAppRevoke(app)}>
+                            <Trash2 className="size-3.5" aria-hidden="true" />
+                            Revoke access
+                          </Button>
+                        )}
+                      </div>
+                      <dl className="min-w-0 space-y-2 text-xs">
+                        <div className="min-w-0">
+                          <dt className="font-medium text-muted-foreground">Redirect URI</dt>
+                          <dd className="mt-0.5 break-all font-mono text-foreground">
+                            {app.redirect_uris.join(", ")}
+                          </dd>
+                        </div>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1">
+                          <div>
+                            <dt className="font-medium text-muted-foreground">Scope</dt>
+                            <dd className="font-mono text-foreground">{app.scope}</dd>
+                          </div>
+                          <div>
+                            <dt className="font-medium text-muted-foreground">Resource</dt>
+                            <dd className="break-all font-mono text-foreground">{app.resource}</dd>
+                          </div>
+                          <div>
+                            <dt className="font-medium text-muted-foreground">Revoked</dt>
+                            <dd className="text-foreground">
+                              {app.revoked_at ? formatDate(app.revoked_at) : "Not revoked"}
+                            </dd>
+                          </div>
+                        </div>
+                      </dl>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+
           <div className="rounded-lg border border-border bg-card p-4 text-sm">
             <div className="flex flex-wrap items-center justify-between gap-3">
               <div className="min-w-0">
@@ -168,7 +262,7 @@ export function McpTokenManager() {
               </div>
             </div>
             <p className="mt-3 text-xs text-muted-foreground">
-              OAuth 2.1 metadata and PKCE can be added later. Do not use your Microsoft or OIDC token here.
+              Bearer authentication is separate from OAuth. Do not use your Microsoft, OIDC, or OAuth access token as a bearer token here.
             </p>
           </div>
 
@@ -320,6 +414,25 @@ export function McpTokenManager() {
             <AlertDialogCancel disabled={revoking}>Keep token</AlertDialogCancel>
             <AlertDialogAction variant="destructive" onClick={confirmRevoke} loading={revoking}>
               Revoke token
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={pendingAppRevoke !== null} onOpenChange={(open) => !open && setPendingAppRevoke(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Revoke this linked app?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingAppRevoke
+                ? `${pendingAppRevoke.client_name} will stop receiving OAuth access to MCP data immediately. This cannot be undone.`
+                : "This linked app will stop receiving OAuth access immediately."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={revokingApp}>Keep access</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={confirmAppRevoke} loading={revokingApp}>
+              Revoke access
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

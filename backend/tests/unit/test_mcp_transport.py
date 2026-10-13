@@ -77,6 +77,11 @@ def test_initialize_tools_list_and_tool_call_use_bearer_token(
                 },
             )
             assert missing.status_code == 401
+            assert (
+                'resource_metadata="http://localhost:8000/.well-known/'
+                'oauth-protected-resource/api/v1/mcp"'
+                in missing.headers["www-authenticate"]
+            )
 
             rejected_origin = client.post(
                 "/api/v1/mcp",

@@ -7,6 +7,7 @@ from app.core.logging import init_sentry, init_logfire
 from app.middleware.audit import AuditMiddleware
 from app.db.engine import create_db_and_tables
 from app.mcp_server import mcp_http_app
+from app.api.v1.endpoints.mcp_oauth import metadata_router as mcp_oauth_metadata_router
 
 init_sentry()
 init_logfire(service_name="zabt-api")
@@ -64,6 +65,7 @@ if settings.LOGFIRE_TOKEN:
 
 from app.api.api import api_router
 app.include_router(api_router, prefix=settings.API_V1_STR)
+app.include_router(mcp_oauth_metadata_router)
 # Management routes are registered above this mount, so /mcp/tokens and
 # /mcp/status remain regular authenticated API endpoints while the mount owns
 # the Streamable HTTP root at /mcp.

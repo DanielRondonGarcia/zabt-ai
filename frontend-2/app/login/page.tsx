@@ -14,8 +14,14 @@ import {
   type MicrosoftOidcStatus,
 } from "@/app/lib/api";
 import { initializeMicrosoftOidc, signInWithMicrosoft } from "@/app/lib/microsoft-oidc";
+import { getSafeNextPath } from "@/app/lib/safe-navigation";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
+
+function getLoginContinuation(): string {
+  if (typeof window === "undefined") return "/";
+  return getSafeNextPath(new URL(window.location.href).searchParams.get("next"));
+}
 
 function LoginPageContent() {
   const [email, setEmail] = useState("");
@@ -64,7 +70,7 @@ function LoginPageContent() {
     setLoading(true);
     try {
       await login(email, password);
-      window.location.assign("/");
+      window.location.assign(getLoginContinuation());
     } catch {
       setError("Incorrect email or password. Please try again.");
     } finally {
@@ -78,7 +84,7 @@ function LoginPageContent() {
     setMicrosoftLoading(true);
     try {
       await signInWithMicrosoft(microsoftStatus);
-      window.location.assign("/");
+      window.location.assign(getLoginContinuation());
     } catch (microsoftError) {
       setError(
         getApiErrorStatus(microsoftError) === 409

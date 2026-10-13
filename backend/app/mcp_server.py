@@ -30,6 +30,12 @@ from starlette.applications import Starlette
 from app.core.config import settings
 from app.core.logging import get_logger
 from app.services.group import group_service
+from app.services.mcp_oauth import (
+    MCPOAuthService,
+    mcp_oauth_service,
+    mcp_resource_url,
+    oauth_issuer_url,
+)
 from app.services.mcp_tokens import MCPTokenService, mcp_token_service
 from app.services.meeting import meeting_service
 from app.services.retrieval import retrieval_service
@@ -360,12 +366,40 @@ def _mcp_transport_security() -> TransportSecuritySettings:
 
 
 class MCPTokenVerifier:
-    """Resolve user-managed opaque tokens for the SDK bearer middleware."""
+    """Resolve OAuth access tokens and legacy user-managed bearer tokens."""
 
-    def __init__(self, token_service: MCPTokenService):
+    def __init__(
+        self,
+        token_service: MCPTokenService,
+        oauth_service: MCPOAuthService | None = None,
+    ):
         self.token_service = token_service
+        self.oauth_service = oauth_service
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        if self.oauth_service is not None and isinstance(token, str) and token.startswith("zabt_mcp_at_"):
+            record = self.oauth_service.resolve_access_token(token)
+            if record is not None:
+                expires_at = record.expires_at
+                if expires_at.tzinfo is None:
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                return AccessToken(
+                    token=token,
+                    client_id=record.client_id,
+                    scopes=[record.scope],
+                    expires_at=int(expires_at.timestamp()),
+                    resource=record.resource,
+                    subject=str(record.user_id),
+                    claims={
+                        "user_id": record.user_id,
+                        "grant_id": record.grant_id,
+                        "client_id": record.client_id,
+                        "scope": [record.scope],
+                        "resource": record.resource,
+                        "aud": record.resource,
+                    },
+                )
+
         record = self.token_service.resolve_bearer_token(token)
         if record is None or record.id is None:
             return None
@@ -380,6 +414,7 @@ class MCPTokenVerifier:
             client_id=f"mcp-token-{record.id}",
             scopes=[MCP_READ_SCOPE],
             expires_at=int(expires_at.timestamp()),
+            resource=mcp_resource_url(),
             subject=str(owner_id),
             claims={
                 "user_id": owner_id,
@@ -390,20 +425,14 @@ class MCPTokenVerifier:
 
 
 def _mcp_auth_settings() -> AuthSettings:
-    """Build SDK resource-server settings without enabling an OAuth issuer."""
+    """Build SDK resource-server settings for OAuth and bearer discovery."""
 
-    public_url = settings.MCP_PUBLIC_URL.rstrip("/")
+    public_url = mcp_resource_url()
     return AuthSettings(
-        # The SDK requires an issuer URL for protected-resource metadata even
-        # when a custom verifier is used. OAuth authorization-server metadata
-        # is intentionally not implemented in this first bearer-token version.
-        issuer_url=public_url,
-        # Leave protected-resource metadata disabled until the OAuth server is
-        # implemented; clients that already provide a bearer header do not
-        # need discovery.
-        resource_server_url=None,
+        issuer_url=oauth_issuer_url(),
+        resource_server_url=public_url,
         required_scopes=[MCP_READ_SCOPE],
-        validate_token_resource=False,
+        validate_token_resource=True,
     )
 
 
@@ -414,7 +443,7 @@ mcp_server = MCPServer(
     instructions="Use only the provided read-only tools. Never infer or request another user_id.",
     version=settings.VERSION,
     auth=_mcp_auth_settings(),
-    token_verifier=MCPTokenVerifier(mcp_token_service),
+    token_verifier=MCPTokenVerifier(mcp_token_service, mcp_oauth_service),
 )
 
 
