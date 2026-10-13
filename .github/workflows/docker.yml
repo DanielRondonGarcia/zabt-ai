@@ -8,6 +8,8 @@ on:
       - 'frontend-2/**'
       - 'packages/**'
       - '.github/workflows/docker.yml'
+      - '.github/workflows/release.yml'
+      - '.github/scripts/**'
   push:
     branches: [main]
 
@@ -20,6 +22,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Test GHCR release helper without registry access
+        run: python3 -m unittest discover -s .github/scripts -p 'test_*.py'
       - name: Create .env from example
         run: cp .env.example .env
       - name: Validate single-machine config
@@ -34,11 +38,7 @@ jobs:
         env:
           COMPOSE_DISABLE_ENV_FILE: '1'
           COMPOSE_PROFILES: cloud-prod
-          ZABT_API_IMAGE: ghcr.io/example/zabt-ai-api:v0.1.0
-          ZABT_WORKER_IMAGE: ghcr.io/example/zabt-ai-worker:v0.1.0
-          ZABT_WEB_IMAGE: ghcr.io/example/zabt-ai-web:v0.1.0
-          ZABT_GPU_IMAGE: ghcr.io/example/zabt-ai-gpu-worker:v0.1.0
-          ZABT_VISION_IMAGE: ghcr.io/example/zabt-ai-vision-worker:v0.1.0
+          ZABT_IMAGE_TAG: v1.0.0
           DATABASE_URL: postgresql+asyncpg://ci:ci@db:5432/zabt
           POSTGRES_USER: ci
           POSTGRES_PASSWORD: ci-dummy-postgres-password
@@ -47,16 +47,66 @@ jobs:
           AUTH_ALLOWED_ORIGINS: https://web.example.test
           BACKEND_CORS_ORIGINS: https://web.example.test
           APP_URL: https://web.example.test
+          MCP_PUBLIC_URL: https://api.example.test/api/v1/mcp
           MINIO_ACCESS_KEY: ci-dummy-minio-access-key
           MINIO_SECRET_KEY: ci-dummy-minio-secret-key
           MINIO_BUCKET_NAME: ci-dummy-zabt-bucket
+          MINIO_WEBHOOK_SECRET: ci-dummy-minio-webhook-secret
           MINIO_PUBLIC_ENDPOINT: http://localhost:9000
           OPENAI_API_KEY: ci-dummy-openai-summary-key
           VISION_OPENAI_API_KEY: ci-dummy-openai-vision-key
           HF_TOKEN: ci-dummy-hf-token
           NEXT_PUBLIC_API_URL: https://api.example.test/api/v1
           NEXT_PUBLIC_FRONTEND_URL: https://web.example.test
-        run: docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml config --quiet
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml config --format json > "$RUNNER_TEMP/cloud-prod-compose.json"
+          python3 - "$RUNNER_TEMP/cloud-prod-compose.json" <<'PY'
+          import json
+          import os
+          import re
+          import sys
+
+          image_tag = os.environ["ZABT_IMAGE_TAG"]
+          tag_pattern = re.compile(
+              r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)",
+          )
+          if not tag_pattern.fullmatch(image_tag) or tag_pattern.fullmatch("latest"):
+              raise SystemExit(
+                  "ZABT_IMAGE_TAG must be an immutable vMAJOR.MINOR.PATCH release tag."
+              )
+
+          with open(sys.argv[1], encoding="utf-8") as compose_file:
+              services = json.load(compose_file)["services"]
+
+          expected_images = {
+              "api": f"ghcr.io/danielrondongarcia/zabt-ai-api:{image_tag}",
+              "worker": f"ghcr.io/danielrondongarcia/zabt-ai-worker:{image_tag}",
+              "beat": f"ghcr.io/danielrondongarcia/zabt-ai-worker:{image_tag}",
+              "web": f"ghcr.io/danielrondongarcia/zabt-ai-web:{image_tag}",
+              "worker-gpu": f"ghcr.io/danielrondongarcia/zabt-ai-gpu-worker:{image_tag}",
+              "zabt-vision-worker": f"ghcr.io/danielrondongarcia/zabt-ai-vision-worker:{image_tag}",
+          }
+
+          for name, expected_image in expected_images.items():
+              service = services[name]
+              assert service.get("image") == expected_image, (name, service.get("image"))
+              assert not service.get("build"), f"{name} unexpectedly retains build configuration"
+              assert service.get("pull_policy") == "always", (name, service.get("pull_policy"))
+          assert services["api"]["environment"]["MCP_PUBLIC_URL"] == os.environ["MCP_PUBLIC_URL"]
+          assert services["api"]["environment"]["MINIO_WEBHOOK_SECRET"] == os.environ["MINIO_WEBHOOK_SECRET"]
+          PY
+
+          if env -u ZABT_IMAGE_TAG docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml config --quiet 2>"$RUNNER_TEMP/cloud-prod-missing-tag.log"; then
+            echo "Expected cloud production Compose validation to fail when ZABT_IMAGE_TAG is missing."
+            exit 1
+          fi
+          grep -Fq 'ZABT_IMAGE_TAG must be set to an immutable release tag' "$RUNNER_TEMP/cloud-prod-missing-tag.log"
+
+          if env -u MINIO_WEBHOOK_SECRET docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml config --quiet 2>"$RUNNER_TEMP/cloud-prod-missing-webhook-secret.log"; then
+            echo "Expected cloud production Compose validation to fail when MINIO_WEBHOOK_SECRET is missing."
+            exit 1
+          fi
+          grep -Fq 'MINIO_WEBHOOK_SECRET must be set for cloud production' "$RUNNER_TEMP/cloud-prod-missing-webhook-secret.log"
 
   build-api:
     name: Build API image

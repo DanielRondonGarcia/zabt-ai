@@ -45,7 +45,7 @@ x-cloud-backend-environment: &cloud-backend-environment
   MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set for cloud production}
   MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set for cloud production}
   MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:?MINIO_BUCKET_NAME must be set for cloud production}
-  MINIO_WEBHOOK_SECRET: ${MINIO_WEBHOOK_SECRET:-change-me-in-production}
+  MINIO_WEBHOOK_SECRET: ${MINIO_WEBHOOK_SECRET:?MINIO_WEBHOOK_SECRET must be set for cloud production}
   MINIO_SECURE: ${MINIO_SECURE:-false}
 
   # Transcription is performed by the bundled GPU worker over the internal
@@ -103,7 +103,9 @@ x-cloud-backend-environment: &cloud-backend-environment
 
 services:
   api:
-    image: ${ZABT_API_IMAGE:?ZABT_API_IMAGE must be set to an immutable GHCR release image}
+    image: ghcr.io/danielrondongarcia/zabt-ai-api:${ZABT_IMAGE_TAG:?ZABT_IMAGE_TAG must be set to an immutable release tag such as v1.0.0}
+    pull_policy: always
+    build: !reset null
     command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap_superuser && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
     environment: !override
       <<: *cloud-backend-environment
@@ -111,12 +113,16 @@ services:
       BOOTSTRAP_SUPERUSER_PASSWORD: ${BOOTSTRAP_SUPERUSER_PASSWORD:-}
 
   worker:
-    image: ${ZABT_WORKER_IMAGE:?ZABT_WORKER_IMAGE must be set to an immutable GHCR release image}
+    image: ghcr.io/danielrondongarcia/zabt-ai-worker:${ZABT_IMAGE_TAG:?ZABT_IMAGE_TAG must be set to an immutable release tag such as v1.0.0}
+    pull_policy: always
+    build: !reset null
     environment: !override
       <<: *cloud-backend-environment
 
   beat:
-    image: ${ZABT_WORKER_IMAGE:?ZABT_WORKER_IMAGE must be set to an immutable GHCR release image}
+    image: ghcr.io/danielrondongarcia/zabt-ai-worker:${ZABT_IMAGE_TAG:?ZABT_IMAGE_TAG must be set to an immutable release tag such as v1.0.0}
+    pull_policy: always
+    build: !reset null
     environment: !override
       <<: *cloud-backend-environment
 
@@ -138,7 +144,9 @@ services:
   # reservation and model-cache volume; only its profile, image, and host ports
   # are changed for this internal production deployment.
   worker-gpu:
-    image: ${ZABT_GPU_IMAGE:?ZABT_GPU_IMAGE must be set to an immutable GHCR release image}
+    image: ghcr.io/danielrondongarcia/zabt-ai-gpu-worker:${ZABT_IMAGE_TAG:?ZABT_IMAGE_TAG must be set to an immutable release tag such as v1.0.0}
+    pull_policy: always
+    build: !reset null
     profiles: !override [cloud-prod]
     ports: !override []
     environment:
@@ -155,19 +163,11 @@ services:
       LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
 
   web:
-    image: ${ZABT_WEB_IMAGE:?ZABT_WEB_IMAGE must be set to an immutable GHCR release image}
+    image: ghcr.io/danielrondongarcia/zabt-ai-web:${ZABT_IMAGE_TAG:?ZABT_IMAGE_TAG must be set to an immutable release tag such as v1.0.0}
+    pull_policy: always
+    build: !reset null
     # Replace, rather than append to, the base [local] profile.
     profiles: !override [cloud-prod]
-    build:
-      context: .
-      dockerfile: frontend-2/Dockerfile
-      args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:?NEXT_PUBLIC_API_URL must be set for cloud production}
-        NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:?NEXT_PUBLIC_FRONTEND_URL must be set for cloud production}
-        NEXT_PUBLIC_POSTHOG_KEY: ${NEXT_PUBLIC_POSTHOG_KEY:-}
-        NEXT_PUBLIC_POSTHOG_HOST: ${NEXT_PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}
-        NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
-        NEXT_PUBLIC_SENTRY_ENVIRONMENT: production
     ports: !override
       - "3000:3000"
     environment:
@@ -180,7 +180,9 @@ services:
       NEXT_PUBLIC_SENTRY_ENVIRONMENT: production
 
   zabt-vision-worker:
-    image: ${ZABT_VISION_IMAGE:?ZABT_VISION_IMAGE must be set to an immutable GHCR release image}
+    image: ghcr.io/danielrondongarcia/zabt-ai-vision-worker:${ZABT_IMAGE_TAG:?ZABT_IMAGE_TAG must be set to an immutable release tag such as v1.0.0}
+    pull_policy: always
+    build: !reset null
     # Replace the base [vision] profile; this service is internal to api.
     profiles: !override [cloud-prod]
     ports: !override []
