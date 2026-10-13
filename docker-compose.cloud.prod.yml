@@ -135,9 +135,15 @@ services:
     profiles: !override [cloud-prod]
 
   minio:
+    image: ghcr.io/danielrondongarcia/zabt-ai-minio:${ZABT_IMAGE_TAG:?ZABT_IMAGE_TAG must be set to an immutable release tag such as v1.0.0}
+    pull_policy: always
+    build: !reset null
     profiles: !override [cloud-prod]
 
   minio-init:
+    image: ghcr.io/danielrondongarcia/zabt-ai-mc:${ZABT_IMAGE_TAG:?ZABT_IMAGE_TAG must be set to an immutable release tag such as v1.0.0}
+    pull_policy: always
+    build: !reset null
     profiles: !override [cloud-prod]
 
   # Local GPU transcription worker. The base service retains its NVIDIA device

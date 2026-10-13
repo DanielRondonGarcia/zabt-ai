@@ -5,6 +5,7 @@ on:
     paths:
       - 'docker-compose*.yml'
       - 'backend/**'
+      - 'docker/minio/**'
       - 'frontend-2/**'
       - 'packages/**'
       - '.github/workflows/docker.yml'
@@ -84,6 +85,8 @@ jobs:
               "beat": f"ghcr.io/danielrondongarcia/zabt-ai-worker:{image_tag}",
               "web": f"ghcr.io/danielrondongarcia/zabt-ai-web:{image_tag}",
               "worker-gpu": f"ghcr.io/danielrondongarcia/zabt-ai-gpu-worker:{image_tag}",
+              "minio": f"ghcr.io/danielrondongarcia/zabt-ai-minio:{image_tag}",
+              "minio-init": f"ghcr.io/danielrondongarcia/zabt-ai-mc:{image_tag}",
               "zabt-vision-worker": f"ghcr.io/danielrondongarcia/zabt-ai-vision-worker:{image_tag}",
           }
 

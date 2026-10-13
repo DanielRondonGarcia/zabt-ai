@@ -29,11 +29,12 @@ When `version` is empty, the workflow finds the highest existing tag matching `v
 The version is validated before any image build. A new run is rejected if the Git tag or any selected GHCR image already has that version; only a retry of the same run can resume matching staged digests and a Git tag that points to the same commit. Dispatches from a branch other than `main` are also rejected.
 
 Cloud production requires the optional vision image. Always choose `include_optional=true` when
-publishing a release intended for `docker-compose.cloud.prod.yml`.
+publishing a release intended for `docker-compose.cloud.prod.yml`; this also publishes the optional
+bot image.
 
 ## Published images and tags
 
-The owner is taken from the repository at runtime and lowercased for GHCR. Core images are:
+The owner is taken from the repository at runtime and lowercased for GHCR. The seven core images are:
 
 ```text
 ghcr.io/<owner>/zabt-ai-api
@@ -41,6 +42,8 @@ ghcr.io/<owner>/zabt-ai-worker
 ghcr.io/<owner>/zabt-ai-web
 ghcr.io/<owner>/zabt-ai-gpu-worker
 ghcr.io/<owner>/zabt-ai-cpu-worker
+ghcr.io/<owner>/zabt-ai-minio
+ghcr.io/<owner>/zabt-ai-mc
 ```
 
 With `include_optional=true`, the workflow also publishes:
@@ -60,6 +63,27 @@ ghcr.io/<owner>/zabt-ai-api:latest
 
 Replace `zabt-ai-api` with the desired image name. The version tag is immutable for this workflow; use it for deployments and rollback. `latest` is mutable and is updated by promotion after all builds succeed; a failed promotion matrix can leave it updated for only some images.
 
+The MinIO images use the same Zabt tags as every other image. `zabt-ai-minio` provides the server;
+`zabt-ai-mc` provides the `mc` client used by `minio-init` to create the bucket and configure webhook
+events. For example, each release promotes both `ghcr.io/<owner>/zabt-ai-minio:v1.2.3` and
+`ghcr.io/<owner>/zabt-ai-minio:latest`, and the equivalent tags for `zabt-ai-mc`.
+
+### MinIO source and maintenance
+
+The old MinIO community containers are not publicly pullable, so the release workflow builds Zabt's
+images from source and does not use a MinIO Docker Hub or Quay image as a base:
+
+| Image | Upstream source pin | Build and runtime base |
+| --- | --- | --- |
+| `zabt-ai-minio` | `minio/minio` `RELEASE.2025-10-15T17-29-55Z` (`9e49d5e7a648`) (archived server repository) | Go `1.24.8`; Alpine `3.22.2` |
+| `zabt-ai-mc` | `minio/mc` `RELEASE.2025-08-13T08-35-41Z` (`7394ce0dd2a8`) | Go `1.23.10`; Alpine `3.21.4` |
+
+These are source pins, independent of the Zabt semantic image tags. Zabt owns future security updates:
+maintainers must monitor advisories, refresh source or apply a maintained patch, and publish a new
+release image. Because the server repository is archived, a future upstream fix may not be available;
+plan to maintain a patch or select a replacement source if required. Both images include the upstream
+license and CA certificates.
+
 Images include OCI source, revision, and normalized version labels. Buildx also publishes maximum provenance and an SBOM for each image.
 
 ## Permissions and first-time GHCR setup
@@ -75,10 +99,11 @@ On the first run, check the package page under the repository or organization **
 
 Preflight treats only explicit GHCR `MANIFEST_UNKNOWN` or `NAME_UNKNOWN` 404 responses as absent. Authentication, network, malformed-response, and other registry errors stop the release.
 
-The cloud-prod Compose overlay pins all five required app images to one tag with
-`ZABT_IMAGE_TAG=v1.0.0` (API, worker/beat, web, GPU worker, and vision worker) under
-`ghcr.io/danielrondongarcia/`. The host must be able to pull each package: make them public for
-anonymous access or log in with a credential that has `read:packages`.
+The cloud-prod Compose overlay pins the API, worker/beat, web, GPU worker, MinIO, `mc`, and vision
+images to one tag with `ZABT_IMAGE_TAG=v1.0.0` under `ghcr.io/danielrondongarcia/`. The first six
+are in the core release matrix; vision is optional there but required by cloud-prod. The host must
+be able to pull each package: make them public for anonymous access or log in with a credential that
+has `read:packages`.
 
 Do not paste a token into this repository. For local access to a private package, use a temporary environment variable containing a token with the minimum required scope, such as `read:packages`:
 

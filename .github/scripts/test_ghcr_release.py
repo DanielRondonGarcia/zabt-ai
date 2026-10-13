@@ -82,7 +82,7 @@ class GHCRReleaseTests(unittest.TestCase):
         )
         return record_file
 
-    def test_release_workflow_keeps_five_core_and_two_optional_images(self):
+    def test_release_workflow_keeps_seven_core_and_two_optional_images(self):
         workflow = Path(__file__).parents[1] / "workflows" / "release.yml"
         source = workflow.read_text(encoding="utf-8")
         match = re.search(
@@ -92,7 +92,7 @@ class GHCRReleaseTests(unittest.TestCase):
         self.assertIsNotNone(match, "Release workflow image-matrix generator was not found")
         matrix_script = textwrap.dedent(match.group(1))
 
-        def selected_images(include_optional: str) -> set[str]:
+        def selected_matrix(include_optional: str) -> list[dict[str, str]]:
             environment = os.environ.copy()
             environment["INCLUDE_OPTIONAL"] = include_optional
             result = subprocess.run(
@@ -102,10 +102,10 @@ class GHCRReleaseTests(unittest.TestCase):
                 text=True,
                 env=environment,
             )
-            return {
-                image["image"]
-                for image in json.loads(result.stdout)["include"]
-            }
+            return json.loads(result.stdout)["include"]
+
+        def selected_images(include_optional: str) -> set[str]:
+            return {image["image"] for image in selected_matrix(include_optional)}
 
         core = {
             "zabt-ai-api",
@@ -113,12 +113,29 @@ class GHCRReleaseTests(unittest.TestCase):
             "zabt-ai-web",
             "zabt-ai-gpu-worker",
             "zabt-ai-cpu-worker",
+            "zabt-ai-minio",
+            "zabt-ai-mc",
         }
         self.assertEqual(selected_images("false"), core)
         self.assertEqual(
             selected_images("true"),
             core | {"zabt-ai-vision-worker", "zabt-ai-bot-worker"},
         )
+
+        core_matrix = {image["image"]: image for image in selected_matrix("false")}
+        for image, dockerfile in (
+            ("zabt-ai-minio", "docker/minio/Dockerfile"),
+            ("zabt-ai-mc", "docker/minio/Dockerfile.mc"),
+        ):
+            with self.subTest(image=image):
+                self.assertEqual(core_matrix[image]["context"], "docker/minio")
+                self.assertEqual(core_matrix[image]["file"], dockerfile)
+
+        notes_start = source.index('echo "## Published container images"')
+        notes_end = source.index('} > "$notes_file"', notes_start)
+        notes_script = source[notes_start:notes_end]
+        self.assertIn("zabt-ai-minio", notes_script)
+        self.assertIn("zabt-ai-mc", notes_script)
 
     def test_release_workflow_binds_stage_record_to_buildx_digest_output(self):
         workflow = Path(__file__).parents[1] / "workflows" / "release.yml"

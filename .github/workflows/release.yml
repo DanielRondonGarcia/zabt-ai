@@ -201,6 +201,20 @@ jobs:
                   "file": "zabt-gpu-worker/Dockerfile.cpu",
                   "target": "",
               },
+              {
+                  "name": "minio",
+                  "image": "zabt-ai-minio",
+                  "context": "docker/minio",
+                  "file": "docker/minio/Dockerfile",
+                  "target": "",
+              },
+              {
+                  "name": "mc",
+                  "image": "zabt-ai-mc",
+                  "context": "docker/minio",
+                  "file": "docker/minio/Dockerfile.mc",
+                  "target": "",
+              },
           ]
 
           if os.environ["INCLUDE_OPTIONAL"] == "true":
@@ -592,7 +606,9 @@ jobs:
               zabt-ai-worker \
               zabt-ai-web \
               zabt-ai-gpu-worker \
-              zabt-ai-cpu-worker; do
+              zabt-ai-cpu-worker \
+              zabt-ai-minio \
+              zabt-ai-mc; do
               echo "- ghcr.io/${GHCR_OWNER}/${image}:${TAG}"
               echo "- ghcr.io/${GHCR_OWNER}/${image}:latest"
             done

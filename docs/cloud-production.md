@@ -6,10 +6,11 @@
 > `docker-compose.full-cloud.yml` instead.
 
 `docker-compose.cloud.prod.yml` runs a production image stack on one machine. The API, backend
-worker, web app, vision worker, and GPU worker come from published release images, while PostgreSQL,
-MinIO, Redis, and local GPU transcription stay on the same Compose network. Summaries and visual
-analysis use first-party OpenAI cloud inference. NetBird, Caddy, or another external reverse proxy
-terminates TLS and forwards HTTP to the published web and API ports.
+worker, web app, GPU worker, MinIO server, and `mc` initializer use Zabt-owned GHCR release images;
+PostgreSQL and Redis remain local services. The vision worker is also published to GHCR and required
+by this topology. Summaries and visual analysis use first-party OpenAI cloud inference. NetBird,
+Caddy, or another external reverse proxy terminates TLS and forwards HTTP to the published web and
+API ports.
 
 ## Quick path
 
@@ -69,7 +70,8 @@ Run all commands below from the repository root, the directory containing `docke
 | `web` | `ghcr.io/danielrondongarcia/zabt-ai-web:${ZABT_IMAGE_TAG}` | Next.js production web app | `3000` |
 | `redis` | Base Compose image | Local broker | none |
 | `db` | Base Compose `postgres:16-alpine` | Local PostgreSQL with `postgres_data` volume | `5433` |
-| `minio` / `minio-init` | Base Compose images | Local object storage and bucket/webhook setup | `9000`, `9001` |
+| `minio` | `ghcr.io/danielrondongarcia/zabt-ai-minio:${ZABT_IMAGE_TAG}` | Zabt-built MinIO object storage server | `9000`, `9001` |
+| `minio-init` | `ghcr.io/danielrondongarcia/zabt-ai-mc:${ZABT_IMAGE_TAG}` | Creates the bucket and configures its webhook event | none |
 | `worker-gpu` | `ghcr.io/danielrondongarcia/zabt-ai-gpu-worker:${ZABT_IMAGE_TAG}` | Local WhisperX/diarization transcription over `worker-gpu:8001` | **none** |
 | `zabt-vision-worker` | `ghcr.io/danielrondongarcia/zabt-ai-vision-worker:${ZABT_IMAGE_TAG}` | Internal visual pipeline with OpenAI inference | **none** |
 
@@ -198,25 +200,43 @@ at higher token cost. `VISION_OPENAI_MAX_TOKENS` bounds the response size.
 
 ## GHCR image pinning
 
-The release workflow publishes the five application images used by this topology under the lowercase
-GHCR owner `danielrondongarcia`. One required `ZABT_IMAGE_TAG` pins every app image to the same release:
+The release workflow publishes the Zabt-owned MinIO server and client alongside the application
+images. Cloud production selects every image with one immutable `ZABT_IMAGE_TAG`:
 
 ```text
 ghcr.io/danielrondongarcia/zabt-ai-api:v1.0.0
 ghcr.io/danielrondongarcia/zabt-ai-worker:v1.0.0
 ghcr.io/danielrondongarcia/zabt-ai-web:v1.0.0
 ghcr.io/danielrondongarcia/zabt-ai-gpu-worker:v1.0.0
+ghcr.io/danielrondongarcia/zabt-ai-minio:v1.0.0
+ghcr.io/danielrondongarcia/zabt-ai-mc:v1.0.0
 ghcr.io/danielrondongarcia/zabt-ai-vision-worker:v1.0.0
 ```
+
+The MinIO community container images are no longer publicly pullable. Zabt builds both images from
+pinned upstream source tags without using a MinIO Docker Hub or Quay base image:
+
+| Image | Pinned upstream source | Build toolchain |
+|---|---|---|
+| `zabt-ai-minio` | `minio/minio` `RELEASE.2025-10-15T17-29-55Z` (`9e49d5e7a648`) (archived server source) | Go `1.24.8`; Alpine `3.22.2` runtime |
+| `zabt-ai-mc` | `minio/mc` `RELEASE.2025-08-13T08-35-41Z` (`7394ce0dd2a8`) | Go `1.23.10`; Alpine `3.21.4` runtime |
+
+The release tag selects the Zabt image version; it does not change the upstream source pin. Zabt owns
+future image security updates: maintainers must monitor upstream advisories and available fixes,
+update the source pins and rebuild/publish the images. The server source repository is archived, so
+security maintenance may require a Zabt-managed patch or a replacement source if upstream fixes are
+unavailable. The images retain upstream licenses and use pinned Alpine runtime bases with CA
+certificates.
 
 Set `ZABT_IMAGE_TAG` to a published immutable `vMAJOR.MINOR.PATCH` release, such as `v1.0.0`; never
 use `latest`. Compose verifies that the value is present but cannot validate its format, so check the
 tag against the release before deployment. The Docker workflow validates the required tag format.
 
 For the first cloud-prod release, dispatch **Release** from `main` with `version=v1.0.0` and
-`include_optional=true`; the vision worker is optional in the workflow but required by this topology.
-Make the GHCR packages public for anonymous pulls, or authenticate the host to `ghcr.io` with a
-credential that has `read:packages`. Run `docker compose ... pull` before
+`include_optional=true`; MinIO and `mc` are in the seven-image core matrix, while the vision image is
+optional in the workflow but required by this topology. Make the GHCR packages public for anonymous
+pulls, or authenticate the host to `ghcr.io` with a credential that has `read:packages`. Run
+`docker compose ... pull` before
 `docker compose ... up -d --no-build`; every GHCR-backed service uses `pull_policy: always` and the
 production override removes their inherited local `build:` definitions. Restore the previous tag in
 `ZABT_IMAGE_TAG` to roll back.

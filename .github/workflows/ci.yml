@@ -67,6 +67,7 @@ jobs:
       MINIO_ACCESS_KEY: minioadmin
       MINIO_SECRET_KEY: minioadmin
       MINIO_BUCKET_NAME: zabt-media
+      MINIO_WEBHOOK_SECRET: ci-minio-webhook-token
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -74,9 +75,12 @@ jobs:
         run: sudo mkdir -p /media/styles && sudo chmod -R 777 /media
       - name: Start MinIO + create bucket
         run: |
-          docker run -d --name minio -p 9000:9000 \
+          docker build --tag zabt-ai-minio:ci --file docker/minio/Dockerfile docker/minio
+          docker build --tag zabt-ai-mc:ci --file docker/minio/Dockerfile.mc docker/minio
+          # This job exercises object storage, not webhook delivery; no API receiver runs here.
+          docker run -d --name minio -p 9000:9000 -p 9001:9001 \
             -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
-            quay.io/minio/minio:latest server /data
+            zabt-ai-minio:ci server /data --console-address :9001
           healthy=0
           for _ in $(seq 1 20); do
             if curl -sf http://localhost:9000/minio/health/live; then healthy=1; break; fi
@@ -87,7 +91,7 @@ jobs:
             docker logs minio || true
             exit 1
           fi
-          docker run --rm --network host --entrypoint /bin/sh quay.io/minio/mc:latest -c \
+          docker run --rm --network host --entrypoint /bin/sh zabt-ai-mc:ci -ec \
             'mc alias set m http://localhost:9000 minioadmin minioadmin && mc mb --ignore-existing m/zabt-media'
       - name: Install backend deps
         working-directory: backend

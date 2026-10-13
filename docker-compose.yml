@@ -366,8 +366,9 @@ services:
       retries: 10
       start_period: 5s
 
+  # Zabt-maintained source builds; see docs/releasing.md for upstream pins.
   minio:
-    image: minio/minio
+    image: ghcr.io/danielrondongarcia/zabt-ai-minio:latest
     restart: unless-stopped
     mem_limit: ${ZABT_MEMORY_LIMIT_MINIO:-768m}
     profiles: [local]
@@ -386,7 +387,7 @@ services:
       - minio_data:/data
 
   minio-init:
-    image: minio/mc
+    image: ghcr.io/danielrondongarcia/zabt-ai-mc:latest
     profiles: [local]
     depends_on:
       - minio
