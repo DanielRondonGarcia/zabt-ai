@@ -201,8 +201,14 @@ def test_local_long_job_times_out_with_local_setting_and_preserves_polling():
             sys.modules,
             {"app.services.storage": SimpleNamespace(storage=storage)},
         ),
-        patch("app.services.transcription.gpu_client.time.time", side_effect=[0, 1, 7201]),
-        patch("app.services.transcription.gpu_client.time.sleep"),
+        patch.object(
+            gpu_client_module,
+            "time",
+            SimpleNamespace(
+                time=MagicMock(side_effect=[0, 1, 7201]),
+                sleep=MagicMock(),
+            ),
+        ),
     ):
         storage.get_presigned_download_url.return_value = "http://gpu-worker/audio"
         with pytest.raises(TimeoutError, match="GPU_LOCAL_TIMEOUT") as exc_info:
@@ -241,11 +247,14 @@ def test_long_running_polling_refreshes_the_processing_heartbeat():
             sys.modules,
             {"app.services.storage": SimpleNamespace(storage=storage)},
         ),
-        patch(
-            "app.services.transcription.gpu_client.time.time",
-            side_effect=[0, 0, 1, 1, 31, 31, 32, 32],
+        patch.object(
+            gpu_client_module,
+            "time",
+            SimpleNamespace(
+                time=MagicMock(side_effect=[0, 0, 1, 1, 31, 31, 32, 32]),
+                sleep=MagicMock(),
+            ),
         ),
-        patch("app.services.transcription.gpu_client.time.sleep"),
     ):
         client.process_audio(
             "/tmp/audio.mp4",
