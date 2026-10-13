@@ -11,6 +11,8 @@ from pathlib import Path
 COMPOSE_PATH = Path(__file__).resolve().parents[3] / "docker-compose.yml"
 BASE_COMPOSE_PATH = Path(__file__).resolve().parents[3] / "docker-compose.yml"
 ENV_EXAMPLE_PATH = Path(__file__).resolve().parents[3] / "docs" / "full-cloud.env.example"
+MINIO_DOCKERFILE_PATH = Path(__file__).resolve().parents[3] / "docker" / "minio" / "Dockerfile"
+MINIO_MC_DOCKERFILE_PATH = Path(__file__).resolve().parents[3] / "docker" / "minio" / "Dockerfile.mc"
 
 
 def _compose_text() -> str:
@@ -63,6 +65,48 @@ def test_full_cloud_profile_has_published_application_services_without_builds() 
     assert "volumes:" not in app_blocks
     for forbidden in ("GPU_SERVICE_URL", "HF_TOKEN", "pyannote", "worker-gpu", "zabt-vision-worker"):
         assert forbidden.casefold() not in app_blocks.casefold()
+
+
+def test_local_minio_profiles_build_pinned_sources_for_target_architecture() -> None:
+    text = _compose_text()
+    expected_builds = {
+        "minio": ("zabt-ai-minio:local", "docker/minio/Dockerfile"),
+        "minio-init": ("zabt-ai-mc:local", "docker/minio/Dockerfile.mc"),
+    }
+
+    for service, (image, dockerfile) in expected_builds.items():
+        block = _named_service_block(text, service)
+        assert "profiles: [local, cpu, local-actsis]" in block
+        assert f"image: {image}" in block
+        assert "ghcr.io/" not in block
+        assert "context: ." in block
+        assert f"dockerfile: {dockerfile}" in block
+
+    for service, image in (
+        ("minio-cloud-prod", "zabt-ai-minio"),
+        ("minio-init-cloud-prod", "zabt-ai-mc"),
+    ):
+        block = _named_service_block(text, service)
+        assert "profiles: [cloud-prod]" in block
+        expected_image = (
+            f"image: ghcr.io/danielrondongarcia/{image}:"
+            "${ZABT_IMAGE_TAG:-missing-zabt-image-tag}"
+        )
+        assert expected_image in block
+        assert "pull_policy: always" in block
+        assert "build:" not in block
+
+    for path in (MINIO_DOCKERFILE_PATH, MINIO_MC_DOCKERFILE_PATH):
+        dockerfile = path.read_text(encoding="utf-8")
+        assert re.search(r"(?m)^ARG TARGETARCH$", dockerfile), (
+            f"{path.name} must declare BuildKit TARGETARCH"
+        )
+        assert "amd64" not in dockerfile, (
+            f"{path.name} must not hardcode the build architecture"
+        )
+
+    assert "GOARCH=${TARGETARCH}" in MINIO_DOCKERFILE_PATH.read_text(encoding="utf-8")
+    assert "GOARCH=${TARGETARCH}" in MINIO_MC_DOCKERFILE_PATH.read_text(encoding="utf-8")
 
 
 def test_full_cloud_requires_external_dependencies_and_isolates_visual_credentials() -> None:
