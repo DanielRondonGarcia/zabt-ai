@@ -9,18 +9,23 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 # Keep this focused module independent of repository settings and the real `.env`.
+_original_config = sys.modules.get("app.core.config")
 fake_config = ModuleType("app.core.config")
 fake_config.settings = SimpleNamespace()
 sys.modules["app.core.config"] = fake_config
+try:
+    from app.models import TranscriptionBackend
+    from app.services.transcription.errors import UnsupportedCapabilityError
+    from app.services.transcription.gpu_client import GpuTranscriptionClient
 
-from app.models import TranscriptionBackend
-from app.services.transcription.errors import UnsupportedCapabilityError
-
-
-from app.services.transcription.gpu_client import GpuTranscriptionClient
-
-
-gpu_client_module = sys.modules["app.services.transcription.gpu_client"]
+    gpu_client_module = sys.modules["app.services.transcription.gpu_client"]
+finally:
+    # Keep the fake isolated to this module's GPU client import. The root
+    # conftest may already have loaded the real config before collecting tests.
+    if _original_config is None:
+        sys.modules.pop("app.core.config", None)
+    else:
+        sys.modules["app.core.config"] = _original_config
 
 
 def _transcription_config(storage_key: str, transcription_type: str = "general") -> SimpleNamespace:
