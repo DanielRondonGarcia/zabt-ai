@@ -7,6 +7,7 @@
     "prebuild": "npm --prefix ../packages/shared run build",
     "build": "next build",
     "start": "next start",
+    "verify:runtime-config": "node verify-runtime-config.mjs",
     "lint": "eslint"
   },
   "dependencies": {

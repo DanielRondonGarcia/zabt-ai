@@ -85,9 +85,7 @@ volume (several GB, one-time).
 
 ## CPU-only
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
-```
+Set `COMPOSE_PROFILES=cpu` in the root `.env`, then run `docker compose up -d`.
 
 Set a smaller model for usable speed, e.g. `WHISPER_MODEL=base` in `.env`. CPU transcription
 runs `int8` compute automatically and is roughly 1-5× real-time. The local backend timeout is
@@ -96,7 +94,7 @@ more time, edit `GPU_LOCAL_TIMEOUT` in `.env` and recreate only the backend work
 the image:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d --no-build --force-recreate worker
+docker compose up -d --no-build --force-recreate worker
 ```
 
 ## Optional add-ons

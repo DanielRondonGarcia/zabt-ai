@@ -1,10 +1,12 @@
 # Advanced: cloud / RunPod split deployment
 
-The single-machine setup is great for self-hosting on one GPU box. The **split topology** is
-how zabt.ai runs in production and suits teams that want elastic GPU without keeping a GPU
-server running 24/7:
+The single-machine `cloud-prod` profile is the primary production path. This **advanced split
+topology** suits teams that want elastic GPU capacity without keeping a GPU server running 24/7:
 
-- A small, cheap **API VPS** runs `api`, `worker`, `beat` (no GPU).
+> **ACT-TLC-12:** This deployment has no local GPU, so use the `cloud` profile (plus `kong` when
+> using the bundled TLS gateway), not `cloud-prod`, which starts a local GPU worker.
+
+- A small, cheap **API VPS** runs the `api-cloud`, `worker-cloud`, and `beat-cloud` services (no GPU).
 - **Transcription** runs on **RunPod Serverless** GPUs, invoked per job.
 - **Postgres** and **object storage** are managed services (e.g. Supabase Postgres + S3/R2).
 - **Kong** fronts the API for TLS + rate limiting (optional if you terminate TLS elsewhere).
@@ -34,7 +36,8 @@ flowchart LR
 ## 2. Configure `.env`
 
 ```dotenv
-COMPOSE_PROFILES=                         # empty — do NOT run local db/minio/gpu/web
+COMPOSE_PROFILES=cloud,kong               # add `kong` when using the bundled TLS gateway
+API_HOST_BIND=127.0.0.1                   # keep the API host port local to the gateway
 DATABASE_URL=postgresql+asyncpg://USER:PASS@HOST:5432/DB
 STORAGE_PROVIDER=s3
 S3_ENDPOINT_URL=https://<account>.r2.cloudflarestorage.com
@@ -51,35 +54,43 @@ NEXT_PUBLIC_API_URL=https://api.your-domain/api/v1
 MINIO_PUBLIC_ENDPOINT=https://api.your-domain
 ```
 
+For the `cloud` profile, `TRANSCRIPTION_BACKEND` is the root `.env` selector: Compose maps that same
+value to both `TRANSCRIPTION_PROVIDER` and the legacy `TRANSCRIPTION_BACKEND` setting, defaulting to
+`runpod` when the selector is unset. Local profiles continue to use `TRANSCRIPTION_PROVIDER` and
+default to `gpu-local`.
+
 With `STORAGE_PROVIDER=s3` there is no MinIO webhook; the frontend calls
 `POST /api/v1/meetings/{id}/confirm-upload` after uploading to trigger the pipeline.
 
 ## 3. Kong (TLS gateway)
 
-`docker-compose.cloud.yml` includes a `kong` service that reads `kong/kong.yml` and TLS certs
-from `kong/ssl/`:
+The `kong` profile in `docker-compose.yml` enables a Kong service that reads `kong/kong.yml` and TLS
+certificates from `kong/ssl/`:
 
 ```bash
 mkdir -p kong/ssl
 # place origin.pem and origin.key (e.g. a Cloudflare Origin Certificate) in kong/ssl/
 ```
 
-If you terminate TLS elsewhere (Cloudflare Tunnel, an external load balancer, another reverse
-proxy), delete the `kong` service from `docker-compose.cloud.yml` and expose `api` directly.
+If TLS is terminated elsewhere (Cloudflare Tunnel, an external load balancer, or another reverse
+proxy), set `COMPOSE_PROFILES=cloud` to omit Kong. Keep `API_HOST_BIND=127.0.0.1` when the proxy is
+on the same host; if it runs on another host, bind the API port only to an address reachable by that
+proxy and restrict it with the host firewall.
 
 ## 4. Launch
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.cloud.yml up -d
+docker compose up -d
 ```
 
-This runs `redis`, `api`, `worker`, `beat`, and `kong` — no local GPU, DB, or storage.
+This runs `redis`, `api-cloud`, `worker-cloud`, `beat-cloud`, and `kong` — no local GPU, DB, or
+storage. The API service retains the internal network alias `api` for Kong routing.
 
 ## 5. Frontend
 
 In this topology the Next.js UI is usually hosted separately (e.g. Vercel) pointing
-`NEXT_PUBLIC_API_URL` at your API domain. To run it in a container instead, add `local` to
-`COMPOSE_PROFILES` (it will start the `web` service).
+`NEXT_PUBLIC_API_URL` at your API domain. The `local` profile also starts bundled local dependencies;
+use the local-stack instructions if you need the containerized web UI.
 
 ## Notes
 

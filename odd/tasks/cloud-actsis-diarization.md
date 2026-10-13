@@ -176,14 +176,13 @@ the recovery regression passed separately, compilation passed, and `git diff --c
 only existing LF-to-CRLF normalization warnings. No Docker services, remote calls, meeting retries,
 or meeting reprocessing were performed.
 
-T13 local Compose correction is complete: `docker-compose.yml` now keeps the generic `600`-second
-request timeout, `2` retries, and `900`-second recovery grace for API, worker, and beat. The new
-`docker-compose.local-actsis.yml` overlay explicitly applies the HTTPS Actsis
-`whisper-diarize`/`diarized_json` contract, required speakers, `chunking_strategy=auto`, the
-500000000-byte direct-upload threshold, `7200`/`0`/`9000` long-request policy, and the existing API
-`:8000`/web `:3001` ports. It sources `ACTSIS_API_KEY` from the untracked `.env` and moves the base
-GPU worker to an opt-in `gpu` profile. Static Compose tests assert the base/overlay split for all
-three backend processes, and the recovery regression now proves the actual claim/dispatcher seam
+T13 local Compose correction is complete: `docker-compose.yml` keeps generic `600`-second
+request timeout, `2` retries, and `900`-second recovery defaults, while the `local-actsis` profile
+uses provider settings from the root `.env` for API, worker, and beat. That profile selects the HTTPS
+Actsis `whisper-diarize`/`diarized_json` contract, required speakers, `chunking_strategy=auto`, the
+500000000-byte direct-upload threshold, and `7200`/`0`/`9000` long-request policy. It preserves the
+API `:8000`/web `:3001` ports and excludes the GPU worker. Static Compose tests assert this profile
+contract for all three backend processes, and the recovery regression proves the claim/dispatcher seam
 does not claim or dispatch at 7200 seconds but does dispatch after the 9000-second grace; generic
 900-second recovery behavior remains covered.
 

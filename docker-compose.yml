@@ -1,4 +1,4 @@
-# zabt.ai — single-machine self-hosted stack
+# zabt.ai — local development and single-machine cloud production stack
 #
 # Default (one command, runs the FULL stack locally with a local GPU worker):
 #   cp .env.example .env    # then edit the 3-4 values marked REQUIRED
@@ -8,27 +8,273 @@
 # GPU transcription worker, and web UI below. No Kong required.
 #
 # Variations:
-#   CPU-only (no NVIDIA GPU):   docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
-#   Local Actsis (no GPU):      docker compose --env-file .env -f docker-compose.yml -f docker-compose.local-actsis.yml --profile local up -d
-#   Cloud / RunPod split:       docker compose -f docker-compose.yml -f docker-compose.cloud.yml up -d
+#   CPU-only (no NVIDIA GPU):   set COMPOSE_PROFILES=cpu in .env, then docker compose up -d
+#   Local Actsis (no GPU):      set COMPOSE_PROFILES=local-actsis in .env, then docker compose up -d
+#   Cloud / RunPod split:       set COMPOSE_PROFILES=cloud,kong in .env, then docker compose up -d
+#   Cloud production:           set COMPOSE_PROFILES=cloud-prod in .env, then docker compose up -d
+#   Full cloud (managed services): set COMPOSE_PROFILES=full-cloud in .env, then docker compose up -d
 #   Teams meeting bot:          add "bot" to COMPOSE_PROFILES in .env
 #   Visual breakdown (vision):  add "vision" to COMPOSE_PROFILES in .env
 #
-# Services with no `profiles:` always run (redis, api, worker, beat). Services tagged
-# `profiles: [local]` only run when COMPOSE_PROFILES includes "local" (the default).
+# Broker and application services start only in deployment profiles. Local uses `local`,
+# CPU uses `cpu`, local Actsis uses `local-actsis`, RunPod uses `cloud`, full cloud uses
+# `full-cloud`, and the GHCR production topology uses `cloud-prod`.
 # Each service has a hard memory cap. Override individual caps in `.env` with the
 # matching `ZABT_MEMORY_LIMIT_*` variable when a workload needs more room.
 
+x-cloud-prod-backend-environment: &cloud-prod-backend-environment
+  DATABASE_URL: ${DATABASE_URL:-}
+  REDIS_URL: redis://redis:6379/0
+  AUTH_ENVIRONMENT: production
+  AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-}
+  AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-zabt-api}
+  AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-zabt-client}
+  AUTH_ACCESS_TOKEN_EXPIRE_MINUTES: ${AUTH_ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+  AUTH_REFRESH_SESSION_EXPIRE_DAYS: ${AUTH_REFRESH_SESSION_EXPIRE_DAYS:-30}
+  AUTH_ACCESS_COOKIE_NAME: ${AUTH_ACCESS_COOKIE_NAME:-zabt_access_token}
+  AUTH_REFRESH_COOKIE_NAME: ${AUTH_REFRESH_COOKIE_NAME:-zabt_refresh_token}
+  AUTH_COOKIE_SECURE: "true"
+  AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+  AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
+  APP_URL: ${APP_URL:-}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+  AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-https://api.openai.com/v1}
+  AI_CHAT_MODEL: ${AI_CHAT_MODEL:-gpt-4o-mini}
+  AI_CHAT_API_KEY: ${AI_CHAT_API_KEY:-}
+  SUMMARY_CHUNK_SECONDS: ${SUMMARY_CHUNK_SECONDS:-120}
+  SUMMARY_MAX_INPUT_TOKENS: ${SUMMARY_MAX_INPUT_TOKENS:-6000}
+  MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+  MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+  MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-common}
+  MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI:-http://localhost:8000/api/v1/integrations/microsoft/callback}
+  MICROSOFT_OIDC_HTTP_TIMEOUT_SECONDS: ${MICROSOFT_OIDC_HTTP_TIMEOUT_SECONDS:-10}
+  TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+  RESEND_API_KEY: ${RESEND_API_KEY:-}
+  RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-no-reply@zabt.ai}
+  NOTIFICATION_PROVIDER: ${NOTIFICATION_PROVIDER:-}
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+  BOT_WORKER_URL: ${BOT_WORKER_URL:-http://worker-bot:8002}
+  POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
+  POSTHOG_HOST: ${POSTHOG_HOST:-https://us.i.posthog.com}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: production
+  LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+  LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+
+x-cloud-prod-storage-environment: &cloud-prod-storage-environment
+  STORAGE_PROVIDER: minio
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+  MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-zabt-ai-bucket}
+
+x-cloud-prod-transcription-environment: &cloud-prod-transcription-environment
+  TRANSCRIPTION_PROVIDER: gpu-local
+  TRANSCRIPTION_BACKEND: gpu-local
+  GPU_SERVICE_URL: http://worker-gpu:8001
+  GPU_LOCAL_TIMEOUT: ${GPU_LOCAL_TIMEOUT:-7200}
+
+x-cloud-prod-required-environment: &cloud-prod-required-environment
+  HAS_ZABT_IMAGE_TAG: ${ZABT_IMAGE_TAG:+1}
+  HAS_DATABASE_URL: ${DATABASE_URL:+1}
+  HAS_AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:+1}
+  HAS_AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:+1}
+  HAS_BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:+1}
+  HAS_APP_URL: ${APP_URL:+1}
+  HAS_MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:+1}
+  HAS_POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:+1}
+  HAS_MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:+1}
+  HAS_MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:+1}
+  HAS_MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:+1}
+  HAS_MINIO_WEBHOOK_SECRET: ${MINIO_WEBHOOK_SECRET:+1}
+  HAS_OPENAI_API_KEY: ${OPENAI_API_KEY:+1}
+  HAS_VISION_OPENAI_API_KEY: ${VISION_OPENAI_API_KEY:+1}
+  HAS_NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:+1}
+  HAS_NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:+1}
+
+x-full-cloud-backend-environment: &full-cloud-backend-environment
+  DATABASE_URL: ${DATABASE_URL:-}
+  REDIS_URL: ${REDIS_URL:-}
+  AUTH_ENVIRONMENT: production
+  AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-}
+  AUTH_JWT_ISSUER: ${AUTH_JWT_ISSUER:-zabt-api}
+  AUTH_JWT_AUDIENCE: ${AUTH_JWT_AUDIENCE:-zabt-client}
+  AUTH_ACCESS_TOKEN_EXPIRE_MINUTES: ${AUTH_ACCESS_TOKEN_EXPIRE_MINUTES:-15}
+  AUTH_REFRESH_SESSION_EXPIRE_DAYS: ${AUTH_REFRESH_SESSION_EXPIRE_DAYS:-30}
+  AUTH_ACCESS_COOKIE_NAME: ${AUTH_ACCESS_COOKIE_NAME:-zabt_access_token}
+  AUTH_REFRESH_COOKIE_NAME: ${AUTH_REFRESH_COOKIE_NAME:-zabt_refresh_token}
+  AUTH_COOKIE_SECURE: "true"
+  AUTH_COOKIE_SAMESITE: ${AUTH_COOKIE_SAMESITE:-lax}
+  AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
+  AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:-}
+  BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-}
+  APP_URL: ${APP_URL:-}
+  MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
+  STORAGE_PROVIDER: s3
+  S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:-}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-}
+  S3_BUCKET_NAME: ${S3_BUCKET_NAME:-}
+  S3_PUBLIC_URL: ${S3_PUBLIC_URL:-}
+  S3_REGION: ${S3_REGION:-auto}
+  ACTSIS_API_KEY: ${ACTSIS_API_KEY:-}
+  ACTSIS_CA_BUNDLE: ${ACTSIS_CA_BUNDLE:-/usr/local/share/ca-certificates/actsis-root-ca.crt}
+  TRANSCRIPTION_PROVIDER: openai-file
+  TRANSCRIPTION_BACKEND: openai-file
+  TRANSCRIPTION_MODEL: whisper-diarize
+  TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-}
+  TRANSCRIPTION_API_KEY: ${TRANSCRIPTION_API_KEY:-}
+  TRANSCRIPTION_CLOUD_DIARIZATION: "true"
+  TRANSCRIPTION_LANGUAGE: ${TRANSCRIPTION_LANGUAGE:-}
+  TRANSCRIPTION_ALLOWED_LANGUAGES: ${TRANSCRIPTION_ALLOWED_LANGUAGES:-}
+  TRANSCRIPTION_TIMESTAMP_MODE: ${TRANSCRIPTION_TIMESTAMP_MODE:-none}
+  TRANSCRIPTION_TIMESTAMP_MODEL: ${TRANSCRIPTION_TIMESTAMP_MODEL:-whisper-1}
+  TRANSCRIPTION_RESPONSE_FORMAT: diarized_json
+  TRANSCRIPTION_SPEAKER_REQUIRED: "true"
+  TRANSCRIPTION_CHUNKING_STRATEGY: auto
+  TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES: ${TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES:-20000000}
+  TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: ${TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES:-0}
+  TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES: ${TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES:-15000000}
+  TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS: ${TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS:-600}
+  TRANSCRIPTION_OPENAI_MAX_CHUNKS: ${TRANSCRIPTION_OPENAI_MAX_CHUNKS:-1024}
+  TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS: ${TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS:-7200}
+  MEETING_RECOVERY_GRACE_SECONDS: ${MEETING_RECOVERY_GRACE_SECONDS:-9000}
+  TRANSCRIPTION_OPENAI_MAX_RETRIES: ${TRANSCRIPTION_OPENAI_MAX_RETRIES:-0}
+  TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS: ${TRANSCRIPTION_OPENAI_RETRY_BACKOFF_SECONDS:-1}
+  TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS: ${TRANSCRIPTION_OPENAI_RETRY_MAX_BACKOFF_SECONDS:-8}
+  TRANSCRIPTION_FFMPEG_TIMEOUT_SECONDS: ${TRANSCRIPTION_FFMPEG_TIMEOUT_SECONDS:-900}
+  EMBEDDING_PROVIDER: openai
+  EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+  EMBEDDING_MODEL: ${EMBEDDING_MODEL:-}
+  EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-}
+  EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+  EMBEDDING_MAX_BATCH: ${EMBEDDING_MAX_BATCH:-32}
+  QDRANT_URL: ${QDRANT_URL:-}
+  QDRANT_API_KEY: ${QDRANT_API_KEY:-}
+  QDRANT_COLLECTION_PREFIX: ${QDRANT_COLLECTION_PREFIX:-meeting_embeddings}
+  INDEXING_ENABLED: ${INDEXING_ENABLED:-true}
+  OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+  AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-}
+  AI_CHAT_MODEL: ${AI_CHAT_MODEL:-gpt-4o-mini}
+  AI_CHAT_API_KEY: ${AI_CHAT_API_KEY:-}
+  VISION_ENABLED: "true"
+  VISION_BACKEND: direct
+  VISION_REQUIRE_VISION: "true"
+  VISION_CLOUD_ALLOWED: "true"
+  VISION_EGRESS_POLICY: allowlist
+  VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:-}
+  VISION_OPENAI_API_KEY: ${VISION_OPENAI_API_KEY:-}
+  VISION_OPENAI_BASE_URL: ${VISION_OPENAI_BASE_URL:-}
+  VISION_OPENAI_MODEL: ${VISION_OPENAI_MODEL:-gpt-4o-mini}
+  VISION_OPENAI_IMAGE_DETAIL: ${VISION_OPENAI_IMAGE_DETAIL:-low}
+  VISION_OPENAI_MAX_TOKENS: ${VISION_OPENAI_MAX_TOKENS:-1024}
+  VISION_MAX_RETRIES: ${VISION_MAX_RETRIES:-2}
+  VISION_RETRY_BACKOFF_SECONDS: ${VISION_RETRY_BACKOFF_SECONDS:-5}
+  VISION_TIMEOUT: ${VISION_TIMEOUT:-1800}
+  VISION_FPS: ${VISION_FPS:-2}
+  VISION_MAX_FRAMES: ${VISION_MAX_FRAMES:-120}
+  VISION_MAX_CANDIDATE_FRAMES: ${VISION_MAX_CANDIDATE_FRAMES:-12}
+  VISION_MAX_SEGMENTS: ${VISION_MAX_SEGMENTS:-20}
+  SUMMARY_CHUNK_SECONDS: ${SUMMARY_CHUNK_SECONDS:-120}
+  SUMMARY_MAX_INPUT_TOKENS: ${SUMMARY_MAX_INPUT_TOKENS:-6000}
+  MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+  MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+  MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-common}
+  MICROSOFT_REDIRECT_URI: ${MICROSOFT_REDIRECT_URI:-}
+  MICROSOFT_OIDC_HTTP_TIMEOUT_SECONDS: ${MICROSOFT_OIDC_HTTP_TIMEOUT_SECONDS:-10}
+  TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+  RESEND_API_KEY: ${RESEND_API_KEY:-}
+  RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-no-reply@zabt.ai}
+  NOTIFICATION_PROVIDER: ${NOTIFICATION_PROVIDER:-}
+  TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+  TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+  POSTHOG_API_KEY: ${POSTHOG_API_KEY:-}
+  POSTHOG_HOST: ${POSTHOG_HOST:-https://us.i.posthog.com}
+  SENTRY_DSN: ${SENTRY_DSN:-}
+  SENTRY_ENVIRONMENT: production
+  LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+  LANGFUSE_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+  LANGFUSE_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+  LANGFUSE_HOST: ${LANGFUSE_HOST:-https://cloud.langfuse.com}
+
+x-full-cloud-required-environment: &full-cloud-required-environment
+  HAS_ZABT_API_IMAGE: ${ZABT_API_IMAGE:+1}
+  HAS_ZABT_WORKER_IMAGE: ${ZABT_WORKER_IMAGE:+1}
+  HAS_ZABT_WEB_IMAGE: ${ZABT_WEB_IMAGE:+1}
+  HAS_DATABASE_URL: ${DATABASE_URL:+1}
+  HAS_REDIS_URL: ${REDIS_URL:+1}
+  HAS_AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:+1}
+  HAS_AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:+1}
+  HAS_BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:+1}
+  HAS_APP_URL: ${APP_URL:+1}
+  HAS_MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:+1}
+  HAS_S3_ENDPOINT_URL: ${S3_ENDPOINT_URL:+1}
+  HAS_S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:+1}
+  HAS_S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:+1}
+  HAS_S3_BUCKET_NAME: ${S3_BUCKET_NAME:+1}
+  HAS_S3_PUBLIC_URL: ${S3_PUBLIC_URL:+1}
+  HAS_ACTSIS_API_KEY: ${ACTSIS_API_KEY:+1}
+  HAS_TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:+1}
+  HAS_EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:+1}
+  HAS_EMBEDDING_MODEL: ${EMBEDDING_MODEL:+1}
+  HAS_EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:+1}
+  HAS_QDRANT_URL: ${QDRANT_URL:+1}
+  HAS_QDRANT_API_KEY: ${QDRANT_API_KEY:+1}
+  HAS_OPENAI_BASE_URL: ${OPENAI_BASE_URL:+1}
+  HAS_OPENAI_API_KEY: ${OPENAI_API_KEY:+1}
+  HAS_AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:+1}
+  HAS_VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:+1}
+  HAS_VISION_OPENAI_API_KEY: ${VISION_OPENAI_API_KEY:+1}
+  HAS_VISION_OPENAI_BASE_URL: ${VISION_OPENAI_BASE_URL:+1}
+  HAS_NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:+1}
+  HAS_NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:+1}
+
 services:
-  # ---- Always-on core ----
+  # ---- Profile-selected broker and backend services ----
   redis:
     image: redis:7-alpine
     restart: unless-stopped
     mem_limit: ${ZABT_MEMORY_LIMIT_REDIS:-256m}
+    profiles: [local, cpu, local-actsis, cloud, cloud-prod, bot]
     volumes:
       - redis_data:/data
 
-  api:
+  cloud-prod-env-check:
+    image: alpine:3.22
+    restart: "no"
+    profiles: [cloud-prod]
+    environment:
+      <<: *cloud-prod-required-environment
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        test "$$HAS_ZABT_IMAGE_TAG" = 1 || { echo "ZABT_IMAGE_TAG must be set in root .env" >&2; exit 1; }
+        test "$$HAS_DATABASE_URL" = 1 || { echo "DATABASE_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_AUTH_JWT_SECRET" = 1 || { echo "AUTH_JWT_SECRET must be set in root .env" >&2; exit 1; }
+        test "$$HAS_AUTH_ALLOWED_ORIGINS" = 1 || { echo "AUTH_ALLOWED_ORIGINS must be set in root .env" >&2; exit 1; }
+        test "$$HAS_BACKEND_CORS_ORIGINS" = 1 || { echo "BACKEND_CORS_ORIGINS must be set in root .env" >&2; exit 1; }
+        test "$$HAS_APP_URL" = 1 || { echo "APP_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_MCP_PUBLIC_URL" = 1 || { echo "MCP_PUBLIC_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_POSTGRES_PASSWORD" = 1 || { echo "POSTGRES_PASSWORD must be set in root .env" >&2; exit 1; }
+        test "$$HAS_MINIO_ACCESS_KEY" = 1 || { echo "MINIO_ACCESS_KEY must be set in root .env" >&2; exit 1; }
+        test "$$HAS_MINIO_SECRET_KEY" = 1 || { echo "MINIO_SECRET_KEY must be set in root .env" >&2; exit 1; }
+        test "$$HAS_MINIO_BUCKET_NAME" = 1 || { echo "MINIO_BUCKET_NAME must be set in root .env" >&2; exit 1; }
+        test "$$HAS_MINIO_WEBHOOK_SECRET" = 1 || { echo "MINIO_WEBHOOK_SECRET must be set in root .env" >&2; exit 1; }
+        test "$$HAS_OPENAI_API_KEY" = 1 || { echo "OPENAI_API_KEY must be set in root .env" >&2; exit 1; }
+        test "$$HAS_VISION_OPENAI_API_KEY" = 1 || { echo "VISION_OPENAI_API_KEY must be set in root .env" >&2; exit 1; }
+        test "$$HAS_NEXT_PUBLIC_API_URL" = 1 || { echo "NEXT_PUBLIC_API_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_NEXT_PUBLIC_FRONTEND_URL" = 1 || { echo "NEXT_PUBLIC_FRONTEND_URL must be set in root .env" >&2; exit 1; }
+        echo "Cloud-production configuration is present."
+
+  api: &api-service
+    profiles: [local, cpu, local-actsis]
     image: zabt-api:latest
     restart: unless-stopped
     mem_limit: ${ZABT_MEMORY_LIMIT_API:-768m}
@@ -38,10 +284,10 @@ services:
       target: api
     command: sh -c "alembic upgrade head && python -m app.bootstrap_superuser && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"
     ports:
-      - "8000:8000"
+      - "${API_HOST_BIND:-0.0.0.0}:${API_PORT:-8000}:8000"
     volumes:
       - media_data:/media
-    environment:
+    environment: &api-environment
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
       # LLM (summarization and retrieval chat) — OpenAI-compatible endpoint.
@@ -94,8 +340,8 @@ services:
       # openai-file supports official OpenAI and compatible gateways such as Actsis.
       ACTSIS_API_KEY: ${ACTSIS_API_KEY:-}
       ACTSIS_CA_BUNDLE: ${ACTSIS_CA_BUNDLE:-}
-      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-openai-file}
-      TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_BACKEND:-}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-${TRANSCRIPTION_BACKEND:-gpu-local}}
+      TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_PROVIDER:-${TRANSCRIPTION_BACKEND:-gpu-local}}
       TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-whisper-1}
       TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://ai.actsis.internal/v1}
       TRANSCRIPTION_API_KEY: ${TRANSCRIPTION_API_KEY:-}
@@ -106,6 +352,7 @@ services:
       TRANSCRIPTION_TIMESTAMP_MODEL: ${TRANSCRIPTION_TIMESTAMP_MODEL:-whisper-1}
       TRANSCRIPTION_RESPONSE_FORMAT: ${TRANSCRIPTION_RESPONSE_FORMAT:-json}
       TRANSCRIPTION_SPEAKER_REQUIRED: ${TRANSCRIPTION_SPEAKER_REQUIRED:-false}
+      TRANSCRIPTION_CHUNKING_STRATEGY: ${TRANSCRIPTION_CHUNKING_STRATEGY:-auto}
       TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES: ${TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES:-20000000}
       # Custom gateways such as Actsis can opt in to full-file uploads; 0 keeps chunking.
       TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: ${TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES:-0}
@@ -176,7 +423,8 @@ services:
         condition: service_healthy
         required: false
 
-  worker:
+  worker: &worker-service
+    profiles: [local, cpu, local-actsis]
     image: zabt-worker:latest
     restart: unless-stopped
     mem_limit: ${ZABT_MEMORY_LIMIT_WORKER:-1g}
@@ -189,7 +437,7 @@ services:
     command: celery -A app.worker.celery_app worker --loglevel=info --concurrency=${CELERY_WORKER_CONCURRENCY:-2}
     volumes:
       - media_data:/media
-    environment:
+    environment: &worker-environment
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
       AUTH_ENVIRONMENT: ${AUTH_ENVIRONMENT:-development}
@@ -220,8 +468,8 @@ services:
       # Transcription selection; openai-file supports official OpenAI and Actsis.
       ACTSIS_API_KEY: ${ACTSIS_API_KEY:-}
       ACTSIS_CA_BUNDLE: ${ACTSIS_CA_BUNDLE:-}
-      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-openai-file}
-      TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_BACKEND:-}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-${TRANSCRIPTION_BACKEND:-gpu-local}}
+      TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_PROVIDER:-${TRANSCRIPTION_BACKEND:-gpu-local}}
       TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-whisper-1}
       TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://ai.actsis.internal/v1}
       TRANSCRIPTION_API_KEY: ${TRANSCRIPTION_API_KEY:-}
@@ -232,6 +480,7 @@ services:
       TRANSCRIPTION_TIMESTAMP_MODEL: ${TRANSCRIPTION_TIMESTAMP_MODEL:-whisper-1}
       TRANSCRIPTION_RESPONSE_FORMAT: ${TRANSCRIPTION_RESPONSE_FORMAT:-json}
       TRANSCRIPTION_SPEAKER_REQUIRED: ${TRANSCRIPTION_SPEAKER_REQUIRED:-false}
+      TRANSCRIPTION_CHUNKING_STRATEGY: ${TRANSCRIPTION_CHUNKING_STRATEGY:-auto}
       TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES: ${TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES:-20000000}
       # Custom gateways such as Actsis can opt in to full-file uploads; 0 keeps chunking.
       TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: ${TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES:-0}
@@ -300,7 +549,8 @@ services:
     depends_on:
       - redis
 
-  beat:
+  beat: &beat-service
+    profiles: [local, cpu, local-actsis]
     image: zabt-worker:latest
     restart: unless-stopped
     mem_limit: ${ZABT_MEMORY_LIMIT_BEAT:-256m}
@@ -309,7 +559,7 @@ services:
       dockerfile: Dockerfile
       target: worker
     command: celery -A app.worker.celery_app beat --loglevel=info
-    environment:
+    environment: &beat-environment
       DATABASE_URL: ${DATABASE_URL}
       REDIS_URL: redis://redis:6379/0
       AUTH_ENVIRONMENT: ${AUTH_ENVIRONMENT:-development}
@@ -323,6 +573,26 @@ services:
       TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS: ${TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS:-600}
       TRANSCRIPTION_OPENAI_MAX_RETRIES: ${TRANSCRIPTION_OPENAI_MAX_RETRIES:-2}
       MEETING_RECOVERY_GRACE_SECONDS: ${MEETING_RECOVERY_GRACE_SECONDS:-900}
+      ACTSIS_API_KEY: ${ACTSIS_API_KEY:-}
+      ACTSIS_CA_BUNDLE: ${ACTSIS_CA_BUNDLE:-}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_PROVIDER:-${TRANSCRIPTION_BACKEND:-gpu-local}}
+      TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_PROVIDER:-${TRANSCRIPTION_BACKEND:-gpu-local}}
+      TRANSCRIPTION_MODEL: ${TRANSCRIPTION_MODEL:-whisper-1}
+      TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://ai.actsis.internal/v1}
+      TRANSCRIPTION_API_KEY: ${TRANSCRIPTION_API_KEY:-}
+      TRANSCRIPTION_CLOUD_DIARIZATION: ${TRANSCRIPTION_CLOUD_DIARIZATION:-false}
+      TRANSCRIPTION_LANGUAGE: ${TRANSCRIPTION_LANGUAGE:-}
+      TRANSCRIPTION_ALLOWED_LANGUAGES: ${TRANSCRIPTION_ALLOWED_LANGUAGES:-}
+      TRANSCRIPTION_TIMESTAMP_MODE: ${TRANSCRIPTION_TIMESTAMP_MODE:-none}
+      TRANSCRIPTION_TIMESTAMP_MODEL: ${TRANSCRIPTION_TIMESTAMP_MODEL:-whisper-1}
+      TRANSCRIPTION_RESPONSE_FORMAT: ${TRANSCRIPTION_RESPONSE_FORMAT:-json}
+      TRANSCRIPTION_SPEAKER_REQUIRED: ${TRANSCRIPTION_SPEAKER_REQUIRED:-false}
+      TRANSCRIPTION_CHUNKING_STRATEGY: ${TRANSCRIPTION_CHUNKING_STRATEGY:-auto}
+      TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES: ${TRANSCRIPTION_OPENAI_SINGLE_REQUEST_MAX_BYTES:-20000000}
+      TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES: ${TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES:-0}
+      TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES: ${TRANSCRIPTION_OPENAI_CHUNK_MAX_BYTES:-15000000}
+      TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS: ${TRANSCRIPTION_OPENAI_CHUNK_DURATION_SECONDS:-600}
+      TRANSCRIPTION_OPENAI_MAX_CHUNKS: ${TRANSCRIPTION_OPENAI_MAX_CHUNKS:-1024}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://openrouter.ai/api/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-}
@@ -340,16 +610,74 @@ services:
       TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
       BOT_WORKER_URL: ${BOT_WORKER_URL:-http://worker-bot:8002}
       SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
       LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
     depends_on:
       - redis
 
-  # ---- Local single-machine services (profile: local) ----
+  # RunPod split services keep the local service definitions and their GPU-local
+  # defaults isolated from cloud-specific provider selection.
+  api-cloud:
+    <<: *api-service
+    profiles: [cloud]
+    environment:
+      <<: *api-environment
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_BACKEND:-runpod}
+      TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_BACKEND:-runpod}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+    networks:
+      default:
+        aliases: [api]
+
+  worker-cloud:
+    <<: *worker-service
+    profiles: [cloud]
+    environment:
+      <<: *worker-environment
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_BACKEND:-runpod}
+      TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_BACKEND:-runpod}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+
+  beat-cloud:
+    <<: *beat-service
+    profiles: [cloud]
+    environment:
+      <<: *beat-environment
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-s3}
+      TRANSCRIPTION_PROVIDER: ${TRANSCRIPTION_BACKEND:-runpod}
+      TRANSCRIPTION_BACKEND: ${TRANSCRIPTION_BACKEND:-runpod}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-production}
+
+  # Optional TLS gateway for the advanced RunPod split profile.
+  kong:
+    image: kong:3.6
+    restart: unless-stopped
+    profiles: [kong]
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /etc/kong/kong.yml
+      KONG_PROXY_LISTEN: "0.0.0.0:8000, 0.0.0.0:8443 ssl"
+      KONG_ADMIN_LISTEN: "127.0.0.1:8100"
+      KONG_LOG_LEVEL: notice
+      KONG_SSL_CERT: /etc/kong/ssl/origin.pem
+      KONG_SSL_CERT_KEY: /etc/kong/ssl/origin.key
+    volumes:
+      - ./kong/kong.yml:/etc/kong/kong.yml:ro
+      - ./kong/ssl:/etc/kong/ssl:ro
+    ports:
+      - "80:8000"
+      - "443:8443"
+    depends_on:
+      - api-cloud
+
+  # ---- Local stateful services (profiles: local, cpu, local-actsis) ----
   db:
     image: postgres:16-alpine
     restart: unless-stopped
     mem_limit: ${ZABT_MEMORY_LIMIT_DB:-768m}
-    profiles: [local]
+    profiles: [local, cpu, local-actsis]
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-app}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-app}
@@ -371,7 +699,7 @@ services:
     image: ghcr.io/danielrondongarcia/zabt-ai-minio:latest
     restart: unless-stopped
     mem_limit: ${ZABT_MEMORY_LIMIT_MINIO:-768m}
-    profiles: [local]
+    profiles: [local, cpu, local-actsis]
     environment:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-minioadmin}
@@ -388,7 +716,7 @@ services:
 
   minio-init:
     image: ghcr.io/danielrondongarcia/zabt-ai-mc:latest
-    profiles: [local]
+    profiles: [local, cpu, local-actsis]
     depends_on:
       - minio
     restart: "no"
@@ -404,14 +732,14 @@ services:
 
   # Local GPU transcription worker. Uses the NVIDIA GPU if available and the NVIDIA
   # Container Toolkit is installed; otherwise the image auto-falls-back to CPU int8
-  # (slow). For an explicit CPU-only run see docker-compose.cpu.yml.
+  # (slow). Use the cpu profile for the CPU-only worker image.
   worker-gpu:
     image: zabt-gpu-worker:latest
     restart: unless-stopped
     # Protective cap for local GPU memory. The default large-v3 + pyannote workload
     # may need a smaller model or a higher explicit override if it is OOM-killed.
     mem_limit: ${ZABT_MEMORY_LIMIT_WORKER_GPU:-4g}
-    profiles: [local]
+    profiles: [local, gpu]
     build:
       context: ./zabt-gpu-worker
     ports:
@@ -439,17 +767,43 @@ services:
               count: all
               capabilities: [gpu]
 
+  worker-gpu-cpu:
+    image: zabt-gpu-worker:cpu
+    restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_WORKER_GPU:-4g}
+    profiles: [cpu]
+    build:
+      context: ./zabt-gpu-worker
+      dockerfile: Dockerfile.cpu
+    ports:
+      - "${ZABT_WORKER_HOST_PORT:-8002}:8001"
+    environment:
+      MODE: local
+      PORT: 8001
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-3.1}
+      MEDASR_MODEL: ${MEDASR_MODEL:-google/medasr}
+      HF_TOKEN: ${HF_TOKEN:-}
+      DIARIZATION_MIN_SPEAKERS: ${DIARIZATION_MIN_SPEAKERS:-1}
+      DIARIZATION_MAX_SPEAKERS: ${DIARIZATION_MAX_SPEAKERS:-10}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: ${SENTRY_ENVIRONMENT:-development}
+      LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+    volumes:
+      - worker_model_cache:/root/.cache
+    networks:
+      default:
+        aliases: [worker-gpu]
+
   web:
     image: zabt-web:latest
     restart: unless-stopped
     mem_limit: ${ZABT_MEMORY_LIMIT_WEB:-512m}
-    profiles: [local]
+    profiles: [local, cpu, local-actsis]
     build:
       context: .
       dockerfile: frontend-2/Dockerfile
       args:
-        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
-        NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:-http://localhost:3001}
         NEXT_PUBLIC_POSTHOG_KEY: ${NEXT_PUBLIC_POSTHOG_KEY:-}
         NEXT_PUBLIC_POSTHOG_HOST: ${NEXT_PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}
         NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
@@ -457,14 +811,401 @@ services:
     ports:
       - "3001:3000"
     environment:
-      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
-      NEXT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:-http://localhost:3001}
+      ZABT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api/v1}
+      ZABT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:-http://localhost:3001}
       NEXT_PUBLIC_POSTHOG_KEY: ${NEXT_PUBLIC_POSTHOG_KEY:-}
       NEXT_PUBLIC_POSTHOG_HOST: ${NEXT_PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}
       NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
       NEXT_PUBLIC_SENTRY_ENVIRONMENT: ${NEXT_PUBLIC_SENTRY_ENVIRONMENT:-development}
     depends_on:
       - api
+
+  # ---- Cloud production GHCR stack (profile: cloud-prod) ----
+  # These services intentionally use no `build:` fallback. Set ZABT_IMAGE_TAG in
+  # the root .env to a published immutable release tag before pulling or starting.
+  db-cloud-prod:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_DB:-768m}
+    profiles: [cloud-prod]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-zabt}
+    depends_on:
+      cloud-prod-env-check:
+        condition: service_completed_successfully
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      default:
+        aliases: [db]
+
+  minio-cloud-prod:
+    image: ghcr.io/danielrondongarcia/zabt-ai-minio:${ZABT_IMAGE_TAG:-missing-zabt-image-tag}
+    pull_policy: always
+    restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_MINIO:-768m}
+    profiles: [cloud-prod]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-}
+      MINIO_NOTIFY_WEBHOOK_ENABLE_PRIMARY: "on"
+      MINIO_NOTIFY_WEBHOOK_ENDPOINT_PRIMARY: http://api:8000/api/v1/webhooks/minio
+      MINIO_NOTIFY_WEBHOOK_AUTH_TOKEN_PRIMARY: "Bearer ${MINIO_WEBHOOK_SECRET:-}"
+      MINIO_NOTIFY_WEBHOOK_QUEUE_DIR_PRIMARY: /data/.minio/events
+    depends_on:
+      cloud-prod-env-check:
+        condition: service_completed_successfully
+    command: server /data --console-address ":9001"
+    ports:
+      - "${MINIO_HOST_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_HOST_PORT:-9001}:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      default:
+        aliases: [minio]
+
+  minio-init-cloud-prod:
+    image: ghcr.io/danielrondongarcia/zabt-ai-mc:${ZABT_IMAGE_TAG:-missing-zabt-image-tag}
+    pull_policy: always
+    profiles: [cloud-prod]
+    depends_on:
+      - minio-cloud-prod
+    restart: "no"
+    mem_limit: ${ZABT_MEMORY_LIMIT_MINIO_INIT:-128m}
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-}
+      MINIO_BUCKET_NAME: ${MINIO_BUCKET_NAME:-zabt-ai-bucket}
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        sleep 5
+        mc alias set myminio http://minio:9000 "$$MINIO_ACCESS_KEY" "$$MINIO_SECRET_KEY"
+        mc mb --ignore-existing "myminio/$$MINIO_BUCKET_NAME"
+        mc event add "myminio/$$MINIO_BUCKET_NAME" arn:minio:sqs::PRIMARY:webhook --event put --ignore-existing
+        echo "MinIO bucket + webhook configured"
+
+  api-cloud-prod:
+    image: ghcr.io/danielrondongarcia/zabt-ai-api:${ZABT_IMAGE_TAG:-missing-zabt-image-tag}
+    pull_policy: always
+    restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_API:-768m}
+    profiles: [cloud-prod]
+    command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap_superuser && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - media_data:/media
+    environment:
+      <<: [*cloud-prod-backend-environment, *cloud-prod-storage-environment, *cloud-prod-transcription-environment]
+      AUTH_ALLOWED_ORIGINS: ${AUTH_ALLOWED_ORIGINS:-}
+      BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-}
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
+      BOOTSTRAP_SUPERUSER_EMAIL: ${BOOTSTRAP_SUPERUSER_EMAIL:-}
+      BOOTSTRAP_SUPERUSER_PASSWORD: ${BOOTSTRAP_SUPERUSER_PASSWORD:-}
+      MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-http://localhost:9000}
+      MINIO_WEBHOOK_SECRET: ${MINIO_WEBHOOK_SECRET:-}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      VISION_ENABLED: "true"
+      VISION_BACKEND: local
+      VISION_LOCAL_URL: http://zabt-vision-worker:8003
+      VISION_INFERENCE_BACKEND: openai
+      VISION_JUDGE_MODEL: ${VISION_JUDGE_MODEL:-gpt-4o-mini}
+      VISION_REQUIRE_VISION: "true"
+      VISION_CLOUD_ALLOWED: "true"
+      VISION_EGRESS_POLICY: allowlist
+      VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:-api.openai.com}
+      VISION_OPENAI_BASE_URL: ${VISION_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      VISION_OPENAI_MODEL: ${VISION_OPENAI_MODEL:-gpt-4o-mini}
+      VISION_OPENAI_IMAGE_DETAIL: ${VISION_OPENAI_IMAGE_DETAIL:-low}
+      VISION_OPENAI_MAX_TOKENS: ${VISION_OPENAI_MAX_TOKENS:-1024}
+      VISION_MAX_RETRIES: ${VISION_MAX_RETRIES:-2}
+      VISION_RETRY_BACKOFF_SECONDS: ${VISION_RETRY_BACKOFF_SECONDS:-5}
+      VISION_POLL_INTERVAL: ${VISION_POLL_INTERVAL:-5}
+      VISION_TIMEOUT: ${VISION_TIMEOUT:-1800}
+      VISION_SIGNED_URL_EXPIRATION: ${VISION_SIGNED_URL_EXPIRATION:-3600}
+    depends_on:
+      cloud-prod-env-check:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      db-cloud-prod:
+        condition: service_healthy
+      minio-init-cloud-prod:
+        condition: service_completed_successfully
+      worker-gpu-cloud-prod:
+        condition: service_started
+      zabt-vision-worker-cloud-prod:
+        condition: service_started
+    networks:
+      default:
+        aliases: [api]
+
+  worker-cloud-prod:
+    image: ghcr.io/danielrondongarcia/zabt-ai-worker:${ZABT_IMAGE_TAG:-missing-zabt-image-tag}
+    pull_policy: always
+    restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_WORKER:-1g}
+    profiles: [cloud-prod]
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=${CELERY_WORKER_CONCURRENCY:-2}"]
+    volumes:
+      - media_data:/media
+    environment:
+      <<: [*cloud-prod-backend-environment, *cloud-prod-storage-environment, *cloud-prod-transcription-environment]
+      VISION_ENABLED: "true"
+      VISION_BACKEND: local
+      VISION_LOCAL_URL: http://zabt-vision-worker:8003
+      VISION_INFERENCE_BACKEND: openai
+      VISION_JUDGE_MODEL: ${VISION_JUDGE_MODEL:-gpt-4o-mini}
+      VISION_REQUIRE_VISION: "true"
+      VISION_CLOUD_ALLOWED: "true"
+      VISION_EGRESS_POLICY: allowlist
+      VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:-api.openai.com}
+      VISION_OPENAI_BASE_URL: ${VISION_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      VISION_OPENAI_MODEL: ${VISION_OPENAI_MODEL:-gpt-4o-mini}
+      VISION_OPENAI_IMAGE_DETAIL: ${VISION_OPENAI_IMAGE_DETAIL:-low}
+      VISION_OPENAI_MAX_TOKENS: ${VISION_OPENAI_MAX_TOKENS:-1024}
+      VISION_SIGNED_URL_EXPIRATION: ${VISION_SIGNED_URL_EXPIRATION:-3600}
+      VISION_MAX_RETRIES: ${VISION_MAX_RETRIES:-2}
+      VISION_RETRY_BACKOFF_SECONDS: ${VISION_RETRY_BACKOFF_SECONDS:-5}
+      VISION_POLL_INTERVAL: ${VISION_POLL_INTERVAL:-5}
+      VISION_TIMEOUT: ${VISION_TIMEOUT:-1800}
+    depends_on:
+      cloud-prod-env-check:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      db-cloud-prod:
+        condition: service_healthy
+      minio-init-cloud-prod:
+        condition: service_completed_successfully
+      worker-gpu-cloud-prod:
+        condition: service_started
+      zabt-vision-worker-cloud-prod:
+        condition: service_started
+
+  beat-cloud-prod:
+    image: ghcr.io/danielrondongarcia/zabt-ai-worker:${ZABT_IMAGE_TAG:-missing-zabt-image-tag}
+    pull_policy: always
+    restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_BEAT:-256m}
+    profiles: [cloud-prod]
+    command: ["celery", "-A", "app.worker.celery_app", "beat", "--loglevel=info"]
+    environment:
+      <<: *cloud-prod-backend-environment
+      TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS: ${TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS:-600}
+      TRANSCRIPTION_OPENAI_MAX_RETRIES: ${TRANSCRIPTION_OPENAI_MAX_RETRIES:-2}
+      MEETING_RECOVERY_GRACE_SECONDS: ${MEETING_RECOVERY_GRACE_SECONDS:-900}
+    depends_on:
+      cloud-prod-env-check:
+        condition: service_completed_successfully
+      redis:
+        condition: service_started
+      db-cloud-prod:
+        condition: service_healthy
+
+  web-cloud-prod:
+    image: ghcr.io/danielrondongarcia/zabt-ai-web:${ZABT_IMAGE_TAG:-missing-zabt-image-tag}
+    pull_policy: always
+    restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_WEB:-512m}
+    profiles: [cloud-prod]
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      ZABT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+      ZABT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:-}
+      NEXT_PUBLIC_POSTHOG_KEY: ${NEXT_PUBLIC_POSTHOG_KEY:-}
+      NEXT_PUBLIC_POSTHOG_HOST: ${NEXT_PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}
+      NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+      NEXT_PUBLIC_SENTRY_ENVIRONMENT: production
+    depends_on:
+      - api-cloud-prod
+
+  worker-gpu-cloud-prod:
+    image: ghcr.io/danielrondongarcia/zabt-ai-gpu-worker:${ZABT_IMAGE_TAG:-missing-zabt-image-tag}
+    pull_policy: always
+    restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_WORKER_GPU:-4g}
+    profiles: [cloud-prod]
+    environment:
+      MODE: local
+      PORT: 8001
+      WHISPER_MODEL: ${WHISPER_MODEL:-large-v3}
+      DIARIZATION_MODEL: ${DIARIZATION_MODEL:-pyannote/speaker-diarization-3.1}
+      MEDASR_MODEL: ${MEDASR_MODEL:-google/medasr}
+      HF_TOKEN: ${HF_TOKEN:-}
+      DIARIZATION_MIN_SPEAKERS: ${DIARIZATION_MIN_SPEAKERS:-1}
+      DIARIZATION_MAX_SPEAKERS: ${DIARIZATION_MAX_SPEAKERS:-10}
+      SENTRY_DSN: ${SENTRY_DSN:-}
+      SENTRY_ENVIRONMENT: production
+      LOGFIRE_TOKEN: ${LOGFIRE_TOKEN:-}
+    volumes:
+      - worker_model_cache:/root/.cache
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    depends_on:
+      cloud-prod-env-check:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases: [worker-gpu]
+
+  zabt-vision-worker-cloud-prod:
+    image: ghcr.io/danielrondongarcia/zabt-ai-vision-worker:${ZABT_IMAGE_TAG:-missing-zabt-image-tag}
+    pull_policy: always
+    restart: unless-stopped
+    mem_limit: ${ZABT_MEMORY_LIMIT_VISION_WORKER:-1g}
+    profiles: [cloud-prod]
+    environment:
+      VISION_ENABLED: "true"
+      VISION_INFERENCE_BACKEND: openai
+      VISION_JUDGE_MODEL: ${VISION_JUDGE_MODEL:-gpt-4o-mini}
+      VISION_CLOUD_ALLOWED: "true"
+      VISION_EGRESS_POLICY: allowlist
+      VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:-api.openai.com}
+      VISION_OPENAI_API_KEY: ${VISION_OPENAI_API_KEY:-}
+      VISION_OPENAI_BASE_URL: ${VISION_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      VISION_OPENAI_MODEL: ${VISION_OPENAI_MODEL:-gpt-4o-mini}
+      VISION_OPENAI_IMAGE_DETAIL: ${VISION_OPENAI_IMAGE_DETAIL:-low}
+      VISION_OPENAI_MAX_TOKENS: ${VISION_OPENAI_MAX_TOKENS:-1024}
+      VISION_REQUIRE_VISION: "true"
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: ${MINIO_ACCESS_KEY:-}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_SECRET_KEY:-}
+      S3_BUCKET: ${MINIO_BUCKET_NAME:-zabt-ai-bucket}
+      OCR_USE_GPU: "false"
+      OLLAMA_NO_CLOUD: "1"
+    depends_on:
+      cloud-prod-env-check:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases: [zabt-vision-worker]
+
+  # ---- Full-cloud application-only topology (profile: full-cloud) ----
+  # Required variable presence is checked before app containers start. The check
+  # receives only boolean flags, never secret values.
+  full-cloud-env-check:
+    image: alpine:3.22
+    restart: "no"
+    profiles: [full-cloud]
+    environment:
+      <<: *full-cloud-required-environment
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      - |
+        test "$$HAS_ZABT_API_IMAGE" = 1 || { echo "ZABT_API_IMAGE must be set in root .env" >&2; exit 1; }
+        test "$$HAS_ZABT_WORKER_IMAGE" = 1 || { echo "ZABT_WORKER_IMAGE must be set in root .env" >&2; exit 1; }
+        test "$$HAS_ZABT_WEB_IMAGE" = 1 || { echo "ZABT_WEB_IMAGE must be set in root .env" >&2; exit 1; }
+        test "$$HAS_DATABASE_URL" = 1 || { echo "DATABASE_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_REDIS_URL" = 1 || { echo "REDIS_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_AUTH_JWT_SECRET" = 1 || { echo "AUTH_JWT_SECRET must be set in root .env" >&2; exit 1; }
+        test "$$HAS_AUTH_ALLOWED_ORIGINS" = 1 || { echo "AUTH_ALLOWED_ORIGINS must be set in root .env" >&2; exit 1; }
+        test "$$HAS_BACKEND_CORS_ORIGINS" = 1 || { echo "BACKEND_CORS_ORIGINS must be set in root .env" >&2; exit 1; }
+        test "$$HAS_APP_URL" = 1 || { echo "APP_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_MCP_PUBLIC_URL" = 1 || { echo "MCP_PUBLIC_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_S3_ENDPOINT_URL" = 1 || { echo "S3_ENDPOINT_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_S3_ACCESS_KEY_ID" = 1 || { echo "S3_ACCESS_KEY_ID must be set in root .env" >&2; exit 1; }
+        test "$$HAS_S3_SECRET_ACCESS_KEY" = 1 || { echo "S3_SECRET_ACCESS_KEY must be set in root .env" >&2; exit 1; }
+        test "$$HAS_S3_BUCKET_NAME" = 1 || { echo "S3_BUCKET_NAME must be set in root .env" >&2; exit 1; }
+        test "$$HAS_S3_PUBLIC_URL" = 1 || { echo "S3_PUBLIC_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_ACTSIS_API_KEY" = 1 || { echo "ACTSIS_API_KEY must be set in root .env" >&2; exit 1; }
+        test "$$HAS_TRANSCRIPTION_BASE_URL" = 1 || { echo "TRANSCRIPTION_BASE_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_EMBEDDING_BASE_URL" = 1 || { echo "EMBEDDING_BASE_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_EMBEDDING_MODEL" = 1 || { echo "EMBEDDING_MODEL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_EMBEDDING_DIMENSION" = 1 || { echo "EMBEDDING_DIMENSION must be set in root .env" >&2; exit 1; }
+        test "$$HAS_QDRANT_URL" = 1 || { echo "QDRANT_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_QDRANT_API_KEY" = 1 || { echo "QDRANT_API_KEY must be set in root .env" >&2; exit 1; }
+        test "$$HAS_OPENAI_BASE_URL" = 1 || { echo "OPENAI_BASE_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_OPENAI_API_KEY" = 1 || { echo "OPENAI_API_KEY must be set in root .env" >&2; exit 1; }
+        test "$$HAS_AI_CHAT_BASE_URL" = 1 || { echo "AI_CHAT_BASE_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_VISION_ALLOWED_HOSTS" = 1 || { echo "VISION_ALLOWED_HOSTS must be set in root .env" >&2; exit 1; }
+        test "$$HAS_VISION_OPENAI_API_KEY" = 1 || { echo "VISION_OPENAI_API_KEY must be set in root .env" >&2; exit 1; }
+        test "$$HAS_VISION_OPENAI_BASE_URL" = 1 || { echo "VISION_OPENAI_BASE_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_NEXT_PUBLIC_API_URL" = 1 || { echo "NEXT_PUBLIC_API_URL must be set in root .env" >&2; exit 1; }
+        test "$$HAS_NEXT_PUBLIC_FRONTEND_URL" = 1 || { echo "NEXT_PUBLIC_FRONTEND_URL must be set in root .env" >&2; exit 1; }
+        echo "Full-cloud configuration is present."
+
+  api-full-cloud:
+    image: ${ZABT_API_IMAGE:-missing-required-full-cloud-api-image}
+    restart: unless-stopped
+    profiles: [full-cloud]
+    command: ["sh", "-c", "alembic upgrade head && python -m app.bootstrap_superuser && uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers --forwarded-allow-ips='*'"]
+    ports:
+      - "${API_PORT:-8000}:8000"
+    environment:
+      <<: *full-cloud-backend-environment
+      BOOTSTRAP_SUPERUSER_EMAIL: ${BOOTSTRAP_SUPERUSER_EMAIL:-}
+      BOOTSTRAP_SUPERUSER_PASSWORD: ${BOOTSTRAP_SUPERUSER_PASSWORD:-}
+    depends_on:
+      full-cloud-env-check:
+        condition: service_completed_successfully
+    networks:
+      default:
+        aliases: [api]
+
+  worker-full-cloud:
+    image: ${ZABT_WORKER_IMAGE:-missing-required-full-cloud-worker-image}
+    restart: unless-stopped
+    profiles: [full-cloud]
+    command: ["celery", "-A", "app.worker.celery_app", "worker", "--loglevel=info", "--concurrency=${CELERY_WORKER_CONCURRENCY:-2}"]
+    environment:
+      <<: *full-cloud-backend-environment
+    depends_on:
+      full-cloud-env-check:
+        condition: service_completed_successfully
+
+  beat-full-cloud:
+    image: ${ZABT_WORKER_IMAGE:-missing-required-full-cloud-worker-image}
+    restart: unless-stopped
+    profiles: [full-cloud]
+    command: ["celery", "-A", "app.worker.celery_app", "beat", "--loglevel=info"]
+    environment:
+      <<: *full-cloud-backend-environment
+    depends_on:
+      full-cloud-env-check:
+        condition: service_completed_successfully
+
+  web-full-cloud:
+    image: ${ZABT_WEB_IMAGE:-missing-required-full-cloud-web-image}
+    restart: unless-stopped
+    profiles: [full-cloud]
+    ports:
+      - "${WEB_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      ZABT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-}
+      ZABT_PUBLIC_FRONTEND_URL: ${NEXT_PUBLIC_FRONTEND_URL:-}
+      NEXT_PUBLIC_POSTHOG_KEY: ${NEXT_PUBLIC_POSTHOG_KEY:-}
+      NEXT_PUBLIC_POSTHOG_HOST: ${NEXT_PUBLIC_POSTHOG_HOST:-https://us.i.posthog.com}
+      NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
+      NEXT_PUBLIC_SENTRY_ENVIRONMENT: production
+    depends_on:
+      full-cloud-env-check:
+        condition: service_completed_successfully
+      api-full-cloud:
+        condition: service_started
 
   # ---- Optional add-ons ----
   # Teams meeting bot (headless browser). Enable by adding "bot" to COMPOSE_PROFILES.
@@ -500,12 +1241,12 @@ services:
 
   # Visual breakdown worker. Supports local Ollama or explicit OpenAI cloud inference.
   # Enable the profile and VISION_ENABLED explicitly; the default remains disabled.
-  # Vector store for embeddings (Qdrant). Enable with the local profile.
+  # Vector store for local embeddings. Enabled for local, CPU, and local Actsis modes.
   qdrant:
     image: qdrant/qdrant:latest
     restart: unless-stopped
     mem_limit: ${ZABT_MEMORY_LIMIT_QDRANT:-512m}
-    profiles: [local]
+    profiles: [local, cpu, local-actsis]
     ports:
       - "6333:6333"
     volumes:
@@ -563,3 +1304,6 @@ volumes:
   minio_data:
   worker_model_cache:
   qdrant_data:
+
+networks:
+  default: {}

@@ -86,9 +86,7 @@ First run downloads the Whisper + pyannote model weights (several GB) into a cac
 
 No NVIDIA GPU? Run transcription on CPU (slow — use a smaller `WHISPER_MODEL` like `base`):
 
-```bash
-docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
-```
+Set `COMPOSE_PROFILES=cpu` in the root `.env`, then run `docker compose up -d`.
 
 ### pyannote Hugging Face gate (required)
 
@@ -144,8 +142,10 @@ plus ~2-4 GB for pyannote diarization:
 | Topology | Command | Use |
 |----------|---------|-----|
 | Single machine (default) | `docker compose up -d` | Self-host everything on one box with a local GPU |
-| CPU-only | `docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d` | No GPU available |
-| Cloud / RunPod split | `docker compose -f docker-compose.yml -f docker-compose.cloud.yml up -d` | Small API VPS + serverless GPU; managed DB/storage |
+| CPU-only | Set `COMPOSE_PROFILES=cpu` in root `.env`, then run `docker compose up -d` | No GPU available |
+| Cloud / RunPod split | Set `COMPOSE_PROFILES=cloud,kong` in root `.env`, then run `docker compose up -d` | Small API VPS + serverless GPU; managed DB/storage |
+| Full cloud | Set `COMPOSE_PROFILES=full-cloud` in root `.env`, then run `docker compose up -d` | External Postgres, Redis, S3, Qdrant, Actsis, and OpenAI |
+| Cloud production | Set `COMPOSE_PROFILES=cloud-prod` in root `.env`, then run `docker compose up -d` | Single-host GHCR-pinned stack; requires a compatible runtime-config web image |
 
 See [docs/self-hosting.md](docs/self-hosting.md) and
 [docs/advanced-runpod-split.md](docs/advanced-runpod-split.md). Full variable reference:

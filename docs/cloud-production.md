@@ -2,55 +2,41 @@
 
 > **Topology note:** This guide documents the single-machine `cloud-prod` stack with local stateful
 > services and model workers. For the managed-dependency topology with no local infrastructure or
-> model workers, use [`full-cloud-deployment.md`](./full-cloud-deployment.md) and
-> `docker-compose.full-cloud.yml` instead.
+> model workers, use the `full-cloud` profile and [`full-cloud-deployment.md`](./full-cloud-deployment.md).
 
-`docker-compose.cloud.prod.yml` runs a production image stack on one machine. The API, backend
-worker, web app, GPU worker, MinIO server, and `mc` initializer use Zabt-owned GHCR release images;
-PostgreSQL and Redis remain local services. The vision worker is also published to GHCR and required
-by this topology. Summaries and visual analysis use first-party OpenAI cloud inference. NetBird,
-Caddy, or another external reverse proxy terminates TLS and forwards HTTP to the published web and
-API ports.
+The `cloud-prod` profile in `docker-compose.yml` runs a production image stack on one machine. The
+API, backend worker, web app, GPU worker, MinIO server, `mc` initializer, and vision worker use
+Zabt-owned GHCR release images; PostgreSQL and Redis remain local services. Summaries and visual
+analysis use first-party OpenAI cloud inference. NetBird, Caddy, or another external reverse proxy
+terminates TLS and forwards HTTP to the published web and API ports.
+
+> **Web image compatibility gate:** Do not deploy the currently published `v1.0.0` web image with
+> this configuration; it predates the `/api/runtime-config` route. A future release containing that
+> route in its web image must be built and published before the first cloud deployment. Confirm that
+> release is available before setting `ZABT_IMAGE_TAG`; no release version is assumed here.
 
 ## Quick path
 
 Run all commands below from the repository root, the directory containing `docker-compose.yml`.
 
-1. Use Docker Compose v2.24.4 or newer (required for `!override` and `!reset`), install the NVIDIA
-   driver/container toolkit for local transcription, and confirm GHCR pull access.
-2. Keep real values in the deployment host's `.env` or secret-management layer; never commit that
-   file. Set `ZABT_IMAGE_TAG=v1.0.0` for the first deployment and `COMPOSE_PROFILES=cloud-prod` in
-   the process environment so it overrides a conflicting local profile value from `.env`.
-3. Pull the pinned images and start the stack. This release path intentionally does not use
-   local builds:
+1. Use Docker Compose v2.24.4 or newer, install the NVIDIA driver/container toolkit for local
+   transcription, and confirm GHCR pull access.
+2. Confirm a published release contains the `/api/runtime-config` route, then copy `.env.example` to
+   the root `.env` if needed. Set `COMPOSE_PROFILES=cloud-prod`, `ZABT_IMAGE_TAG` to that compatible
+   immutable release, and the deployment values listed below. Keep real credentials in `.env` or a
+   secret-management layer; never commit that file.
+3. Pull the pinned images and start the stack. Production services have no local `build:` fallback:
 
-   **PowerShell**
-
-   ```powershell
-   $env:COMPOSE_PROFILES="cloud-prod"
-   docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml pull
-   docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml up -d --no-build
-   ```
-
-   **POSIX shell**
-
-   ```bash
-   export COMPOSE_PROFILES=cloud-prod
-   docker compose \
-     -f docker-compose.yml \
-     -f docker-compose.cloud.prod.yml \
-     pull
-   docker compose \
-     -f docker-compose.yml \
-     -f docker-compose.cloud.prod.yml \
-     up -d --no-build
+   ```sh
+   docker compose pull
+   docker compose up -d --no-build
    ```
 
 4. Inspect the service state and focused logs before routing traffic through the reverse proxy:
 
    ```bash
-   docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml ps
-   docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml logs --tail=200 api worker beat web worker-gpu zabt-vision-worker
+   docker compose ps
+   docker compose logs --tail=200 api-cloud-prod worker-cloud-prod beat-cloud-prod web-cloud-prod worker-gpu-cloud-prod zabt-vision-worker-cloud-prod
    ```
 
    On PowerShell, `Invoke-WebRequest http://127.0.0.1:3000/` checks the web listener and
@@ -65,20 +51,22 @@ Run all commands below from the repository root, the directory containing `docke
 
 | Service | Runtime source | Production role | Host port |
 |---|---|---|---|
-| `api` | `ghcr.io/danielrondongarcia/zabt-ai-api:${ZABT_IMAGE_TAG}` | FastAPI API, local MinIO client, OpenAI summary settings | `8000` |
-| `worker` / `beat` | `ghcr.io/danielrondongarcia/zabt-ai-worker:${ZABT_IMAGE_TAG}` | Celery processing and scheduled tasks | none |
-| `web` | `ghcr.io/danielrondongarcia/zabt-ai-web:${ZABT_IMAGE_TAG}` | Next.js production web app | `3000` |
+| `api-cloud-prod` | `ghcr.io/danielrondongarcia/zabt-ai-api:${ZABT_IMAGE_TAG}` | FastAPI API, local MinIO client, OpenAI summary settings | `8000` |
+| `worker-cloud-prod` / `beat-cloud-prod` | `ghcr.io/danielrondongarcia/zabt-ai-worker:${ZABT_IMAGE_TAG}` | Celery processing and scheduled tasks | none |
+| `web-cloud-prod` | `ghcr.io/danielrondongarcia/zabt-ai-web:${ZABT_IMAGE_TAG}` | Next.js production web app | `3000` |
+| `cloud-prod-env-check` | `alpine:3.22` | Checks required variable presence using boolean flags only | none |
 | `redis` | Base Compose image | Local broker | none |
-| `db` | Base Compose `postgres:16-alpine` | Local PostgreSQL with `postgres_data` volume | `5433` |
-| `minio` | `ghcr.io/danielrondongarcia/zabt-ai-minio:${ZABT_IMAGE_TAG}` | Zabt-built MinIO object storage server | `9000`, `9001` |
-| `minio-init` | `ghcr.io/danielrondongarcia/zabt-ai-mc:${ZABT_IMAGE_TAG}` | Creates the bucket and configures its webhook event | none |
-| `worker-gpu` | `ghcr.io/danielrondongarcia/zabt-ai-gpu-worker:${ZABT_IMAGE_TAG}` | Local WhisperX/diarization transcription over `worker-gpu:8001` | **none** |
-| `zabt-vision-worker` | `ghcr.io/danielrondongarcia/zabt-ai-vision-worker:${ZABT_IMAGE_TAG}` | Internal visual pipeline with OpenAI inference | **none** |
+| `db-cloud-prod` | `postgres:16-alpine` | Local PostgreSQL with `postgres_data` volume | `5433` |
+| `minio-cloud-prod` | `ghcr.io/danielrondongarcia/zabt-ai-minio:${ZABT_IMAGE_TAG}` | Zabt-built MinIO object storage server | `9000`, `9001` |
+| `minio-init-cloud-prod` | `ghcr.io/danielrondongarcia/zabt-ai-mc:${ZABT_IMAGE_TAG}` | Creates the bucket and configures its webhook event | none |
+| `worker-gpu-cloud-prod` | `ghcr.io/danielrondongarcia/zabt-ai-gpu-worker:${ZABT_IMAGE_TAG}` | Local WhisperX/diarization transcription over `worker-gpu:8001` | **none** |
+| `zabt-vision-worker-cloud-prod` | `ghcr.io/danielrondongarcia/zabt-ai-vision-worker:${ZABT_IMAGE_TAG}` | Internal visual pipeline with OpenAI inference | **none** |
 
-The `cloud-prod` profile activates `db`, `minio`, `minio-init`, `worker-gpu`, `web`, and
-`zabt-vision-worker`. The base `redis`, `api`, `worker`, and `beat` services remain always-on.
-`worker-bot` is not activated because its separate `bot` profile is not selected. Named volumes and
-the base service names are inherited so backend-to-service networking remains local:
+The `cloud-prod` profile activates the production-suffixed services in the table. Redis remains
+always-on. The production services expose internal network aliases `api`, `db`, `minio`,
+`worker-gpu`, and `zabt-vision-worker`, so application URLs keep their established service names.
+`worker-bot` is not activated because its separate `bot` profile is not selected. Named volumes are
+shared with the local profile:
 
 - `DATABASE_URL` points to `db:5432`.
 - `REDIS_URL` is fixed to `redis://redis:6379/0`.
@@ -91,23 +79,31 @@ the base service names are inherited so backend-to-service networking remains lo
 
 ## Required launch setting
 
-Set `COMPOSE_PROFILES=cloud-prod` for every Compose command in this guide. The process-level value
-overrides a conflicting `COMPOSE_PROFILES=local` entry in `.env`; it is not a secret and is not an
-interpolated deployment variable.
+Set `COMPOSE_PROFILES=cloud-prod` in the root `.env` for every Compose command in this guide. The
+profile is loaded with the rest of the deployment configuration; it is not a secret.
 
 ## Required deployment variables
 
-The override requires `ZABT_IMAGE_TAG`, `MCP_PUBLIC_URL`, `MINIO_WEBHOOK_SECRET`, the database and
-authentication settings, MinIO and OpenAI credentials, and the public web URLs. The example uses the first `v1.0.0` release;
-use another published immutable version only when that release contains the same stack contract.
-Docker Compose v2.24.4 or newer is required for the `!override` and `!reset` merge tags used to remove
-inherited local `build:` settings safely.
+The production profile requires `ZABT_IMAGE_TAG`, `MCP_PUBLIC_URL`, `MINIO_WEBHOOK_SECRET`, the
+database and authentication settings, MinIO and OpenAI credentials, and the public web URLs. Set
+them in the root `.env`; Compose passes each value only to the services that need it. Use only a
+published immutable release whose web image contains `/api/runtime-config`; do not use the currently
+published `v1.0.0` web image. If `ZABT_IMAGE_TAG` is unset, Compose resolves a deliberately
+non-release tag and the pull fails rather than falling back to a build or `latest`.
+The `cloud-prod-env-check` service also blocks dependent production services when required values
+are absent; it receives only presence flags and reports missing variable names, never secret values.
 
 ```dotenv
+# Select only the production services from docker-compose.yml.
+COMPOSE_PROFILES=cloud-prod
+
 # One immutable release tag selects all production application images.
-ZABT_IMAGE_TAG=v1.0.0
+ZABT_IMAGE_TAG=<published-compatible-release-tag>
 
 # Local PostgreSQL in the Compose network
+POSTGRES_USER=<postgres-user>
+POSTGRES_PASSWORD=<random-postgres-password>
+POSTGRES_DB=<postgres-db>
 DATABASE_URL=postgresql+asyncpg://<postgres-user>:<postgres-password>@db:5432/<postgres-db>
 
 # First-party local authentication and public origins
@@ -119,7 +115,7 @@ MCP_PUBLIC_URL=https://<api-public-domain>/api/v1/mcp
 NEXT_PUBLIC_API_URL=https://<api-public-domain>/api/v1
 NEXT_PUBLIC_FRONTEND_URL=https://<web-public-domain>
 
-# Local MinIO. MINIO_ENDPOINT is fixed to minio:9000 by the override.
+# Local MinIO. MINIO_ENDPOINT is fixed to minio:9000 inside the production network.
 MINIO_ACCESS_KEY=<minio-access-key>
 MINIO_SECRET_KEY=<minio-secret-key>
 MINIO_BUCKET_NAME=zabt-ai-bucket
@@ -127,7 +123,13 @@ MINIO_WEBHOOK_SECRET=<random-webhook-secret>
 MINIO_PUBLIC_ENDPOINT=http://<browser-reachable-deployment-host>:9000
 
 # Separate first-party OpenAI credentials for summaries and visual analysis
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-4o-mini
 OPENAI_API_KEY=<openai-summary-key>
+VISION_JUDGE_MODEL=gpt-4o-mini
+VISION_OPENAI_BASE_URL=https://api.openai.com/v1
+VISION_OPENAI_MODEL=gpt-4o-mini
+VISION_ALLOWED_HOSTS=api.openai.com
 VISION_OPENAI_API_KEY=<openai-vision-key>
 
 # Set this only when the selected local diarization model requires Hugging Face access.
@@ -137,7 +139,17 @@ HF_TOKEN=<hugging-face-token-if-required>
 `MINIO_PUBLIC_ENDPOINT` defaults to `http://localhost:9000`, which is suitable only when the
 browser is on the deployment host. Set it to the deployment host's browser-reachable address (or a
 TLS reverse-proxy URL) when users access the web app from another machine. The MinIO access key,
-secret, and bucket must match the local `minio` and `minio-init` services.
+secret, and bucket must match `minio-cloud-prod` and `minio-init-cloud-prod`.
+
+The production web image reads `NEXT_PUBLIC_API_URL` and `NEXT_PUBLIC_FRONTEND_URL` from the root
+`.env` through runtime-only web settings and a dynamic `/api/runtime-config` route. The browser loads
+this public-only response before its first API request. After a compatible web image containing the
+route has been deployed, these browser-safe URLs can be changed in the root `.env` without rebuilding
+or republishing the web image. The currently published `v1.0.0` web image lacks the route and cannot
+use this runtime configuration. If either URL is missing, the route fails rather than falling back
+to a build-time localhost address. The web service receives only these public URLs and public
+telemetry settings; backend, database, OpenAI, and MinIO credentials remain scoped to their
+respective services.
 
 `HF_TOKEN` is optional for public models. The `pyannote/speaker-diarization-3.1` model commonly
 requires an accepted Hugging Face license and token; provide it before starting `worker-gpu` when
@@ -167,13 +179,13 @@ The backend rejects the shared local `change-me-in-production` placeholder for
 deployment-specific randomly generated secret; the backend will fail validation at startup if the
 secret is empty or still uses the shared placeholder.
 
-The override fixes `AUTH_ENVIRONMENT=production`, `AUTH_COOKIE_SECURE=true`,
+The production services set `AUTH_ENVIRONMENT=production`, `AUTH_COOKIE_SECURE=true`,
 `STORAGE_PROVIDER=minio`, `MINIO_ENDPOINT=minio:9000`, `TRANSCRIPTION_BACKEND=gpu-local`,
 `GPU_SERVICE_URL=http://worker-gpu:8001`, and `REDIS_URL=redis://redis:6379/0`.
 
 ## OpenAI inference configuration
 
-Summary inference is fixed to the first-party endpoint and model:
+Summary inference defaults to the first-party endpoint and model; both values can be set in `.env`:
 
 ```text
 OPENAI_BASE_URL=https://api.openai.com/v1
@@ -204,13 +216,13 @@ The release workflow publishes the Zabt-owned MinIO server and client alongside 
 images. Cloud production selects every image with one immutable `ZABT_IMAGE_TAG`:
 
 ```text
-ghcr.io/danielrondongarcia/zabt-ai-api:v1.0.0
-ghcr.io/danielrondongarcia/zabt-ai-worker:v1.0.0
-ghcr.io/danielrondongarcia/zabt-ai-web:v1.0.0
-ghcr.io/danielrondongarcia/zabt-ai-gpu-worker:v1.0.0
-ghcr.io/danielrondongarcia/zabt-ai-minio:v1.0.0
-ghcr.io/danielrondongarcia/zabt-ai-mc:v1.0.0
-ghcr.io/danielrondongarcia/zabt-ai-vision-worker:v1.0.0
+ghcr.io/danielrondongarcia/zabt-ai-api:${ZABT_IMAGE_TAG}
+ghcr.io/danielrondongarcia/zabt-ai-worker:${ZABT_IMAGE_TAG}
+ghcr.io/danielrondongarcia/zabt-ai-web:${ZABT_IMAGE_TAG}
+ghcr.io/danielrondongarcia/zabt-ai-gpu-worker:${ZABT_IMAGE_TAG}
+ghcr.io/danielrondongarcia/zabt-ai-minio:${ZABT_IMAGE_TAG}
+ghcr.io/danielrondongarcia/zabt-ai-mc:${ZABT_IMAGE_TAG}
+ghcr.io/danielrondongarcia/zabt-ai-vision-worker:${ZABT_IMAGE_TAG}
 ```
 
 The MinIO community container images are no longer publicly pullable. Zabt builds both images from
@@ -228,29 +240,29 @@ security maintenance may require a Zabt-managed patch or a replacement source if
 unavailable. The images retain upstream licenses and use pinned Alpine runtime bases with CA
 certificates.
 
-Set `ZABT_IMAGE_TAG` to a published immutable `vMAJOR.MINOR.PATCH` release, such as `v1.0.0`; never
-use `latest`. Compose verifies that the value is present but cannot validate its format, so check the
-tag against the release before deployment. The Docker workflow validates the required tag format.
+Set `ZABT_IMAGE_TAG` in the root `.env` to a published immutable `vMAJOR.MINOR.PATCH` release whose
+web image contains `/api/runtime-config`; never use `latest` or the currently published `v1.0.0` web
+image for this topology. Compose does not validate the tag format, so confirm compatibility and
+availability before deployment. The Docker workflow validates the tag format.
 
-For the first cloud-prod release, dispatch **Release** from `main` with `version=v1.0.0` and
-`include_optional=true`; MinIO and `mc` are in the seven-image core matrix, while the vision image is
-optional in the workflow but required by this topology. Make the GHCR packages public for anonymous
-pulls, or authenticate the host to `ghcr.io` with a credential that has `read:packages`. Run
-`docker compose ... pull` before
-`docker compose ... up -d --no-build`; every GHCR-backed service uses `pull_policy: always` and the
-production override removes their inherited local `build:` definitions. Restore the previous tag in
+For a cloud-prod release, dispatch **Release** from `main` after the runtime-config change is merged
+and set `include_optional=true`; MinIO and `mc` are in the seven-image core matrix, while the vision
+image is optional in the workflow but required by this topology. Do not deploy until the release
+completes and its web image includes `/api/runtime-config`. Make the GHCR packages public for
+anonymous pulls, or authenticate the host to `ghcr.io` with a credential that has `read:packages`. Run
+`docker compose pull` before `docker compose up -d --no-build`; every GHCR-backed production service
+uses `pull_policy: always` and has no `build:` definition. Restore the previous tag in
 `ZABT_IMAGE_TAG` to roll back.
 
 ## Switching from the local profile
 
-Changing from `COMPOSE_PROFILES=local` to `COMPOSE_PROFILES=cloud-prod` preserves named volumes,
-but Compose may recreate old local containers so their profiles, images, ports, and environment
-match the production override. Expect the local `worker-gpu`, `db`, `minio`, `web`, or vision
-containers to be recreated when their effective configuration changes. This does not require
-deleting volumes. Back up important data before changing application versions or migrations.
+The local and production profiles use separate service names but share named data volumes. Before
+switching profiles, stop the local stack with `docker compose --profile local down`; this preserves
+named volumes. Then set `COMPOSE_PROFILES=cloud-prod` in `.env` and start the production profile.
+Back up important data before changing application versions or migrations.
 
-Never use `docker compose down -v` to force a profile transition. Stop or recreate services through
-the two-file command shown above and keep the named volumes intact.
+Never use `docker compose down -v` to force a profile transition. The `-v` flag deletes named
+volumes, including PostgreSQL, MinIO, Redis, media, and model-cache data.
 
 ## NetBird HTTP routing and firewall
 
@@ -293,8 +305,8 @@ The images expose these useful liveness endpoints:
 Use `docker compose ps` to check container state and follow focused logs with:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml logs -f api worker beat
-docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml logs -f worker-gpu zabt-vision-worker web
+docker compose logs -f api-cloud-prod worker-cloud-prod beat-cloud-prod
+docker compose logs -f worker-gpu-cloud-prod zabt-vision-worker-cloud-prod web-cloud-prod
 ```
 
 If a service exits, inspect its logs for missing required variables, PostgreSQL migrations, MinIO
@@ -304,13 +316,14 @@ external DNS, firewall, NetBird ACL, OpenAI account, or GPU capacity is ready.
 
 ## Rollback and data safety
 
-For an image-based rollback, set `ZABT_IMAGE_TAG` to the previous published immutable release tag,
-such as `v1.0.0`. From the repository root, with `COMPOSE_PROFILES=cloud-prod`, pull the pinned
-images and recreate the services without building locally:
+For an image-based rollback, set `ZABT_IMAGE_TAG` to a previous published immutable release whose
+web image also contains `/api/runtime-config`. Do not roll this topology back to the currently
+published `v1.0.0` web image. From the repository root, set `ZABT_IMAGE_TAG` in `.env`, then pull the
+pinned images and recreate the services without building locally:
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml pull
-docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml up -d --no-build
+docker compose pull
+docker compose up -d --no-build
 ```
 
 Keep database and MinIO backups aligned with the application version before applying migrations.

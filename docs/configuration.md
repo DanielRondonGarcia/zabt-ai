@@ -8,7 +8,12 @@ and notes which are required. Values marked **REQUIRED** must be set for a worki
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `COMPOSE_PROFILES` | `local` | `local` = bundled db+minio+gpu+web. Add `bot`/`vision` for add-ons. Empty for the cloud split. |
+| `COMPOSE_PROFILES` | `local` | Select one mode: `local` (default GPU stack), `gpu` (GPU worker add-on), `cpu`, `local-actsis`, `cloud` (RunPod), `cloud,kong` (RunPod with TLS gateway), `full-cloud` (managed dependencies), or `cloud-prod` (primary GHCR stack). Add `bot`/`vision` to a local profile for add-ons. |
+
+The RunPod `cloud` profile uses `TRANSCRIPTION_BACKEND` as its root `.env` provider selector and
+maps it to both `TRANSCRIPTION_PROVIDER` and the legacy setting inside the cloud app containers.
+With no legacy selector set, both resolve to `runpod`; local profiles keep `TRANSCRIPTION_PROVIDER`
+as their selector and default to `gpu-local`.
 
 ## Container memory limits
 
@@ -28,24 +33,30 @@ if it is OOM-killed.
 
 ### Local Actsis without a GPU
 
-The base Compose file keeps generic transcription and recovery fallbacks for the local GPU,
-OpenAI-compatible, and RunPod paths: `600` seconds per request, `2` provider retries, and a
-`900`-second stale-recovery grace. Use the dedicated overlay when the local run should use the
-HTTPS Actsis diarization path without starting the GPU worker:
+The base Compose file keeps generic transcription and recovery fallbacks for local GPU,
+OpenAI-compatible, and RunPod modes: `600` seconds per request, `2` provider retries, and a
+`900`-second stale-recovery grace. To use HTTPS Actsis diarization without starting a GPU worker,
+set `COMPOSE_PROFILES=local-actsis` in the root `.env`, then configure these values there:
 
-```bash
-docker compose --env-file .env \
-  -f docker-compose.yml -f docker-compose.local-actsis.yml \
-  --profile local up -d
+```dotenv
+ACTSIS_API_KEY=<actsis-key>
+TRANSCRIPTION_PROVIDER=openai-file
+TRANSCRIPTION_MODEL=whisper-diarize
+TRANSCRIPTION_BASE_URL=https://ai.actsis.internal/v1
+TRANSCRIPTION_CLOUD_DIARIZATION=true
+TRANSCRIPTION_RESPONSE_FORMAT=diarized_json
+TRANSCRIPTION_SPEAKER_REQUIRED=true
+TRANSCRIPTION_CHUNKING_STRATEGY=auto
+TRANSCRIPTION_DIRECT_UPLOAD_MAX_BYTES=500000000
+TRANSCRIPTION_OPENAI_REQUEST_TIMEOUT_SECONDS=7200
+TRANSCRIPTION_OPENAI_MAX_RETRIES=0
+MEETING_RECOVERY_GRACE_SECONDS=9000
 ```
 
-The overlay sources `ACTSIS_API_KEY` from the untracked `.env` and sets
-`whisper-diarize`/`diarized_json`, required cloud speakers, `chunking_strategy=auto`, a
-500000000-byte direct-upload threshold, a `7200`-second request timeout, zero provider retries,
-and a `9000`-second recovery grace for API, worker, and beat. The grace is intentionally greater
-than the blocking request timeout, so Beat does not claim or dispatch a live request at the timeout
-boundary. It preserves the local API `http://localhost:8000` and web `http://localhost:3001` ports;
-the base GPU worker is moved to an opt-in `gpu` profile and is not started by this command.
+Start with `docker compose up -d`. The `local-actsis` profile preserves the API `:8000` and web
+`:3001` ports, starts local PostgreSQL/MinIO/Qdrant, and leaves the GPU worker off. The `9000`-second
+recovery grace remains longer than the blocking request timeout, so Beat does not claim or dispatch a
+live request at the timeout boundary.
 
 ## Database
 

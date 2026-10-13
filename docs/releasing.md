@@ -5,9 +5,10 @@ The manual **Release** workflow builds selected images to unique GHCR staging ta
 ## Quick path
 
 1. Merge the desired changes into `main`.
-2. Open **Actions → Release → Run workflow**, select `main`, and choose the release inputs. For the
-   first cloud-prod deployment, use `version=v1.0.0` and set `include_optional=true` so the required
-   vision image is published.
+2. Open **Actions → Release → Run workflow**, select `main`, and choose the release inputs. For
+   cloud-prod, set `include_optional=true` so the required vision image is published. Deploy only
+   after a release containing the `/api/runtime-config` route is complete; the currently published
+   `v1.0.0` web image predates this route and is incompatible with the cloud-prod configuration.
 3. Wait for every selected image build and promotion to pass. The workflow creates the Git tag and GitHub Release only after all image promotions succeed.
 
 The workflow is manual-only. It has no `push` or `release` trigger, so publishing `latest` cannot start another release.
@@ -29,8 +30,8 @@ When `version` is empty, the workflow finds the highest existing tag matching `v
 The version is validated before any image build. A new run is rejected if the Git tag or any selected GHCR image already has that version; only a retry of the same run can resume matching staged digests and a Git tag that points to the same commit. Dispatches from a branch other than `main` are also rejected.
 
 Cloud production requires the optional vision image. Always choose `include_optional=true` when
-publishing a release intended for `docker-compose.cloud.prod.yml`; this also publishes the optional
-bot image.
+publishing a release intended for the `cloud-prod` profile in `docker-compose.yml`; this also
+publishes the optional bot image.
 
 ## Published images and tags
 
@@ -99,10 +100,12 @@ On the first run, check the package page under the repository or organization **
 
 Preflight treats only explicit GHCR `MANIFEST_UNKNOWN` or `NAME_UNKNOWN` 404 responses as absent. Authentication, network, malformed-response, and other registry errors stop the release.
 
-The cloud-prod Compose overlay pins the API, worker/beat, web, GPU worker, MinIO, `mc`, and vision
-images to one tag with `ZABT_IMAGE_TAG=v1.0.0` under `ghcr.io/danielrondongarcia/`. The first six
-are in the core release matrix; vision is optional there but required by cloud-prod. The host must
-be able to pull each package: make them public for anonymous access or log in with a credential that
+The `cloud-prod` profile pins the API, worker/beat, web, GPU worker, MinIO, `mc`, and vision images
+to one published immutable tag selected by `ZABT_IMAGE_TAG` under
+`ghcr.io/danielrondongarcia/`. For this topology, the selected release's web image must include
+`/api/runtime-config`; the currently published `v1.0.0` web image does not. The first six images are
+in the core release matrix; vision is optional there but required by cloud-prod. The host must be
+able to pull each package: make them public for anonymous access or log in with a credential that
 has `read:packages`.
 
 Do not paste a token into this repository. For local access to a private package, use a temporary environment variable containing a token with the minimum required scope, such as `read:packages`:
@@ -146,29 +149,26 @@ Enable the option only when those images are needed and their build dependencies
 ## Cloud-prod deployment
 
 Run these commands from the repository root, the directory containing `docker-compose.yml`. Set
-`ZABT_IMAGE_TAG` to a published immutable `vMAJOR.MINOR.PATCH` release such as `v1.0.0`; never use
-`latest`. Compose requires a non-empty tag but cannot validate its format, so confirm it is an
-existing release before deployment. The Docker workflow validates the tag format.
+`COMPOSE_PROFILES=cloud-prod` and `ZABT_IMAGE_TAG` in the root `.env`; use a published immutable
+`vMAJOR.MINOR.PATCH` release containing the `/api/runtime-config` route in its web image; never use
+`latest` or the currently published `v1.0.0` web image. Confirm the compatible release has completed
+and is available before deployment. The Docker workflow validates the tag format.
 
-Docker Compose v2.24.4 or newer is required for the production overlay's `!override` and `!reset`
-merge tags. Pull before starting without building locally:
+Pull before starting without building locally:
 
 ```bash
-export COMPOSE_PROFILES=cloud-prod
-export ZABT_IMAGE_TAG=v1.0.0
-docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml pull
-docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml up -d --no-build
+docker compose pull
+docker compose up -d --no-build
 ```
 
 ## Rollback
 
-For **cloud-prod**, restore the single tag and run both commands from the repository root:
+For **cloud-prod**, restore a previous tag only if its web image contains `/api/runtime-config`, then
+run both commands from the repository root:
 
 ```bash
-export COMPOSE_PROFILES=cloud-prod
-export ZABT_IMAGE_TAG=v1.2.2
-docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml pull
-docker compose -f docker-compose.yml -f docker-compose.cloud.prod.yml up -d --no-build
+docker compose pull
+docker compose up -d --no-build
 ```
 
 For a standalone CPU worker, use its previous exact tag, such as `ghcr.io/<owner>/zabt-ai-cpu-worker:v1.2.2`, then restart it using the deployment's normal procedure. Do not delete or retag previous immutable images.
