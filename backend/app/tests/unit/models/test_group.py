@@ -5,7 +5,7 @@
 from datetime import datetime
 
 import pytest
-from sqlmodel import Session, create_engine, SQLModel
+from sqlmodel import create_engine, SQLModel
 from app.models import Group
 
 

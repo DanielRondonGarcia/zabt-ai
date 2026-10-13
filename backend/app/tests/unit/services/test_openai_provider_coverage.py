@@ -10,7 +10,7 @@ import pytest
 
 from app.models import TranscriptionType
 from app.services.transcription import openai_provider as provider_module
-from app.services.transcription.chunks import AudioChunk, AudioChunkSet, ChunkTranscription
+from app.services.transcription.chunks import AudioChunk, AudioChunkSet
 from app.services.transcription.contracts import (
     AudioSource,
     BatchTranscriptionRequest,

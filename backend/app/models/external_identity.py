@@ -4,10 +4,13 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import Column, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlmodel import Field, Relationship, SQLModel
+
+if TYPE_CHECKING:
+    from .base import User
 
 
 class ExternalIdentityProvider(str, Enum):

@@ -512,7 +512,6 @@ def restore_meeting_summary(
     }
 
 
-from pydantic import BaseModel
 from typing import Optional as Opt
 
 

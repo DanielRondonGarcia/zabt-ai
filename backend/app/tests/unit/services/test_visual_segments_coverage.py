@@ -4,8 +4,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-
 import pytest
 
 from app.models import TranscriptSegment, VisualSegment

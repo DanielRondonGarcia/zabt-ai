@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 from datetime import datetime
-from typing import Any, Optional, List, Literal
+from typing import TYPE_CHECKING, Any, Optional, List, Literal
 from enum import Enum
 from sqlmodel import Field, SQLModel, Relationship
 from sqlalchemy import Column, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
+
+if TYPE_CHECKING:
+    from .external_identity import ExternalIdentity
 
 
 class TranscriptionType(str, Enum):
