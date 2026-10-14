@@ -77,6 +77,12 @@ ACTSIS_API_KEY=<actsis-api-key>
 TRANSCRIPTION_BASE_URL=https://ai.actsis.internal/v1
 ```
 
+The GHCR API and worker images include the Actsis root CA at
+`/usr/local/share/ca-certificates/actsis-root-ca.crt`, and the `cloud-actsis` profile passes that
+bundle to the API, worker, and beat containers through `ACTSIS_CA_BUNDLE`. Override
+`ACTSIS_CA_BUNDLE` only when the gateway uses a different trusted CA bundle; certificate validation
+must remain enabled.
+
 `TRANSCRIPTION_BASE_URL` defaults to `https://ai.actsis.internal/v1` when omitted. The profile sets
 the canonical `TRANSCRIPTION_PROVIDER` to `openai-file` and leaves the legacy `TRANSCRIPTION_BACKEND`
 unset; the legacy selector accepts only `gpu-local` and `runpod`. The profile selects

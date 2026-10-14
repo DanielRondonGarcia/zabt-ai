@@ -117,6 +117,7 @@ x-cloud-actsis-backend-environment: &cloud-actsis-backend-environment
   APP_URL: ${APP_URL:-}
   MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
   ACTSIS_API_KEY: ${ACTSIS_API_KEY:-}
+  ACTSIS_CA_BUNDLE: ${ACTSIS_CA_BUNDLE:-/usr/local/share/ca-certificates/actsis-root-ca.crt}
   TRANSCRIPTION_PROVIDER: openai-file
   TRANSCRIPTION_MODEL: whisper-diarize
   TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://ai.actsis.internal/v1}
