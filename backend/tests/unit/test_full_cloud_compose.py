@@ -241,6 +241,23 @@ def test_cloud_actsis_aligns_transcription_storage_and_credential_scope() -> Non
         assert setting in transcription.group()
     assert "TRANSCRIPTION_BACKEND:" not in transcription.group()
 
+    expected_ai = (
+        "OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://ai.actsis.internal/v1}",
+        "OPENAI_API_KEY: ${OPENAI_API_KEY:-${ACTSIS_API_KEY:-}}",
+        "OPENAI_MODEL: ${OPENAI_MODEL:-glm-5.3-flash}",
+        "AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-https://ai.actsis.internal/v1}",
+        "AI_CHAT_MODEL: ${AI_CHAT_MODEL:-glm-5.3-flash}",
+        "AI_CHAT_API_KEY: ${AI_CHAT_API_KEY:-${ACTSIS_API_KEY:-}}",
+        "VISION_ALLOWED_HOSTS: ${VISION_ALLOWED_HOSTS:-ai.actsis.internal}",
+        "VISION_OPENAI_API_KEY: ${VISION_OPENAI_API_KEY:-${ACTSIS_API_KEY:-}}",
+        "VISION_OPENAI_BASE_URL: ${VISION_OPENAI_BASE_URL:-https://ai.actsis.internal/v1}",
+        "VISION_OPENAI_MODEL: ${VISION_OPENAI_MODEL:-glm-5.3-flash}",
+    )
+    for setting in expected_ai:
+        assert setting in transcription.group()
+    assert 'VISION_CLOUD_ALLOWED: "true"' in transcription.group()
+    assert "VISION_EGRESS_POLICY: allowlist" in transcription.group()
+
     assert "STORAGE_PROVIDER: minio" in storage.group()
     assert "MINIO_ENDPOINT: minio:9000" in storage.group()
     assert "MINIO_WEBHOOK_SECRET: ${MINIO_WEBHOOK_SECRET:-}" in storage.group()
@@ -284,6 +301,9 @@ def test_cloud_actsis_aligns_transcription_storage_and_credential_scope() -> Non
         "AUTH_JWT_SECRET",
         "MINIO_ACCESS_KEY",
         "MINIO_SECRET_KEY",
+        "OPENAI_API_KEY",
+        "AI_CHAT_API_KEY",
+        "VISION_OPENAI_API_KEY",
     ):
         assert forbidden not in web_environment.group("body")
 

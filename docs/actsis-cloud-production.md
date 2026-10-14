@@ -81,11 +81,15 @@ TRANSCRIPTION_BASE_URL=https://ai.actsis.internal/v1
 the canonical `TRANSCRIPTION_PROVIDER` to `openai-file` and leaves the legacy `TRANSCRIPTION_BACKEND`
 unset; the legacy selector accepts only `gpu-local` and `runpod`. The profile selects
 `whisper-diarize`, enables cloud diarization, requests `diarized_json`, and requires speakers. The
-Actsis key is passed only to API, worker, and beat containers. `OPENAI_API_KEY` and `AI_CHAT_API_KEY`
-remain separate optional credentials for summary and chat providers; neither is sent to the web
-container. Embedding settings default to the Actsis base URL and `nomic-embed`; set
-`EMBEDDING_API_KEY` separately only if the deployment's embedding configuration needs it (otherwise
-the Actsis key is the fallback).
+Actsis key is passed only to API, worker, and beat containers. Summary, AI Chat, and direct visual
+inference default to the Actsis endpoint `https://ai.actsis.internal/v1` and the model
+`glm-5.3-flash`; unset summary, chat, and vision provider keys reuse `ACTSIS_API_KEY` through
+Compose fallbacks without duplicating or exposing its value. The Actsis gateway must expose that
+exact model identifier and support multimodal text/image requests for vision. Explicit application
+environment overrides remain supported, and per-user AI provider settings can override these
+application defaults. None of these credentials is sent to the web container. Embedding settings
+default to the Actsis base URL and `nomic-embed`; set `EMBEDDING_API_KEY` separately only if the
+deployment's embedding configuration needs it (otherwise the Actsis key is the fallback).
 
 The one-shot Compose preflight receives only boolean presence flags. It reports missing variable
 names, never their values. It requires `MINIO_PUBLIC_ENDPOINT` to be present; the API startup guard
