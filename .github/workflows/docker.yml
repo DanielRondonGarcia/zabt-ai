@@ -243,7 +243,7 @@ jobs:
           web = services["web-cloud-actsis"]["environment"]
           assert all(
               service["environment"]["TRANSCRIPTION_PROVIDER"] == "openai-file"
-              and service["environment"]["TRANSCRIPTION_BACKEND"] == "openai-file"
+              and "TRANSCRIPTION_BACKEND" not in service["environment"]
               and service["environment"]["TRANSCRIPTION_MODEL"] == "whisper-diarize"
               and service["environment"]["TRANSCRIPTION_BASE_URL"] == "https://ai.actsis.internal/v1"
               and service["environment"]["TRANSCRIPTION_CLOUD_DIARIZATION"] == "true"

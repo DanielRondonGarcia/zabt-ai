@@ -230,7 +230,6 @@ def test_cloud_actsis_aligns_transcription_storage_and_credential_scope() -> Non
 
     expected_transcription = (
         "TRANSCRIPTION_PROVIDER: openai-file",
-        "TRANSCRIPTION_BACKEND: openai-file",
         "TRANSCRIPTION_MODEL: whisper-diarize",
         "TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://ai.actsis.internal/v1}",
         'TRANSCRIPTION_CLOUD_DIARIZATION: "true"',
@@ -240,6 +239,7 @@ def test_cloud_actsis_aligns_transcription_storage_and_credential_scope() -> Non
     )
     for setting in expected_transcription:
         assert setting in transcription.group()
+    assert "TRANSCRIPTION_BACKEND:" not in transcription.group()
 
     assert "STORAGE_PROVIDER: minio" in storage.group()
     assert "MINIO_ENDPOINT: minio:9000" in storage.group()

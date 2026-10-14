@@ -77,8 +77,9 @@ ACTSIS_API_KEY=<actsis-api-key>
 TRANSCRIPTION_BASE_URL=https://ai.actsis.internal/v1
 ```
 
-`TRANSCRIPTION_BASE_URL` defaults to `https://ai.actsis.internal/v1` when omitted. The profile pins
-both `TRANSCRIPTION_PROVIDER` and `TRANSCRIPTION_BACKEND` to `openai-file`, selects
+`TRANSCRIPTION_BASE_URL` defaults to `https://ai.actsis.internal/v1` when omitted. The profile sets
+the canonical `TRANSCRIPTION_PROVIDER` to `openai-file` and leaves the legacy `TRANSCRIPTION_BACKEND`
+unset; the legacy selector accepts only `gpu-local` and `runpod`. The profile selects
 `whisper-diarize`, enables cloud diarization, requests `diarized_json`, and requires speakers. The
 Actsis key is passed only to API, worker, and beat containers. `OPENAI_API_KEY` and `AI_CHAT_API_KEY`
 remain separate optional credentials for summary and chat providers; neither is sent to the web
