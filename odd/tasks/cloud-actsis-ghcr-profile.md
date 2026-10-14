@@ -40,10 +40,10 @@ The existing `local-actsis` profile builds the application from source, but the 
 - [x] API and workers receive `TRANSCRIPTION_PROVIDER=openai-file` and omit the unsupported legacy `TRANSCRIPTION_BACKEND`; Actsis endpoint/model settings are aligned and no local GPU or RunPod service is activated.
 - [x] A one-shot preflight receives only presence flags and reports missing variable names, never secret values; API startup also rejects a non-HTTPS MinIO public endpoint without logging its value.
 - [x] Web runtime public URL settings are container-time settings, with a compatible `/api/runtime-config` web image required; existing `v1.0.0` is explicitly excluded.
-- [x] CI/static tests validate service/profile membership, GHCR tag use, the ACT-TWC-11-observed immutable Qdrant digest, absence of build fallback, the canonical Actsis selector and omission of the unsupported legacy selector, MinIO webhook-secret propagation, local MinIO endpoints, configurable host ports, and secret scoping.
+- [x] CI/static tests validate service/profile membership, GHCR tag use, the ACT-TWC-11-observed immutable Qdrant digest, absence of build fallback, the canonical Actsis selector and omission of the unsupported legacy selector, MinIO webhook-secret propagation, Actsis GLM defaults, local MinIO endpoints, configurable host ports, and secret scoping.
 - [x] Deployment docs give ACT-TWC-11 NetBird app routes with Preserve Full Path enabled and require a separate HTTPS MinIO hostname for browser presigned uploads.
 - [x] Compose and frontend build/runtime-config checks pass without printing or manually inspecting actual `.env` content.
-- [x] ACT-TWC-11 has a non-empty `ACTSIS_API_KEY` and HTTPS `MINIO_PUBLIC_ENDPOINT`; NetBird routes for the app and MinIO S3 endpoint are configured and verified.
+- [x] ACT-TWC-11 has a non-empty `ACTSIS_API_KEY` and HTTPS `MINIO_PUBLIC_ENDPOINT`; NetBird routes are configured and verified.
 
 ## Checklist
 
@@ -51,7 +51,7 @@ The existing `local-actsis` profile builds the application from source, but the 
 - [x] T2: Update targeted static tests, CI validation, and deployment/release docs.
 - [x] T3: Run targeted Compose/profile checks, isolated static tests, frontend build/runtime-config checks, and `git diff --check`.
 - [x] T4: Independently verify the profile, Qdrant pin, and ACT-TWC-11 NetBird documentation; the full-cloud env-example file's readback remains policy-blocked.
-- [x] T5: Deploy cloud-actsis on ACT-TWC-11 after selector/webhook fixes and a passing presence-only preflight; NetBird routes are now configured.
+- [x] T5: Deploy cloud-actsis on ACT-TWC-11 after selector/webhook fixes and a passing presence-only preflight; NetBird routes are configured.
 
 ## Verification Commands
 
@@ -72,11 +72,11 @@ The existing `local-actsis` profile builds the application from source, but the 
 
 ## Progress and Next Step
 
-- Status: PRs #1–#5 were merged to `main`; compatible GHCR release `v1.0.1` is published. PR #4 removed the unsupported legacy selector and PR #5 injected the webhook secret into worker/beat. The corrected Compose is installed at `/home/ubuntu/docker/zabt/compose.yml`; the cloud-actsis stack is running healthy.
+- Status: PRs #1–#6 were merged to `main`; compatible GHCR release `v1.0.1` is published. PR #4 removed the unsupported legacy selector, PR #5 injected the webhook secret into worker/beat, and PR #6 routed cloud application defaults through Actsis GLM. Corrected Compose is installed at `/home/ubuntu/docker/zabt/compose.yml`; cloud-actsis is healthy.
 - Implemented: root Compose profile uses GHCR-pinned API/worker/beat/web/MinIO/`mc` images selected by `ZABT_IMAGE_TAG`; local Postgres/Redis/MinIO/Qdrant and `minio-init` are included without source-tree build contexts or bind mounts. Transcription is pinned to Actsis `openai-file` / `whisper-diarize`; the API validates the public MinIO URL scheme while the separate presence-only guard never receives endpoint or credential values.
 - Implemented: CI and unit safeguards cover rendered image references, profile boundaries, provider alignment, MinIO endpoint separation, web public settings, credentials, configurable ports, and fail-closed missing-variable behavior. Deployment, release, and frontend instructions require a later runtime-config-compatible immutable image and exclude `v1.0.0`.
 - Correction: Qdrant is pinned to the ACT-TWC-11-observed digest `sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10`, and CI/static assertions require that exact image. The deployment guide now specifies the app routes and separate HTTPS MinIO hostname; it does not claim NetBird is configured.
-- Host state: user authorized SSH profile `ACT-TWC-11`. `/home/ubuntu/docker/zabt/compose.yml` and `.env` are colocated; `.env` is mode `0600`. Presence-only checks found non-empty `ACTSIS_API_KEY`, `ZABT_IMAGE_TAG=v1.0.1`, and `MINIO_PUBLIC_ENDPOINT=https://zabt-upload.proxy.actsis.com`. Host ports are API 8002, web 3005, Postgres 5434, MinIO S3 9000, console 9002, and Qdrant 6335. API/web returned HTTP 200; worker/beat restart counts are 0. NetBird routes are configured for app and MinIO S3; do not read or print `.env` values.
-- Verification: Remote preflight passed; Compose recreated the stack after selector/webhook fixes; API, worker, beat, web, DB, Redis, MinIO, Qdrant, and MinIO init are healthy/running as expected. Focused tests passed 12/12; the root Compose inventory remains one file.
-- NetBird route map: preserve full paths. `/api/runtime-config` routes to web port 3005 before generic `/api/` and `/.well-known/` routes to API port 8002; `/` routes to web port 3005. `https://zabt-upload.proxy.actsis.com/` routes to S3 API port 9000 at the hostname root; console port 9002 remains private. MinIO health returned HTTP 200 and the Zabt login page loaded through the proxy.
-- Next: run an authenticated browser upload smoke test and confirm the presigned PUT reaches `zabt-upload.proxy.actsis.com`; deployment is otherwise complete and healthy.
+- Host state: user authorized SSH profile `ACT-TWC-11`. `/home/ubuntu/docker/zabt/compose.yml` and `.env` are colocated; `.env` is mode `0600`. Presence-only checks found non-empty `ACTSIS_API_KEY`, `ZABT_IMAGE_TAG=v1.0.1`, and `MINIO_PUBLIC_ENDPOINT=https://zabt-upload.proxy.actsis.com`. Host ports are API 8002, web 3005, Postgres 5434, MinIO S3 9000, console 9002, and Qdrant 6335. API/web returned HTTP 200; worker/beat restart counts are 0. NetBird routes are configured and verified; do not read or print `.env` values.
+- Verification: Remote preflight passed; Compose recreated the stack after selector/webhook/GLM-default fixes; API, worker, beat, web, DB, Redis, MinIO, Qdrant, and MinIO init are healthy/running as expected. API/web health returned HTTP 200; focused tests passed 12/12.
+- NetBird route map: preserve full paths; `/api/runtime-config` → web 3005 before generic `/api/` and `/.well-known/` → API 8002; `/` → web 3005. `zabt-upload.proxy.actsis.com/` → MinIO S3 9000 at hostname root; console 9002 private. MinIO health returned HTTP 200 and Zabt login loaded.
+- Next: run an authenticated browser upload smoke test if desired. Summary, AI Chat, and direct vision now default to Actsis `glm-5.3-flash`; per-user AI provider settings may override those application defaults.
