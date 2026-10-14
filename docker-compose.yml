@@ -118,7 +118,6 @@ x-cloud-actsis-backend-environment: &cloud-actsis-backend-environment
   MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
   ACTSIS_API_KEY: ${ACTSIS_API_KEY:-}
   TRANSCRIPTION_PROVIDER: openai-file
-  TRANSCRIPTION_BACKEND: openai-file
   TRANSCRIPTION_MODEL: whisper-diarize
   TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://ai.actsis.internal/v1}
   TRANSCRIPTION_CLOUD_DIARIZATION: "true"
