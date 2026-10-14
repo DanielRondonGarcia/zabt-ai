@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 // Copyright (C) 2025-2026 Afeef Janjua
-import axios from "axios";
+import axios, { type InternalAxiosRequestConfig } from "axios";
 import { createApiClient } from "@zabt/shared";
 import type {
   Meeting,
@@ -37,8 +37,45 @@ export type {
   VisualBreakdownStatus,
 };
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000/api/v1";
+const DEFAULT_API_URL = "http://localhost:8000/api/v1";
+
+interface PublicRuntimeConfig {
+  apiUrl: string;
+  frontendUrl: string;
+}
+
+let browserRuntimeConfig: Promise<PublicRuntimeConfig> | null = null;
+
+const getPublicRuntimeConfig = (): Promise<PublicRuntimeConfig> => {
+  if (typeof window === "undefined") {
+    return Promise.resolve({
+      apiUrl:
+        process.env.ZABT_PUBLIC_API_URL ||
+        process.env["NEXT_PUBLIC_API_URL"] ||
+        DEFAULT_API_URL,
+      frontendUrl:
+        process.env.ZABT_PUBLIC_FRONTEND_URL ||
+        process.env["NEXT_PUBLIC_FRONTEND_URL"] ||
+        "http://localhost:3000",
+    });
+  }
+
+  browserRuntimeConfig ??= fetch("/api/runtime-config", { cache: "no-store" }).then(
+    async (response) => {
+      if (!response.ok) {
+        throw new Error("Unable to load public runtime configuration");
+      }
+      return (await response.json()) as PublicRuntimeConfig;
+    },
+  );
+
+  return browserRuntimeConfig;
+};
+
+const applyRuntimeApiUrl = async (config: InternalAxiosRequestConfig) => {
+  config.baseURL = (await getPublicRuntimeConfig()).apiUrl;
+  return config;
+};
 
 // The browser never receives an auth secret. The API owns both HttpOnly
 // cookies, and this compatibility helper intentionally returns no bearer
@@ -46,10 +83,11 @@ const API_URL =
 export const getToken = async (): Promise<string | null> => null;
 
 const authClient = axios.create({
-  baseURL: API_URL,
+  baseURL: DEFAULT_API_URL,
   withCredentials: true,
   headers: { "Content-Type": "application/json" },
 });
+authClient.interceptors.request.use(applyRuntimeApiUrl);
 
 export const clearToken = async (): Promise<void> => {
   await authClient.post("/auth/logout", { client: "web" });
@@ -58,7 +96,7 @@ export const clearToken = async (): Promise<void> => {
 // ── Axios client ──────────────────────────────────────────────────────────────
 
 const apiClient = createApiClient({
-  baseURL: API_URL,
+  baseURL: DEFAULT_API_URL,
   getAuthToken: getToken,
   refreshAuthToken: async () => {
     try {
@@ -76,6 +114,7 @@ const apiClient = createApiClient({
     }
   },
 });
+apiClient.interceptors.request.use(applyRuntimeApiUrl);
 
 // ── Local email/password authentication ──────────────────────────────────────
 

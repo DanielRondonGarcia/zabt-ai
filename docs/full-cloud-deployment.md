@@ -1,41 +1,44 @@
 # Full-cloud deployment
 
-`docker-compose.full-cloud.yml` runs only Zabt's deployable application services. PostgreSQL,
-Redis, S3-compatible object storage, Qdrant, Actsis, and OpenAI are external dependencies; no
-local infrastructure or model worker is required by this topology.
+The `full-cloud` profile in the root `docker-compose.yml` runs only Zabt's deployable application
+services. PostgreSQL, Redis, S3-compatible object storage, Qdrant, Actsis, and OpenAI are external
+dependencies; no local infrastructure or model worker is required by this topology.
 
 ## Quick path
 
-1. Publish immutable images for `api`, `worker`, and `web`. The backend image must include the
-   Actsis CA certificate at `/usr/local/share/ca-certificates/actsis-root-ca.crt`, as the supplied
-   backend Dockerfile does.
-2. Copy `docs/full-cloud.env.example` to an untracked deployment env file, replace every
-   placeholder, and load the values through your deployment secret manager.
+1. Publish immutable images for `api`, `worker`, and `web`. The web image must include the
+   `/api/runtime-config` route; the currently published `v1.0.0` web image predates that route and
+   is incompatible. The backend image must include the Actsis CA certificate at
+   `/usr/local/share/ca-certificates/actsis-root-ca.crt`.
+2. Copy the root `.env.example` to `.env` if needed. Set `COMPOSE_PROFILES=full-cloud` in that root
+   `.env`, then use `docs/full-cloud.env.example` as a checklist for required external values.
+   Compose reads only the root `.env`; a deployment secret manager may provision that file.
 3. Validate the rendered topology without starting services:
 
    ```bash
-   docker compose --env-file .env.full-cloud -f docker-compose.full-cloud.yml config --quiet
+    docker compose --profile full-cloud config --quiet
    ```
 
 4. Pull and start only after the external endpoints, credentials, DNS, TLS, and bucket policy are
    ready:
 
-   ```bash
-   docker compose --env-file .env.full-cloud -f docker-compose.full-cloud.yml pull
-   docker compose --env-file .env.full-cloud -f docker-compose.full-cloud.yml up -d
-   ```
+    ```bash
+    docker compose pull
+    docker compose up -d
+    ```
 
-The Compose file is standalone. Do not add another Compose file or a local profile to this
-command; doing so can reintroduce services that this deployment intentionally does not use.
+The `full-cloud` profile selects only the external-dependency application services. Do not combine it
+with `local`, `cpu`, `local-actsis`, `cloud`, or `cloud-prod` profiles.
 
 ## Application topology
 
 | Service | Role | Required external access |
 |---|---|---|
-| `api` | FastAPI API and database migrations | Managed Postgres, Redis, S3, Qdrant, Actsis, OpenAI |
-| `worker` | Celery transcription, summaries, intelligence, embeddings, retrieval chat, and visual processing | Same backend dependencies |
-| `beat` | Celery scheduled tasks | Managed Postgres and Redis; provider settings are shared for task imports |
-| `web` | Next.js application | Public API and frontend URLs at image-build/runtime configuration |
+| `full-cloud-env-check` | One-shot required-setting presence check; receives boolean flags only | None |
+| `api-full-cloud` | FastAPI API and database migrations | Managed Postgres, Redis, S3, Qdrant, Actsis, OpenAI |
+| `worker-full-cloud` | Celery transcription, summaries, intelligence, embeddings, retrieval chat, and visual processing | Same backend dependencies |
+| `beat-full-cloud` | Celery scheduled tasks | Managed Postgres and Redis; provider settings are shared for task imports |
+| `web-full-cloud` | Next.js application | Public API and frontend URLs at runtime |
 
 The backend worker processes visual media in-process with `DirectVisionService`; it sends bounded
 frame data to the explicit OpenAI visual endpoint. There is no separate visual inference service,
@@ -43,8 +46,10 @@ local model pull, GPU reservation, or model-cache volume in this topology.
 
 ## Required external configuration
 
-The complete placeholder list is in [`full-cloud.env.example`](./full-cloud.env.example). The
-Compose file fails closed when these values are absent:
+The complete placeholder list is in [`full-cloud.env.example`](./full-cloud.env.example); copy the
+required values into the root `.env`. Before starting app services, the `full-cloud-env-check`
+service verifies that required values are present and reports missing variable names without
+printing their values:
 
 | Area | Variables | Notes |
 |---|---|---|
@@ -68,7 +73,7 @@ corresponding allowlist value; visual inference still requires HTTPS,
 External S3-compatible storage has no local object-storage webhook wired into this Compose file;
 there is no MinIO webhook in the full-cloud topology.
 After the browser finishes the presigned upload, the client must call
-`POST /api/v1/meetings/{meeting_id}/confirm-upload`. The current web app already does this when
+`POST /api/v1/meetings/{meeting_id}/confirm-upload`. The web app already does this when
 the API reports `storage_provider: "s3"`; custom clients must preserve the same confirmation step.
 Without confirmation, the meeting remains `pending_upload` and the Celery transcription chain is
 not started.
@@ -83,15 +88,14 @@ with cloud diarization enabled; official OpenAI and generic compatible models ke
 non-diarized defaults.
 
 Use `https://ai.actsis.internal/v1` (or another explicitly provisioned HTTPS Actsis endpoint) in
-the deployment env file. Do not use the HTTP URL, add a local GPU/pyannote worker, or add
+the root `.env`. Do not use the HTTP URL, add a local GPU/pyannote worker, or add
 `HF_TOKEN` to this no-GPU topology.
 
 The full-cloud profile uses a `7200`-second request timeout, zero provider retries, and a
 `9000`-second stale-recovery grace. The grace must remain above the blocking request timeout so
 Beat does not claim or dispatch a live Actsis request at the timeout boundary. For the equivalent
 no-GPU local topology and its `:8000` API / `:3001` web ports, use
-`docker-compose.local-actsis.yml` together with the base Compose file instead of changing the base
-generic `600`/`2`/`900` fallbacks.
+the `local-actsis` profile instead of changing the base generic `600`/`2`/`900` fallbacks.
 
 The same Actsis key isolation applies to embeddings: custom Actsis endpoints use `ACTSIS_API_KEY`
 unless a dedicated embedding or transcription key is supplied. `ACTSIS_CA_BUNDLE` is optional;

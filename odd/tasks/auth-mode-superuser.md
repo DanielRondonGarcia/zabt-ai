@@ -178,8 +178,8 @@ this nonce binding is separate from PKCE.
   root warning.
 - `docker compose --profile local config --quiet` passed; normalized config
   confirms the API waits for `db: service_healthy` and `db` uses `pg_isready`.
-  The external database overlay config using `COMPOSE_PROFILES=` with
-  `docker-compose.cloud.yml` also passed. No containers were started.
+  The external database configuration using the root Compose `cloud` profile also passed. No
+  containers were started.
 - The local database migration was not applied and containers were not restarted
   because bootstrap-superuser credentials were not supplied in this checkout.
   No Microsoft services were called.

@@ -54,13 +54,13 @@ See [hardware requirements](../README.md#hardware-requirements).
 
 ### Do I need a GPU?
 
-No — a CPU-only path exists (`docker-compose.cpu.yml`), just slower. A GPU is strongly
+No — a CPU-only path exists with the `cpu` Compose profile, just slower. A GPU is strongly
 recommended for `large-v3` and for reasonable throughput.
 
 ### Do I need Kong?
 
-No. Kong is only in the optional cloud/production topology as a TLS gateway. The default
-single-machine stack does not use it.
+No. Kong is an optional gateway for the advanced RunPod split (`cloud,kong` profiles). The default
+single-machine `local` and primary `cloud-prod` stacks do not use it.
 
 ### Do I need Supabase for authentication?
 

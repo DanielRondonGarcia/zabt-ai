@@ -12,15 +12,12 @@ RUN npm ci
 
 # Keep development dependencies available for the shared workspace and Next.js
 # build, then switch the runtime image to production mode.
-ARG NEXT_PUBLIC_API_URL=http://localhost:8000/api/v1
-ARG NEXT_PUBLIC_FRONTEND_URL=http://localhost:3000
+# Public API/frontend URLs are served dynamically and are not baked into this image.
 ARG NEXT_PUBLIC_POSTHOG_KEY=
 ARG NEXT_PUBLIC_POSTHOG_HOST=https://us.i.posthog.com
 ARG NEXT_PUBLIC_SENTRY_DSN=
 ARG NEXT_PUBLIC_SENTRY_ENVIRONMENT=development
 ENV NODE_ENV=production \
-    NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL} \
-    NEXT_PUBLIC_FRONTEND_URL=${NEXT_PUBLIC_FRONTEND_URL} \
     NEXT_PUBLIC_POSTHOG_KEY=${NEXT_PUBLIC_POSTHOG_KEY} \
     NEXT_PUBLIC_POSTHOG_HOST=${NEXT_PUBLIC_POSTHOG_HOST} \
     NEXT_PUBLIC_SENTRY_DSN=${NEXT_PUBLIC_SENTRY_DSN} \
