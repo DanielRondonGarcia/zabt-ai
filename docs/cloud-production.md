@@ -3,6 +3,8 @@
 > **Topology note:** This guide documents the single-machine `cloud-prod` stack with local stateful
 > services and model workers. For the managed-dependency topology with no local infrastructure or
 > model workers, use the `full-cloud` profile and [`full-cloud-deployment.md`](./full-cloud-deployment.md).
+> For the source-free, no-GPU GHCR deployment using local services and Actsis transcription, see
+> [`actsis-cloud-production.md`](./actsis-cloud-production.md).
 
 The `cloud-prod` profile in `docker-compose.yml` runs a production image stack on one machine. The
 API, backend worker, web app, GPU worker, MinIO server, `mc` initializer, and vision worker use

@@ -174,6 +174,173 @@ def test_cloud_prod_keeps_both_transcription_selectors_on_gpu_local() -> None:
     assert "TRANSCRIPTION_BACKEND: gpu-local" in cloud_prod_transcription.group()
 
 
+def test_cloud_actsis_profile_uses_only_immutable_ghcr_app_images() -> None:
+    text = _compose_text()
+    services = (
+        "cloud-actsis-env-check",
+        "redis-cloud-actsis",
+        "db-cloud-actsis",
+        "minio-cloud-actsis",
+        "minio-init-cloud-actsis",
+        "qdrant-cloud-actsis",
+        "api-cloud-actsis",
+        "worker-cloud-actsis",
+        "beat-cloud-actsis",
+        "web-cloud-actsis",
+    )
+    blocks = {name: _named_service_block(text, name) for name in services}
+    for name, block in blocks.items():
+        assert "profiles: [cloud-actsis]" in block, f"{name} must be scoped to cloud-actsis"
+        assert "build:" not in block, f"{name} must not build from a source checkout"
+        assert "env_file:" not in block, f"{name} must not receive the full root .env"
+
+    expected_images = {
+        "api-cloud-actsis": "zabt-ai-api",
+        "worker-cloud-actsis": "zabt-ai-worker",
+        "beat-cloud-actsis": "zabt-ai-worker",
+        "web-cloud-actsis": "zabt-ai-web",
+        "minio-cloud-actsis": "zabt-ai-minio",
+        "minio-init-cloud-actsis": "zabt-ai-mc",
+    }
+    for service, image in expected_images.items():
+        block = blocks[service]
+        expected = (
+            f"image: ghcr.io/danielrondongarcia/{image}:"
+            "${ZABT_IMAGE_TAG:-missing-zabt-image-tag}"
+        )
+        assert expected in block, f"{service} must use the single release tag"
+        assert "pull_policy: always" in block
+
+    profile_services = "\n".join(blocks.values())
+    for forbidden in ("worker-gpu", "runpod", "kong", "vision", "zabt-vision-worker"):
+        assert forbidden.casefold() not in profile_services.casefold()
+
+
+def test_cloud_actsis_aligns_transcription_storage_and_credential_scope() -> None:
+    text = _compose_text()
+    transcription = re.search(
+        r"(?ms)^x-cloud-actsis-backend-environment:.*?(?=^x-|^services:)",
+        text,
+    )
+    storage = re.search(
+        r"(?ms)^x-cloud-actsis-storage-environment:.*?(?=^x-|^services:)",
+        text,
+    )
+    assert transcription and storage
+
+    expected_transcription = (
+        "TRANSCRIPTION_PROVIDER: openai-file",
+        "TRANSCRIPTION_BACKEND: openai-file",
+        "TRANSCRIPTION_MODEL: whisper-diarize",
+        "TRANSCRIPTION_BASE_URL: ${TRANSCRIPTION_BASE_URL:-https://ai.actsis.internal/v1}",
+        'TRANSCRIPTION_CLOUD_DIARIZATION: "true"',
+        "TRANSCRIPTION_RESPONSE_FORMAT: diarized_json",
+        'TRANSCRIPTION_SPEAKER_REQUIRED: "true"',
+        "ACTSIS_API_KEY: ${ACTSIS_API_KEY:-}",
+    )
+    for setting in expected_transcription:
+        assert setting in transcription.group()
+
+    assert "STORAGE_PROVIDER: minio" in storage.group()
+    assert "MINIO_ENDPOINT: minio:9000" in storage.group()
+    api = _named_service_block(text, "api-cloud-actsis")
+    worker = _named_service_block(text, "worker-cloud-actsis")
+    beat = _named_service_block(text, "beat-cloud-actsis")
+    web = _named_service_block(text, "web-cloud-actsis")
+    assert "MINIO_PUBLIC_ENDPOINT: ${MINIO_PUBLIC_ENDPOINT:-}" in api
+    assert "case \"$$MINIO_PUBLIC_ENDPOINT\"" in api
+    assert "MINIO_PUBLIC_ENDPOINT:" not in worker
+    assert "MINIO_PUBLIC_ENDPOINT:" not in beat
+
+    for service, block in (("api", api), ("worker", worker), ("beat", beat)):
+        assert "*cloud-actsis-backend-environment" in block, (
+            f"{service} must receive the Actsis transcription settings and key"
+        )
+    assert "ACTSIS_API_KEY:" not in web
+
+    allowed_web_environment = {
+        "NODE_ENV",
+        "ZABT_PUBLIC_API_URL",
+        "ZABT_PUBLIC_FRONTEND_URL",
+        "NEXT_PUBLIC_POSTHOG_KEY",
+        "NEXT_PUBLIC_POSTHOG_HOST",
+        "NEXT_PUBLIC_SENTRY_DSN",
+        "NEXT_PUBLIC_SENTRY_ENVIRONMENT",
+    }
+    web_environment = re.search(r"(?ms)^    environment:\s*\n(?P<body>.*?)(?=^    [a-z])", web)
+    assert web_environment
+    environment_names = set(
+        re.findall(r"(?m)^      ([A-Z][A-Z0-9_]+):", web_environment.group("body"))
+    )
+    assert environment_names == allowed_web_environment
+    for forbidden in (
+        "ACTSIS_API_KEY",
+        "DATABASE_URL",
+        "AUTH_JWT_SECRET",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+    ):
+        assert forbidden not in web_environment.group("body")
+
+
+def test_cloud_actsis_preflight_requires_presence_flags_without_values() -> None:
+    text = _compose_text()
+    checker = _named_service_block(text, "cloud-actsis-env-check")
+    required = (
+        "ZABT_IMAGE_TAG",
+        "DATABASE_URL",
+        "POSTGRES_PASSWORD",
+        "AUTH_JWT_SECRET",
+        "AUTH_ALLOWED_ORIGINS",
+        "BACKEND_CORS_ORIGINS",
+        "APP_URL",
+        "MCP_PUBLIC_URL",
+        "MINIO_ACCESS_KEY",
+        "MINIO_SECRET_KEY",
+        "MINIO_BUCKET_NAME",
+        "MINIO_WEBHOOK_SECRET",
+        "MINIO_PUBLIC_ENDPOINT",
+        "ACTSIS_API_KEY",
+        "NEXT_PUBLIC_API_URL",
+        "NEXT_PUBLIC_FRONTEND_URL",
+    )
+    for name in required:
+        assert f"HAS_{name}: ${{{name}:+1}}" in text
+        assert f'test "$$HAS_{name}" = 1' in checker
+        assert f"{name} must be set" in checker
+
+    environment = re.search(r"(?ms)^    environment:\s*\n(?P<body>.*?)(?=^    [a-z])", checker)
+    assert environment
+    assert all(
+        name.startswith("HAS_")
+        for name in re.findall(r"(?m)^      ([A-Z][A-Z0-9_]+):", environment.group("body"))
+    )
+    assert "MINIO_PUBLIC_ENDPOINT must be set to a browser-reachable HTTPS URL" in checker
+    assert "$$MINIO_PUBLIC_ENDPOINT" not in checker
+    assert '"${MINIO_PUBLIC_ENDPOINT' not in checker
+
+
+def test_cloud_actsis_publishes_configurable_host_ports_and_local_services() -> None:
+    text = _compose_text()
+    expected_ports = {
+        "api-cloud-actsis": "${API_HOST_BIND:-0.0.0.0}:${API_PORT:-8000}:8000",
+        "web-cloud-actsis": "${WEB_HOST_BIND:-0.0.0.0}:${WEB_PORT:-3000}:3000",
+        "db-cloud-actsis": "${POSTGRES_HOST_BIND:-127.0.0.1}:${POSTGRES_HOST_PORT:-5433}:5432",
+        "minio-cloud-actsis": "${MINIO_HOST_BIND:-0.0.0.0}:${MINIO_HOST_PORT:-9000}:9000",
+        "qdrant-cloud-actsis": "${QDRANT_HOST_BIND:-127.0.0.1}:${QDRANT_HOST_PORT:-6333}:6333",
+    }
+    for service, mapping in expected_ports.items():
+        assert mapping in _named_service_block(text, service)
+
+    assert "image: redis:7-alpine" in _named_service_block(text, "redis-cloud-actsis")
+    assert "image: postgres:16-alpine" in _named_service_block(text, "db-cloud-actsis")
+    assert (
+        "image: qdrant/qdrant@sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10"
+        in _named_service_block(text, "qdrant-cloud-actsis")
+    )
+    assert "./docker/postgres/init.sql" not in _named_service_block(text, "db-cloud-actsis")
+
+
 def test_full_cloud_env_example_selects_https_actsis_diarization_without_gpu_values() -> None:
     text = _env_example_text()
 

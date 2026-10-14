@@ -146,8 +146,14 @@ plus ~2-4 GB for pyannote diarization:
 | Cloud / RunPod split | Set `COMPOSE_PROFILES=cloud,kong` in root `.env`, then run `docker compose up -d` | Small API VPS + serverless GPU; managed DB/storage |
 | Full cloud | Set `COMPOSE_PROFILES=full-cloud` in root `.env`, then run `docker compose up -d` | External Postgres, Redis, S3, Qdrant, Actsis, and OpenAI |
 | Cloud production | Set `COMPOSE_PROFILES=cloud-prod` in root `.env`, then run `docker compose up -d` | Single-host GHCR-pinned stack; requires a compatible runtime-config web image |
+| Cloud Actsis | Set `COMPOSE_PROFILES=cloud-actsis` in root `.env`, then run `docker compose up -d` | Source-free GHCR stack with local Postgres, Redis, MinIO, and Qdrant; no GPU or RunPod |
 
-See [docs/self-hosting.md](docs/self-hosting.md) and
+For the no-GPU GHCR deployment, its required root `.env` values, and the web-image compatibility
+gate, see [Cloud Actsis production](docs/actsis-cloud-production.md). Do not deploy the current
+`v1.0.0` web image; it does not include `/api/runtime-config`.
+
+See [docs/self-hosting.md](docs/self-hosting.md),
+[the cloud production overview](docs/cloud-production.md), and
 [docs/advanced-runpod-split.md](docs/advanced-runpod-split.md). Full variable reference:
 [docs/configuration.md](docs/configuration.md). Common questions (including AGPL): [docs/faq.md](docs/faq.md).
 
