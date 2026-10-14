@@ -1,5 +1,6 @@
 FROM golang:1.24.8-alpine3.22@sha256:3d78beb141d98f42337f1252ecf2a5f20374109929a4c3f6817f9e4179cc0ae5 AS build
 
+ARG TARGETARCH
 ARG MINIO_VERSION=RELEASE.2025-10-15T17-29-55Z
 ARG MINIO_COMMIT=9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a
 
@@ -11,7 +12,7 @@ RUN git clone --depth 1 --branch "${MINIO_VERSION}" https://github.com/minio/min
 
 ENV CGO_ENABLED=0 \
     GOOS=linux \
-    GOARCH=amd64
+    GOARCH=${TARGETARCH}
 
 RUN mkdir -p /out \
     && release_date="${MINIO_VERSION#RELEASE.}" \

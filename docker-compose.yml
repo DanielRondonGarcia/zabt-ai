@@ -696,7 +696,10 @@ services:
 
   # Zabt-maintained source builds; see docs/releasing.md for upstream pins.
   minio:
-    image: ghcr.io/danielrondongarcia/zabt-ai-minio:latest
+    image: zabt-ai-minio:local
+    build:
+      context: .
+      dockerfile: docker/minio/Dockerfile
     restart: unless-stopped
     mem_limit: ${ZABT_MEMORY_LIMIT_MINIO:-768m}
     profiles: [local, cpu, local-actsis]
@@ -715,7 +718,10 @@ services:
       - minio_data:/data
 
   minio-init:
-    image: ghcr.io/danielrondongarcia/zabt-ai-mc:latest
+    image: zabt-ai-mc:local
+    build:
+      context: .
+      dockerfile: docker/minio/Dockerfile.mc
     profiles: [local, cpu, local-actsis]
     depends_on:
       - minio
