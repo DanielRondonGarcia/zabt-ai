@@ -289,7 +289,7 @@ jobs:
           if isinstance(command, str):
               command = [command]
           command_text = "\n".join(command)
-          assert '"${HAS_ACTSIS_API_KEY}" = 1' in command_text
+          assert '"$HAS_ACTSIS_API_KEY" = 1' in command_text
           assert "ACTSIS_API_KEY must be set in root .env" in command_text
           assert "MINIO_PUBLIC_ENDPOINT must be set to a browser-reachable HTTPS URL" in command_text
           assert "${MINIO_PUBLIC_ENDPOINT}" not in command_text
