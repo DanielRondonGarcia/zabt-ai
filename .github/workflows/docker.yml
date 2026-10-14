@@ -300,8 +300,10 @@ jobs:
           if isinstance(entrypoint, str):
               entrypoint = [entrypoint]
           flag_only_env = {name: "1" for name in checker_environment}
+          # Compose preserves $$ escapes; collapse one layer before shell simulation.
+          container_command = [part.replace("$$", "$") for part in command]
           passed = subprocess.run(
-              [*entrypoint, *command],
+              [*entrypoint, *container_command],
               capture_output=True,
               text=True,
               env=flag_only_env,
@@ -314,7 +316,7 @@ jobs:
               missing_env = dict(flag_only_env)
               missing_env[f"HAS_{missing_name}"] = ""
               rejected = subprocess.run(
-                  [*entrypoint, *command],
+                  [*entrypoint, *container_command],
                   capture_output=True,
                   text=True,
                   env=missing_env,
