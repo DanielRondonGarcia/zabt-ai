@@ -236,6 +236,7 @@ def test_cloud_actsis_aligns_transcription_storage_and_credential_scope() -> Non
         "TRANSCRIPTION_RESPONSE_FORMAT: diarized_json",
         'TRANSCRIPTION_SPEAKER_REQUIRED: "true"',
         "ACTSIS_API_KEY: ${ACTSIS_API_KEY:-}",
+        "ACTSIS_CA_BUNDLE: ${ACTSIS_CA_BUNDLE:-/usr/local/share/ca-certificates/actsis-root-ca.crt}",
     )
     for setting in expected_transcription:
         assert setting in transcription.group()
@@ -304,6 +305,7 @@ def test_cloud_actsis_aligns_transcription_storage_and_credential_scope() -> Non
         "OPENAI_API_KEY",
         "AI_CHAT_API_KEY",
         "VISION_OPENAI_API_KEY",
+        "ACTSIS_CA_BUNDLE",
     ):
         assert forbidden not in web_environment.group("body")
 
