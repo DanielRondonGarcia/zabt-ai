@@ -252,7 +252,8 @@ jobs:
               for service in (services["api-cloud-actsis"], services["worker-cloud-actsis"], services["beat-cloud-actsis"])
           )
           assert all(service["ACTSIS_API_KEY"] == os.environ["ACTSIS_API_KEY"] for service in (api, worker, beat))
-          assert api["MINIO_ENDPOINT"] == worker["MINIO_ENDPOINT"] == beat["MINIO_ENDPOINT"] == "minio:9000"
+          assert api["MINIO_ENDPOINT"] == worker["MINIO_ENDPOINT"] == "minio:9000"
+          assert "MINIO_ENDPOINT" not in beat
           assert api["MINIO_PUBLIC_ENDPOINT"] == os.environ["MINIO_PUBLIC_ENDPOINT"]
           assert os.environ["MINIO_PUBLIC_ENDPOINT"].startswith("https://")
           assert services["minio-cloud-actsis"]["environment"]["MINIO_NOTIFY_WEBHOOK_ENDPOINT_PRIMARY"] == "http://api:8000/api/v1/webhooks/minio"
