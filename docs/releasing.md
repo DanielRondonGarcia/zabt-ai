@@ -161,6 +161,20 @@ docker compose pull
 docker compose up -d --no-build
 ```
 
+## Cloud Actsis deployment
+
+The `cloud-actsis` profile uses only the GHCR API, worker/beat, web, MinIO, and `mc` images selected
+by one immutable `ZABT_IMAGE_TAG`; PostgreSQL, Redis, and Qdrant run locally. It does not activate
+the GPU worker, RunPod, vision, or bot images. The core release image set is sufficient; do not
+enable optional images just for this topology.
+
+The selected release must include `/api/runtime-config` in its web image. The published `v1.0.0`
+web image predates that route and is incompatible. Merge the runtime-config implementation before
+publishing a later compatible release, then configure the host's root `.env` with that exact
+immutable tag. Follow [the Cloud Actsis deployment guide](./actsis-cloud-production.md) for its
+required environment and launch steps. A deployment consists of the root Compose file and `.env`;
+the services have no `build:` fallback or source-tree bind mounts.
+
 ## Rollback
 
 For **cloud-prod**, restore a previous tag only if its web image contains `/api/runtime-config`, then

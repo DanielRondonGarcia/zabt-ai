@@ -56,7 +56,7 @@ jobs:
         env:
           COMPOSE_DISABLE_ENV_FILE: '1'
           COMPOSE_PROFILES: cloud-prod
-          ZABT_IMAGE_TAG: v1.0.0
+          ZABT_IMAGE_TAG: v99.0.0
           DATABASE_URL: postgresql+asyncpg://ci:ci@db:5432/zabt
           POSTGRES_USER: ci
           POSTGRES_PASSWORD: ci-dummy-postgres-password
@@ -158,6 +158,198 @@ jobs:
               image = services[name]["image"]
               assert image.endswith(":missing-zabt-image-tag"), (name, image)
               assert not image.endswith(":latest"), (name, image)
+          PY
+
+      - name: Validate source-free Cloud Actsis profile
+        env:
+          COMPOSE_DISABLE_ENV_FILE: '1'
+          COMPOSE_PROFILES: cloud-actsis
+          ZABT_IMAGE_TAG: v99.0.0
+          DATABASE_URL: postgresql+asyncpg://ci:ci@db:5432/zabt
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci-dummy-postgres-password
+          POSTGRES_DB: zabt
+          AUTH_JWT_SECRET: ci-dummy-auth-secret-with-enough-diversity-1234
+          AUTH_ALLOWED_ORIGINS: https://web.example.test
+          BACKEND_CORS_ORIGINS: https://web.example.test
+          APP_URL: https://web.example.test
+          MCP_PUBLIC_URL: https://api.example.test/api/v1/mcp
+          MINIO_ACCESS_KEY: ci-dummy-minio-access-key
+          MINIO_SECRET_KEY: ci-dummy-minio-secret-key
+          MINIO_BUCKET_NAME: ci-dummy-zabt-bucket
+          MINIO_WEBHOOK_SECRET: ci-dummy-minio-webhook-secret
+          MINIO_PUBLIC_ENDPOINT: https://uploads.example.test
+          ACTSIS_API_KEY: ci-dummy-actsis-key
+          NEXT_PUBLIC_API_URL: https://api.example.test/api/v1
+          NEXT_PUBLIC_FRONTEND_URL: https://web.example.test
+        run: |
+          docker compose --profile cloud-actsis config --format json > "$RUNNER_TEMP/cloud-actsis-compose.json"
+          python3 - "$RUNNER_TEMP/cloud-actsis-compose.json" <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+          import sys
+
+          image_tag = os.environ["ZABT_IMAGE_TAG"]
+          if not re.fullmatch(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", image_tag):
+              raise SystemExit("ZABT_IMAGE_TAG must use an immutable vMAJOR.MINOR.PATCH release tag.")
+
+          with open(sys.argv[1], encoding="utf-8") as compose_file:
+              services = json.load(compose_file)["services"]
+
+          expected_names = {
+              "cloud-actsis-env-check",
+              "redis-cloud-actsis",
+              "db-cloud-actsis",
+              "minio-cloud-actsis",
+              "minio-init-cloud-actsis",
+              "qdrant-cloud-actsis",
+              "api-cloud-actsis",
+              "worker-cloud-actsis",
+              "beat-cloud-actsis",
+              "web-cloud-actsis",
+          }
+          assert set(services) == expected_names
+
+          expected_images = {
+              "api-cloud-actsis": f"ghcr.io/danielrondongarcia/zabt-ai-api:{image_tag}",
+              "worker-cloud-actsis": f"ghcr.io/danielrondongarcia/zabt-ai-worker:{image_tag}",
+              "beat-cloud-actsis": f"ghcr.io/danielrondongarcia/zabt-ai-worker:{image_tag}",
+              "web-cloud-actsis": f"ghcr.io/danielrondongarcia/zabt-ai-web:{image_tag}",
+              "minio-cloud-actsis": f"ghcr.io/danielrondongarcia/zabt-ai-minio:{image_tag}",
+              "minio-init-cloud-actsis": f"ghcr.io/danielrondongarcia/zabt-ai-mc:{image_tag}",
+          }
+          for name, expected_image in expected_images.items():
+              service = services[name]
+              assert service["image"] == expected_image
+              assert not service.get("build"), f"{name} must not have a source-build fallback"
+              assert service.get("pull_policy") == "always"
+              assert service.get("profiles") == ["cloud-actsis"]
+              assert "env_file" not in service
+
+          for name in expected_names - set(expected_images) - {"cloud-actsis-env-check"}:
+              service = services[name]
+              assert not service.get("build"), f"{name} must not build locally"
+              assert service.get("profiles") == ["cloud-actsis"]
+
+          assert services["qdrant-cloud-actsis"]["image"] == (
+              "qdrant/qdrant@sha256:12364fe851b9f17356fc88189fc06d1b521262e04659ec7345975b00c9246a10"
+          )
+
+          api = services["api-cloud-actsis"]["environment"]
+          worker = services["worker-cloud-actsis"]["environment"]
+          beat = services["beat-cloud-actsis"]["environment"]
+          web = services["web-cloud-actsis"]["environment"]
+          assert all(
+              service["environment"]["TRANSCRIPTION_PROVIDER"] == "openai-file"
+              and service["environment"]["TRANSCRIPTION_BACKEND"] == "openai-file"
+              and service["environment"]["TRANSCRIPTION_MODEL"] == "whisper-diarize"
+              and service["environment"]["TRANSCRIPTION_BASE_URL"] == "https://ai.actsis.internal/v1"
+              and service["environment"]["TRANSCRIPTION_CLOUD_DIARIZATION"] == "true"
+              and service["environment"]["TRANSCRIPTION_RESPONSE_FORMAT"] == "diarized_json"
+              and service["environment"]["TRANSCRIPTION_SPEAKER_REQUIRED"] == "true"
+              for service in (services["api-cloud-actsis"], services["worker-cloud-actsis"], services["beat-cloud-actsis"])
+          )
+          assert all(service["ACTSIS_API_KEY"] == os.environ["ACTSIS_API_KEY"] for service in (api, worker, beat))
+          assert api["MINIO_ENDPOINT"] == worker["MINIO_ENDPOINT"] == "minio:9000"
+          assert "MINIO_ENDPOINT" not in beat
+          assert api["MINIO_PUBLIC_ENDPOINT"] == os.environ["MINIO_PUBLIC_ENDPOINT"]
+          assert os.environ["MINIO_PUBLIC_ENDPOINT"].startswith("https://")
+          assert services["minio-cloud-actsis"]["environment"]["MINIO_NOTIFY_WEBHOOK_ENDPOINT_PRIMARY"] == "http://api:8000/api/v1/webhooks/minio"
+          assert web["ZABT_PUBLIC_API_URL"] == os.environ["NEXT_PUBLIC_API_URL"]
+          assert web["ZABT_PUBLIC_FRONTEND_URL"] == os.environ["NEXT_PUBLIC_FRONTEND_URL"]
+          allowed_web_keys = {
+              "NODE_ENV",
+              "ZABT_PUBLIC_API_URL",
+              "ZABT_PUBLIC_FRONTEND_URL",
+              "NEXT_PUBLIC_POSTHOG_KEY",
+              "NEXT_PUBLIC_POSTHOG_HOST",
+              "NEXT_PUBLIC_SENTRY_DSN",
+              "NEXT_PUBLIC_SENTRY_ENVIRONMENT",
+          }
+          assert set(web) == allowed_web_keys
+          assert "ACTSIS_API_KEY" not in web
+          for name, service in services.items():
+              environment = service.get("environment", {})
+              if name in {"api-cloud-actsis", "worker-cloud-actsis", "beat-cloud-actsis"}:
+                  assert environment["ACTSIS_API_KEY"] == os.environ["ACTSIS_API_KEY"]
+              else:
+                  assert "ACTSIS_API_KEY" not in environment
+              if name != "cloud-actsis-env-check":
+                  assert "RUNPOD_API_KEY" not in environment
+                  assert "GPU_SERVICE_URL" not in environment
+
+          checker = services["cloud-actsis-env-check"]
+          checker_environment = checker["environment"]
+          assert checker_environment
+          assert all(name.startswith("HAS_") for name in checker_environment)
+          assert all(value == "1" for value in checker_environment.values())
+          command = checker["command"]
+          if isinstance(command, str):
+              command = [command]
+          command_text = "\n".join(command)
+          assert '"$$HAS_ACTSIS_API_KEY" = 1' in command_text
+          assert "ACTSIS_API_KEY must be set in root .env" in command_text
+          assert "MINIO_PUBLIC_ENDPOINT must be set to a browser-reachable HTTPS URL" in command_text
+          assert "${MINIO_PUBLIC_ENDPOINT}" not in command_text
+          assert "ci-dummy-actsis-key" not in json.dumps(checker)
+          assert "ci-dummy-minio-webhook-secret" not in json.dumps(checker)
+
+          entrypoint = checker["entrypoint"]
+          if isinstance(entrypoint, str):
+              entrypoint = [entrypoint]
+          flag_only_env = {name: "1" for name in checker_environment}
+          # Compose preserves $$ escapes; collapse one layer before shell simulation.
+          container_command = [part.replace("$$", "$") for part in command]
+          passed = subprocess.run(
+              [*entrypoint, *container_command],
+              capture_output=True,
+              text=True,
+              env=flag_only_env,
+              check=False,
+          )
+          assert passed.returncode == 0
+          assert "Cloud Actsis configuration is present." in passed.stdout
+
+          for missing_name in ("ZABT_IMAGE_TAG", "ACTSIS_API_KEY", "MINIO_PUBLIC_ENDPOINT"):
+              missing_env = dict(flag_only_env)
+              missing_env[f"HAS_{missing_name}"] = ""
+              rejected = subprocess.run(
+                  [*entrypoint, *container_command],
+                  capture_output=True,
+                  text=True,
+                  env=missing_env,
+                  check=False,
+              )
+              assert rejected.returncode != 0
+              assert f"{missing_name} must be set" in rejected.stderr
+              assert "ci-dummy-actsis-key" not in rejected.stdout + rejected.stderr
+              assert "ci-dummy-minio-webhook-secret" not in rejected.stdout + rejected.stderr
+          PY
+
+          env -u ZABT_IMAGE_TAG -u ACTSIS_API_KEY -u MINIO_PUBLIC_ENDPOINT docker compose --profile cloud-actsis config --format json > "$RUNNER_TEMP/cloud-actsis-missing-required.json"
+          python3 - "$RUNNER_TEMP/cloud-actsis-missing-required.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as compose_file:
+              services = json.load(compose_file)["services"]
+          checker_environment = services["cloud-actsis-env-check"]["environment"]
+          assert checker_environment["HAS_ZABT_IMAGE_TAG"] == ""
+          assert checker_environment["HAS_ACTSIS_API_KEY"] == ""
+          assert checker_environment["HAS_MINIO_PUBLIC_ENDPOINT"] == ""
+          assert all(name.startswith("HAS_") for name in checker_environment)
+          for name in (
+              "api-cloud-actsis",
+              "worker-cloud-actsis",
+              "beat-cloud-actsis",
+              "web-cloud-actsis",
+              "minio-cloud-actsis",
+              "minio-init-cloud-actsis",
+          ):
+              assert services[name]["image"].endswith(":missing-zabt-image-tag")
+              assert not services[name]["image"].endswith(":latest")
           PY
 
   verify-web-runtime-config:
