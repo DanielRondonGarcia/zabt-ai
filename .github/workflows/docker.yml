@@ -151,7 +151,7 @@ jobs:
           production_services = [
               name for name, service in services.items()
               if "cloud-prod" in service.get("profiles", [])
-              and name not in {"db-cloud-prod", "cloud-prod-env-check"}
+              and name not in {"db-cloud-prod", "cloud-prod-env-check", "redis"}
           ]
           assert production_services
           for name in production_services:
