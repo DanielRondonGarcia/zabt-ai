@@ -243,6 +243,7 @@ def test_cloud_actsis_aligns_transcription_storage_and_credential_scope() -> Non
 
     assert "STORAGE_PROVIDER: minio" in storage.group()
     assert "MINIO_ENDPOINT: minio:9000" in storage.group()
+    assert "MINIO_WEBHOOK_SECRET: ${MINIO_WEBHOOK_SECRET:-}" in storage.group()
     api = _named_service_block(text, "api-cloud-actsis")
     worker = _named_service_block(text, "worker-cloud-actsis")
     beat = _named_service_block(text, "beat-cloud-actsis")
@@ -256,7 +257,11 @@ def test_cloud_actsis_aligns_transcription_storage_and_credential_scope() -> Non
         assert "*cloud-actsis-backend-environment" in block, (
             f"{service} must receive the Actsis transcription settings and key"
         )
+        assert "*cloud-actsis-storage-environment" in block, (
+            f"{service} must receive the shared MinIO settings"
+        )
     assert "ACTSIS_API_KEY:" not in web
+    assert "MINIO_WEBHOOK_SECRET" not in web
 
     allowed_web_environment = {
         "NODE_ENV",
