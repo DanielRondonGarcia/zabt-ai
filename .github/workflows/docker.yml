@@ -252,8 +252,11 @@ jobs:
               for service in (services["api-cloud-actsis"], services["worker-cloud-actsis"], services["beat-cloud-actsis"])
           )
           assert all(service["ACTSIS_API_KEY"] == os.environ["ACTSIS_API_KEY"] for service in (api, worker, beat))
-          assert api["MINIO_ENDPOINT"] == worker["MINIO_ENDPOINT"] == "minio:9000"
-          assert "MINIO_ENDPOINT" not in beat
+          assert api["MINIO_ENDPOINT"] == worker["MINIO_ENDPOINT"] == beat["MINIO_ENDPOINT"] == "minio:9000"
+          assert all(
+              service["MINIO_WEBHOOK_SECRET"] == os.environ["MINIO_WEBHOOK_SECRET"]
+              for service in (api, worker, beat)
+          )
           assert api["MINIO_PUBLIC_ENDPOINT"] == os.environ["MINIO_PUBLIC_ENDPOINT"]
           assert os.environ["MINIO_PUBLIC_ENDPOINT"].startswith("https://")
           assert services["minio-cloud-actsis"]["environment"]["MINIO_NOTIFY_WEBHOOK_ENDPOINT_PRIMARY"] == "http://api:8000/api/v1/webhooks/minio"
@@ -270,12 +273,15 @@ jobs:
           }
           assert set(web) == allowed_web_keys
           assert "ACTSIS_API_KEY" not in web
+          assert "MINIO_WEBHOOK_SECRET" not in web
           for name, service in services.items():
               environment = service.get("environment", {})
               if name in {"api-cloud-actsis", "worker-cloud-actsis", "beat-cloud-actsis"}:
                   assert environment["ACTSIS_API_KEY"] == os.environ["ACTSIS_API_KEY"]
+                  assert environment["MINIO_WEBHOOK_SECRET"] == os.environ["MINIO_WEBHOOK_SECRET"]
               else:
                   assert "ACTSIS_API_KEY" not in environment
+                  assert "MINIO_WEBHOOK_SECRET" not in environment
               if name != "cloud-actsis-env-check":
                   assert "RUNPOD_API_KEY" not in environment
                   assert "GPU_SERVICE_URL" not in environment
