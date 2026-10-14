@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2025-2026 Afeef Janjua
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import net from "node:net";
