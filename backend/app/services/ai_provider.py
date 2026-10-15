@@ -41,6 +41,37 @@ _SAFE_REQUEST_ID = re.compile(
 _REQUEST_ID_SECRET_MARKER = re.compile(
     r"(?:sk|rk|pk|api[_-]?key|token|secret|bearer)[_-]", re.IGNORECASE
 )
+_TIMEOUT_EXCEPTION_CLASSES = frozenset(
+    {
+        "APITimeoutError",
+        "ConnectTimeout",
+        "PoolTimeout",
+        "ReadTimeout",
+        "Timeout",
+        "TimeoutError",
+        "TimeoutException",
+        "WriteTimeout",
+    }
+)
+_CONNECTION_EXCEPTION_CLASSES = frozenset(
+    {
+        "APIConnectionError",
+        "ConnectError",
+        "ConnectionError",
+        "NameResolutionError",
+        "NetworkError",
+        "ProxyError",
+        "RemoteProtocolError",
+    }
+)
+_QUOTA_ERROR_CODES = frozenset(
+    {
+        "billing_hard_limit_reached",
+        "billing_limit_exceeded",
+        "billing_limit_reached",
+        "insufficient_quota",
+    }
+)
 
 
 def _bounded_output_tokens(max_tokens: int | None) -> int:
@@ -161,6 +192,94 @@ class AIProviderError(RuntimeError):
         super().__init__(message)
         self.configured = configured
         self.diagnostics = diagnostics
+
+    def __str__(self) -> str:
+        """Return a user-safe explanation based only on allowlisted diagnostics."""
+        return _public_provider_error_message(self.diagnostics)
+
+
+def _public_provider_error_message(
+    diagnostics: ProviderErrorDiagnostics | None,
+) -> str:
+    if diagnostics is None:
+        return (
+            "The AI provider request failed. Check provider configuration and logs "
+            "before retrying."
+        )
+
+    status = diagnostics.http_status
+    if (
+        not isinstance(status, int)
+        or isinstance(status, bool)
+        or not 100 <= status <= 599
+    ):
+        status = None
+    if status == 429:
+        reported_codes = {
+            value.casefold()
+            for value in (diagnostics.provider_error_type, diagnostics.provider_error_code)
+            if isinstance(value, str)
+        }
+        if reported_codes & _QUOTA_ERROR_CODES:
+            return (
+                "The AI provider reports exhausted quota or billing limits. Check "
+                "quota and billing before retrying."
+            )
+        return (
+            "The AI provider is rate-limiting requests (HTTP 429). Wait for the rate "
+            "limit to reset or check provider rate limits before retrying."
+        )
+    if status == 401:
+        return (
+            "AI provider authentication failed (HTTP 401). Check the configured "
+            "credentials before retrying."
+        )
+    if status == 403:
+        return (
+            "The AI provider denied access (HTTP 403). Check account permissions "
+            "and model access before retrying."
+        )
+    if status == 408:
+        return (
+            "The AI provider request timed out (HTTP 408). Check provider availability "
+            "and timeout settings before retrying."
+        )
+    if status is not None and 500 <= status <= 599:
+        return (
+            f"The AI provider returned a server error (HTTP {status}). Check provider "
+            "status and logs before retrying."
+        )
+    if status is not None and 400 <= status <= 499:
+        return (
+            f"The AI provider rejected the request with HTTP {status}. Check provider "
+            "configuration and request requirements before retrying."
+        )
+    if status is not None:
+        return (
+            f"The AI provider returned HTTP status {status}. Check the endpoint "
+            "configuration and provider logs before retrying."
+        )
+
+    exception_classes = {
+        value
+        for value in (diagnostics.exception_class, diagnostics.cause_class)
+        if isinstance(value, str)
+    }
+    if exception_classes & _TIMEOUT_EXCEPTION_CLASSES:
+        return (
+            "The AI provider request timed out. Check provider availability and timeout "
+            "settings before retrying."
+        )
+    if exception_classes & _CONNECTION_EXCEPTION_CLASSES:
+        return (
+            "The AI provider could not be reached. No HTTP response was received, so "
+            "quota status cannot be determined from this error. Check connectivity "
+            "and the provider endpoint before retrying."
+        )
+    return (
+        "The AI provider error could not be classified. Check provider logs before "
+        "repeated retries."
+    )
 
 
 class CompletionClient(Protocol):
