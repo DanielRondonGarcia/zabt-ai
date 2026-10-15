@@ -72,6 +72,20 @@ _QUOTA_ERROR_CODES = frozenset(
         "insufficient_quota",
     }
 )
+_SAFE_INTERNAL_ERROR_MESSAGES = {
+    "configured AI provider is unavailable": (
+        "The configured AI provider is unavailable. Check its settings and credentials "
+        "before retrying."
+    ),
+    "AI provider settings are unavailable": (
+        "AI provider settings are unavailable. Check provider configuration and logs "
+        "before retrying."
+    ),
+    "application default AI provider is unavailable": (
+        "The application default AI provider is unavailable. Check application AI "
+        "configuration and logs before retrying."
+    ),
+}
 
 
 def _bounded_output_tokens(max_tokens: int | None) -> int:
@@ -194,7 +208,13 @@ class AIProviderError(RuntimeError):
         self.diagnostics = diagnostics
 
     def __str__(self) -> str:
-        """Return a user-safe explanation based only on allowlisted diagnostics."""
+        """Return a user-safe explanation from diagnostics or fixed internal messages."""
+        if self.diagnostics is None:
+            message = self.args[0] if self.args and type(self.args[0]) is str else None
+            if message is not None:
+                safe_message = _SAFE_INTERNAL_ERROR_MESSAGES.get(message)
+                if safe_message is not None:
+                    return safe_message
         return _public_provider_error_message(self.diagnostics)
 
 

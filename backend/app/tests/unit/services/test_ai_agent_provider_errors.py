@@ -183,11 +183,39 @@ def test_missing_diagnostics_uses_safe_generic_fallback():
     error = AIProviderError("URL_SECRET BODY_SECRET API_KEY_SECRET")
 
     public_message = str(error)
-    assert "AI provider request failed" in public_message
-    assert "Check provider configuration and logs before retrying" in public_message
+    assert public_message == (
+        "The AI provider request failed. Check provider configuration and logs "
+        "before retrying."
+    )
     assert "URL_SECRET" not in public_message
     assert "BODY_SECRET" not in public_message
     assert "API_KEY_SECRET" not in public_message
+
+
+@pytest.mark.parametrize(
+    ("internal_message", "expected"),
+    [
+        (
+            "configured AI provider is unavailable",
+            "The configured AI provider is unavailable.",
+        ),
+        (
+            "AI provider settings are unavailable",
+            "AI provider settings are unavailable.",
+        ),
+        (
+            "application default AI provider is unavailable",
+            "The application default AI provider is unavailable.",
+        ),
+    ],
+)
+def test_allowlisted_internal_configuration_messages_remain_useful(
+    internal_message: str,
+    expected: str,
+) -> None:
+    public_message = str(AIProviderError(internal_message))
+
+    assert expected in public_message
 
 
 def test_successful_summary_returns_content_without_failure_log(caplog):
