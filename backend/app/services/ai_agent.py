@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+import re
 from collections.abc import Iterable
+from time import perf_counter
 from typing import List, Optional
 from pydantic import BaseModel, Field
 from app.core.config import settings
@@ -256,18 +258,74 @@ def _completion_text(
     *,
     temperature: float,
     completion_client: CompletionClient | None = None,
+    phase: str = "context_summary",
 ) -> str:
     client = completion_client or OpenAICompatibleCompletionClient(
         _client,
         model=settings.OPENAI_MODEL,
     )
-    return client.complete(
+    return _summary_completion(
+        client,
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_content},
         ],
         temperature=temperature,
+        phase=phase,
     ) or "Summary could not be generated."
+
+
+def _safe_summary_model(model: object) -> str:
+    if not isinstance(model, str):
+        return "unknown"
+    candidate = model.strip()
+    if (
+        not candidate
+        or len(candidate) > 128
+        or "://" in candidate
+        or re.search(r"[?&#=@\s]", candidate)
+        or re.search(r"(?:sk|rk|pk|api[_-]?key|token|secret|bearer)[_-]", candidate, re.I)
+        or re.search(r"[A-Za-z0-9_-]{32,}", candidate)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]*", candidate)
+    ):
+        return "redacted"
+    return candidate
+
+
+def _summary_completion(
+    client: CompletionClient,
+    messages: list[dict[str, str]],
+    *,
+    temperature: float,
+    phase: str,
+) -> str:
+    started_at = perf_counter()
+    try:
+        return client.complete(messages, temperature=temperature)
+    except AIProviderError as exc:
+        details = exc.diagnostics
+        provider = getattr(getattr(client, "provider", None), "value", None)
+        if not isinstance(provider, str):
+            provider = getattr(client, "provider", None)
+        if not isinstance(provider, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,32}", provider):
+            provider = "unknown"
+        elapsed_ms = max(0, round((perf_counter() - started_at) * 1000))
+        logger.error(
+            "summary provider request failed operation=summary stage=stage_summarize "
+            "phase=%s provider=%s model=%s exception_class=%s cause_class=%s "
+            "http_status=%s provider_error_type=%s provider_error_code=%s request_id=%s elapsed_ms=%s",
+            phase,
+            provider,
+            _safe_summary_model(getattr(client, "model", None)),
+            details.exception_class if details else type(exc).__name__,
+            details.cause_class if details else None,
+            details.http_status if details else None,
+            details.provider_error_type if details else None,
+            details.provider_error_code if details else None,
+            details.request_id if details else None,
+            elapsed_ms,
+        )
+        raise
 
 
 def summarize_context(
@@ -314,6 +372,7 @@ def summarize_context(
             + warning_text,
             temperature=0.3,
             completion_client=completion_client,
+            phase="single_chunk_summary",
         )
 
     partials: list[str] = []
@@ -328,6 +387,7 @@ def summarize_context(
                 + format_context_chunk(chunk),
                 temperature=0.2,
                 completion_client=completion_client,
+                phase="partial_chunk_summary",
             )
         )
 
@@ -346,6 +406,7 @@ def summarize_context(
         + warning_text,
         temperature=0.3,
         completion_client=completion_client,
+        phase="summary_synthesis",
     )
 
 
@@ -433,10 +494,12 @@ def summarize_transcript(
         _client,
         model=settings.OPENAI_MODEL,
     )
-    return client.complete(
+    return _summary_completion(
+        client,
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": transcript_text},
         ],
         temperature=0.3,
+        phase="transcript_summary",
     ) or "Summary could not be generated."

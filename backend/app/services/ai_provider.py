@@ -2,6 +2,7 @@
 # Copyright (C) 2025-2026 Afeef Janjua
 """Provider-neutral completion clients for summaries and AI Chat."""
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -27,6 +28,19 @@ PROVIDER_TIMEOUT_SECONDS = 120.0
 MAX_PROVIDER_RETRIES = 0
 CompletionPurpose = Literal["summary", "chat"]
 CompletionMessage = Mapping[str, str]
+_SAFE_DIAGNOSTIC_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,95}\Z")
+_SECRET_LIKE_TOKEN = re.compile(
+    r"(?:sk|rk|pk|api[_-]?key|token|secret|bearer)[_-]|[A-Za-z0-9_-]{32,}",
+    re.IGNORECASE,
+)
+_SAFE_REQUEST_ID = re.compile(
+    r"(?:req|request)[_-][A-Za-z0-9_-]{8,96}|"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z",
+    re.IGNORECASE,
+)
+_REQUEST_ID_SECRET_MARKER = re.compile(
+    r"(?:sk|rk|pk|api[_-]?key|token|secret|bearer)[_-]", re.IGNORECASE
+)
 
 
 def _bounded_output_tokens(max_tokens: int | None) -> int:
@@ -52,12 +66,101 @@ def build_openai_client(
     )
 
 
+@dataclass(frozen=True)
+class ProviderErrorDiagnostics:
+    exception_class: str
+    cause_class: str | None = None
+    http_status: int | None = None
+    provider_error_type: str | None = None
+    provider_error_code: str | None = None
+    request_id: str | None = None
+
+
+def _safe_diagnostic_token(value: object) -> str | None:
+    if not isinstance(value, str) or not _SAFE_DIAGNOSTIC_TOKEN.fullmatch(value):
+        return None
+    if _SECRET_LIKE_TOKEN.search(value):
+        return None
+    return value
+
+
+def _safe_request_id(value: object) -> str | None:
+    if not isinstance(value, str) or len(value) > 128:
+        return None
+    if not _SAFE_REQUEST_ID.fullmatch(value):
+        return None
+    if _REQUEST_ID_SECRET_MARKER.search(value):
+        return None
+    return value
+
+
+def _safe_attribute(value: object, name: str) -> object | None:
+    try:
+        return getattr(value, name, None)
+    except Exception:
+        return None
+
+
+def _provider_error_diagnostics(error: Exception) -> ProviderErrorDiagnostics:
+    """Extract bounded metadata only; never inspect exception text or response bodies."""
+    exception_class = type(error).__name__
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", exception_class):
+        exception_class = "ProviderError"
+
+    cause = _safe_attribute(error, "__cause__") or _safe_attribute(error, "__context__")
+    cause_class = type(cause).__name__ if cause is not None else None
+    if cause_class and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", cause_class):
+        cause_class = "ProviderError"
+
+    response = _safe_attribute(error, "response")
+    status_candidates = (
+        _safe_attribute(error, "status_code"),
+        _safe_attribute(error, "status"),
+        _safe_attribute(response, "status_code") if response is not None else None,
+    )
+    http_status = next(
+        (
+            status
+            for status in status_candidates
+            if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599
+        ),
+        None,
+    )
+
+    headers = _safe_attribute(response, "headers") if response is not None else None
+    request_id = _safe_request_id(_safe_attribute(error, "request_id"))
+    if request_id is None and isinstance(headers, Mapping):
+        for header_name in ("x-request-id", "request-id", "anthropic-request-id"):
+            try:
+                request_id = _safe_request_id(headers.get(header_name))
+            except Exception:
+                request_id = None
+            if request_id is not None:
+                break
+
+    return ProviderErrorDiagnostics(
+        exception_class=exception_class,
+        cause_class=cause_class,
+        http_status=http_status,
+        provider_error_type=_safe_diagnostic_token(_safe_attribute(error, "type")),
+        provider_error_code=_safe_diagnostic_token(_safe_attribute(error, "code")),
+        request_id=request_id,
+    )
+
+
 class AIProviderError(RuntimeError):
     """Credential-free provider failure suitable for application boundaries."""
 
-    def __init__(self, message: str, *, configured: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        configured: bool = False,
+        diagnostics: ProviderErrorDiagnostics | None = None,
+    ) -> None:
         super().__init__(message)
         self.configured = configured
+        self.diagnostics = diagnostics
 
 
 class CompletionClient(Protocol):
@@ -118,10 +221,11 @@ class OpenAICompatibleCompletionClient:
         try:
             response = self._client.chat.completions.create(**request)
             content = response.choices[0].message.content
-        except Exception:
+        except Exception as exc:
             raise AIProviderError(
                 f"{self.provider.value} provider request failed",
                 configured=self.configured,
+                diagnostics=_provider_error_diagnostics(exc),
             ) from None
         return str(content or "")
 
@@ -226,10 +330,11 @@ class AnthropicCompletionClient:
             )
         except AIProviderError:
             raise
-        except Exception:
+        except Exception as exc:
             raise AIProviderError(
                 "anthropic provider request failed",
                 configured=True,
+                diagnostics=_provider_error_diagnostics(exc),
             ) from None
 
         if not text:
