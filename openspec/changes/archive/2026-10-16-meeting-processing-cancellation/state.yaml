@@ -1,0 +1,73 @@
+change: meeting-processing-cancellation
+phase: archived
+artifact_store: openspec
+last_updated: 2026-10-16
+next_recommended: none
+blocker: null
+artifacts:
+  exploration: true
+  research: false
+  proposal: true
+  specs: true
+  design: true
+  tasks: true
+  apply_progress: true
+  verify_report: true
+  archive_report: true
+# Retrospective record: the change shipped through Organic Driven Development
+# (ODD); no SDD phase ran. Artifacts were written at archive time from commit
+# and verification evidence.
+delivery:
+  method: odd
+  commits:
+    - aafa488
+    - ae6d99d
+    - f831819
+    - a024587
+  release: v1.1.0
+  release_workflow_run: "38979703612"
+  pull_request: none
+tasks_progress:
+  completed:
+    - "1.1"
+    - "1.2"
+    - "1.3"
+    - "1.4"
+    - "1.5"
+    - "1.6"
+    - "1.7"
+    - "1.8"
+    - "1.9"
+    - "2.1"
+    - "2.2"
+    - "3.1"
+    - "3.2"
+    - "4.1"
+  pending: []
+review_workload:
+  actual_changed_lines: "+7374/-494 across 35 files"
+  risk: high
+  chained_prs_recommended: true
+  delivery_strategy: ask-on-risk
+  chain_strategy: not-executed
+  decision_needed_before_apply: false
+verification:
+  status: PASS_WITH_WARNINGS
+  backend_focused: "136 passed / 0 failed"
+  backend_ci_equivalent: "464 passed"
+  github_ci: green
+  web_unit_tests: not-executed
+  mobile_unit_tests: not-executed
+  smoke_test: pending
+research:
+  selected: false
+  outcome: not-applicable
+preproposal:
+  outcome: not-applicable
+  product_decisions:
+    status: confirmed
+    items:
+      - cancellation is exact-run and cooperative; later writes from the cancelled run are rejected
+      - stages without run identity fail closed
+      - manual visual analysis owns its own ProcessingRun and never reopens the meeting
+      - original media is never deleted by cancellation; YouTube audio and visual artifacts are attempt-scoped
