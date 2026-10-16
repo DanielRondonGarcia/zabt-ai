@@ -13,6 +13,7 @@ export type UserStage =
   | "summarizing"
   | "done"
   | "failed"
+  | "cancelled"
   | "visual_skipped"
   | "visual_fallback";
 
@@ -21,6 +22,7 @@ export type VisualOutcome =
   | "success"
   | "skipped"
   | "fallback"
+  | "cancelled"
   | "error";
 
 export const STAGE_ORDER: UserStage[] = [
@@ -46,6 +48,7 @@ export const STAGE_LABELS: Record<UserStage, string> = {
   summarizing: "Summarizing…",
   done: "Done",
   failed: "Failed",
+  cancelled: "Cancelled",
   visual_skipped: "Visual analysis skipped",
   visual_fallback: "Visual analysis unavailable",
 };
@@ -61,11 +64,21 @@ export const VISUAL_OUTCOME_COPY = {
     description:
       "Visual processing did not complete. The summary uses transcript-only evidence.",
   },
+  cancelled: {
+    title: "Visual analysis cancelled",
+    description: "The meeting, summary, and media remain available.",
+  },
+  error: {
+    title: "Visual analysis failed",
+    description:
+      "Visual analysis did not complete. The completed meeting, summary, and media remain available.",
+  },
 } as const;
 
 export function getVisualOutcome(
   meeting: Pick<Meeting, "status" | "visual_breakdown_status">
 ): VisualOutcome | null {
+  if (meeting.status === "cancelled") return null;
   if (meeting.status === "failed") return "error";
 
   switch (meeting.visual_breakdown_status) {
@@ -78,6 +91,10 @@ export function getVisualOutcome(
       return "skipped";
     case "fallback":
       return "fallback";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+      return "error";
     default:
       return null;
   }
@@ -86,6 +103,7 @@ export function getVisualOutcome(
 export function getUserStage(
   meeting: Pick<Meeting, "status" | "sub_status" | "visual_breakdown_status">
 ): UserStage {
+  if (meeting.status === "cancelled") return "cancelled";
   if (meeting.status === "failed") return "failed";
   if (meeting.status === "completed") {
     const visualOutcome = getVisualOutcome(meeting);
@@ -137,6 +155,7 @@ export function isActiveMeeting(
     meeting.status === "queued" ||
     meeting.status === "processing" ||
     (meeting.status !== "failed" &&
+      meeting.status !== "cancelled" &&
       (meeting.visual_breakdown_status === "queued" ||
         meeting.visual_breakdown_status === "processing"))
   );

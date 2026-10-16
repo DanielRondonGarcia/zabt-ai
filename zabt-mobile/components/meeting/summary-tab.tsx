@@ -29,7 +29,10 @@ const markdownStyles = {
 export function SummaryTab({ meeting }: Props) {
   const visualOutcome = getVisualOutcome(meeting);
   const visualCopy =
-    visualOutcome === "skipped" || visualOutcome === "fallback"
+    visualOutcome === "skipped" ||
+    visualOutcome === "fallback" ||
+    (meeting.status === "completed" &&
+      (visualOutcome === "cancelled" || visualOutcome === "error"))
       ? VISUAL_OUTCOME_COPY[visualOutcome]
       : null;
 

@@ -12,6 +12,8 @@ describe("visual status mapping", () => {
     ["completed", "success"],
     ["skipped", "skipped"],
     ["fallback", "fallback"],
+    ["cancelled", "cancelled"],
+    ["failed", "error"],
   ] as const)("maps visual status %s to %s", (visualStatus, expected) => {
     expect(
       getVisualOutcome({
@@ -74,9 +76,28 @@ describe("completed meeting stage mapping", () => {
     expect(isActiveMeeting(meeting)).toBe(true);
   });
 
+  it.each([
+    ["cancelled", "cancelled"],
+    ["failed", "error"],
+  ] as const)("keeps terminal visual status %s completed and inactive", (visualStatus, outcome) => {
+    const meeting = {
+      ...baseMeeting,
+      visual_breakdown_status: visualStatus,
+    };
+
+    expect(getVisualOutcome(meeting)).toBe(outcome);
+    expect(getUserStage(meeting)).toBe("done");
+    expect(isActiveMeeting(meeting)).toBe(false);
+  });
+
   it("provides copy for both non-fatal visual outcomes", () => {
     expect(VISUAL_OUTCOME_COPY.skipped.description).toContain("transcript-only");
     expect(VISUAL_OUTCOME_COPY.fallback.description).toContain("transcript-only");
+  });
+
+  it("provides distinct copy for cancelled and failed visual runs", () => {
+    expect(VISUAL_OUTCOME_COPY.cancelled.title).toBe("Visual analysis cancelled");
+    expect(VISUAL_OUTCOME_COPY.error.title).toBe("Visual analysis failed");
   });
 });
 
@@ -102,5 +123,19 @@ describe("processing stage mapping", () => {
         visual_breakdown_status: null,
       })
     ).toBe("transcribing");
+  });
+});
+
+describe("cancelled meeting stage mapping", () => {
+  const cancelledMeeting = {
+    status: "cancelled" as const,
+    sub_status: "transcribing",
+    visual_breakdown_status: "processing" as const,
+  };
+
+  it("keeps cancelled meetings terminal despite stale processing state", () => {
+    expect(getUserStage(cancelledMeeting)).toBe("cancelled");
+    expect(getVisualOutcome(cancelledMeeting)).toBeNull();
+    expect(isActiveMeeting(cancelledMeeting)).toBe(false);
   });
 });

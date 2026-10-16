@@ -5,6 +5,7 @@ import { Pressable, Text, View } from "react-native";
 import { router } from "expo-router";
 import type { Meeting } from "@zabt/shared";
 import { stripMarkdown } from "@/lib/markdown";
+import { isActiveMeeting } from "@/lib/stage-utils";
 
 function formatDuration(seconds: number | null): string {
   if (!seconds) return "";
@@ -24,8 +25,8 @@ interface Props {
 }
 
 export const MeetingCard = memo(function MeetingCard({ meeting }: Props) {
-  const isProcessing =
-    meeting.status !== "completed" && meeting.status !== "failed";
+  const isProcessing = isActiveMeeting(meeting);
+  const isCancelled = meeting.status === "cancelled";
   return (
     <Pressable
       onPress={() => router.push(`/meeting/${meeting.id}`)}
@@ -38,9 +39,11 @@ export const MeetingCard = memo(function MeetingCard({ meeting }: Props) {
         >
           {meeting.title}
         </Text>
-        {isProcessing && (
+        {isProcessing ? (
           <Text className="text-xs text-primary ml-2">Processing…</Text>
-        )}
+        ) : isCancelled ? (
+          <Text className="text-xs text-muted-foreground ml-2">Cancelled</Text>
+        ) : null}
       </View>
       <Text className="text-xs text-muted-foreground mt-1">
         {formatDate(meeting.created_at)} ·{" "}

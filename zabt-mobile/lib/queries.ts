@@ -3,6 +3,7 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import type { Meeting, MeetingList, User } from "@zabt/shared";
 import { api } from "./api";
+import type { MobileMeetingProcessingAudit } from "./processing-cancellation";
 import { isActiveMeeting } from "./stage-utils";
 
 const POLL_MS = 5000;
@@ -50,6 +51,45 @@ export function useMeeting(id: number | string | undefined) {
     refetchInterval: (query) =>
       query.state.data && isActive(query.state.data) ? POLL_MS : false,
   });
+}
+
+export function useMeetingProcessingAudit(meetingId: number | undefined) {
+  return useQuery<MobileMeetingProcessingAudit>({
+    queryKey: ["meeting-processing-audit", meetingId],
+    queryFn: async () => {
+      if (
+        typeof meetingId !== "number" ||
+        !Number.isSafeInteger(meetingId) ||
+        meetingId <= 0
+      ) {
+        throw new Error("A valid meeting ID is required.");
+      }
+      const response = await api.get<MobileMeetingProcessingAudit>(
+        `/meetings/${meetingId}/processing-audit`,
+      );
+      return response.data;
+    },
+    enabled:
+      typeof meetingId === "number" &&
+      Number.isSafeInteger(meetingId) &&
+      meetingId > 0,
+    refetchInterval: (query) => {
+      const runs = query.state.data?.runs;
+      return Array.isArray(runs) &&
+        runs.some(
+          (run) => run?.status === "queued" || run?.status === "running",
+        )
+        ? POLL_MS
+        : false;
+    },
+  });
+}
+
+export async function cancelMeetingProcessingRun(
+  meetingId: number,
+  runId: number,
+): Promise<void> {
+  await api.post(`/meetings/${meetingId}/processing-runs/${runId}/cancel`);
 }
 
 export function useCurrentUser() {
