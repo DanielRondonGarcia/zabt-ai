@@ -3,7 +3,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { Upload, CheckCircle, XCircle } from "lucide-react";
+import { Upload, CheckCircle, XCircle, Ban } from "lucide-react";
 import { STAGE_LABELS, STAGE_ORDER, getStageIndex } from "@/app/lib/stage-utils";
 import { Spinner } from "@/app/components/ui/spinner";
 import type { QueueItem } from "@/app/contexts/processing-queue-context";
@@ -52,6 +52,7 @@ export function ProcessingQueueItem({ item }: ProcessingQueueItemProps) {
 
   const isDone = item.status === "done";
   const isFailed = item.status === "failed";
+  const isCancelled = item.status === "cancelled";
   const isProcessing = item.status === "processing";
 
   const handleClick = () => {
@@ -85,6 +86,7 @@ export function ProcessingQueueItem({ item }: ProcessingQueueItemProps) {
             </span>
             {isDone && <CheckCircle className="w-4 h-4 text-emerald-500 flex-shrink-0" />}
             {isFailed && <XCircle className="w-4 h-4 text-red-500 flex-shrink-0" />}
+            {isCancelled && <Ban className="w-4 h-4 text-stone-400 flex-shrink-0" />}
             {isProcessing && <Spinner className="size-4 flex-shrink-0" />}
           </div>
 

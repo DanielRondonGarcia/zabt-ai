@@ -12,7 +12,16 @@ export type UserStage =
   | "building_context"
   | "summarizing"
   | "done"
-  | "failed";
+  | "failed"
+  | "cancelled";
+
+export type VisualOutcome =
+  | "loading"
+  | "success"
+  | "skipped"
+  | "fallback"
+  | "cancelled"
+  | "error";
 
 export const STAGE_ORDER: UserStage[] = [
   "uploaded",
@@ -37,12 +46,39 @@ export const STAGE_LABELS: Record<UserStage, string> = {
   summarizing: "Summarizing…",
   done: "Done",
   failed: "Failed",
+  cancelled: "Cancelled",
 };
+
+export function getVisualOutcome(
+  meeting: Pick<Meeting, "status" | "visual_breakdown_status">
+): VisualOutcome | null {
+  if (meeting.status === "cancelled") return null;
+  if (meeting.status === "failed") return "error";
+
+  switch (meeting.visual_breakdown_status) {
+    case "queued":
+    case "processing":
+      return "loading";
+    case "completed":
+      return "success";
+    case "skipped":
+      return "skipped";
+    case "fallback":
+      return "fallback";
+    case "cancelled":
+      return "cancelled";
+    case "failed":
+      return "error";
+    default:
+      return null;
+  }
+}
 
 /**
  * Map a Meeting's `status` + `sub_status` to a user-visible stage.
  */
 export function getUserStage(meeting: Pick<Meeting, "status" | "sub_status">): UserStage {
+  if (meeting.status === "cancelled") return "cancelled";
   if (meeting.status === "failed") return "failed";
   if (meeting.status === "completed") return "done";
   if (meeting.status === "pending_upload" || meeting.status === "queued") return "uploaded";
@@ -81,7 +117,7 @@ export function getUserStage(meeting: Pick<Meeting, "status" | "sub_status">): U
 
 /**
  * Get the index of a stage in the pipeline order (0-based).
- * Returns -1 for "failed" since it's not in the linear pipeline.
+ * Returns -1 for terminal stages that are not in the linear pipeline.
  */
 export function getStageIndex(stage: UserStage): number {
   const idx = STAGE_ORDER.indexOf(stage);

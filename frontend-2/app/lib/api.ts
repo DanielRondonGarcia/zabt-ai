@@ -139,7 +139,7 @@ export interface MeetingProcessingRun {
   meeting_id: number;
   owner_id: number;
   trigger: string;
-  status: "queued" | "running" | "completed" | "failed" | (string & {});
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | (string & {});
   root_task_id: string | null;
   created_at: string;
   started_at: string | null;
@@ -771,6 +771,10 @@ export const getMeeting = async (id: number): Promise<Meeting> => {
 export const getMeetingProcessingAudit = async (meetingId: number): Promise<MeetingProcessingAudit> => {
   const res = await apiClient.get<MeetingProcessingAudit>(`/meetings/${meetingId}/processing-audit`);
   return res.data;
+};
+
+export const cancelMeetingProcessingRun = async (meetingId: number, runId: number): Promise<void> => {
+  await apiClient.post(`/meetings/${meetingId}/processing-runs/${runId}/cancel`);
 };
 
 export const reprocessMeeting = async (meetingId: number): Promise<Meeting> => {

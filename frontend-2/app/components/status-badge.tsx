@@ -16,6 +16,7 @@ const dotColors: Record<Meeting["status"], string> = {
   processing: "bg-amber-500",
   completed: "bg-emerald-500",
   failed: "bg-red-500",
+  cancelled: "bg-stone-500",
 };
 
 const badgeColors: Record<Meeting["status"], string> = {
@@ -24,6 +25,7 @@ const badgeColors: Record<Meeting["status"], string> = {
   processing: "text-amber-600 dark:text-amber-300",
   completed: "text-emerald-600",
   failed: "text-red-500",
+  cancelled: "text-stone-600 dark:text-stone-300",
 };
 
 const labels: Record<Meeting["status"], string> = {
@@ -32,6 +34,7 @@ const labels: Record<Meeting["status"], string> = {
   processing: "Processing…",
   completed: "Completed",
   failed: "Failed",
+  cancelled: "Cancelled",
 };
 
 export function StatusBadge({ status, subStatus }: StatusBadgeProps) {

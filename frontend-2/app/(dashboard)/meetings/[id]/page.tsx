@@ -5,7 +5,7 @@
 import { useState, useEffect, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import { usePostHog } from "posthog-js/react";
-import { assignMeetingGroup, getGroups, getMeeting, getMeetingProcessingAudit, updateMeetingSummary, restoreMeetingSummary, Meeting, updateMeetingType, reExtractIntelligence, listLanguages, reprocessMeeting, reindexMeeting, type GroupSummary, type LanguageEntry } from "@/app/lib/api";
+import { assignMeetingGroup, cancelMeetingProcessingRun, fetchCurrentUser, getGroups, getMeeting, getMeetingProcessingAudit, updateMeetingSummary, restoreMeetingSummary, Meeting, updateMeetingType, reExtractIntelligence, listLanguages, reprocessMeeting, reindexMeeting, type GroupSummary, type LanguageEntry } from "@/app/lib/api";
 import type { MeetingProcessingAudit, MeetingType } from "@/app/lib/api";
 import { ReTranscribeDialog } from "@/app/components/ReTranscribeDialog";
 import { StatusBadge } from "@/app/components/status-badge";
@@ -14,7 +14,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
 import { TranscriptViewer } from "@/app/components/transcript-viewer";
 import { StickyMediaPlayer } from "@/app/components/sticky-media-player";
 import { PaywallModal } from "@/app/components/paywall-modal";
-import { getUserStage, STAGE_LABELS, isActiveMeeting } from "@/app/lib/stage-utils";
+import { getUserStage, getVisualOutcome, STAGE_LABELS, isActiveMeeting } from "@/app/lib/stage-utils";
 import { ProgressSteps } from "@/app/components/ui/progress-steps";
 import { TemplateSelector } from "@/app/components/template-selector";
 import { Spinner } from "@/app/components/ui/spinner";
@@ -30,6 +30,16 @@ import { MeetingGroupSelector } from "@/app/components/meeting-group-selector";
 import { MeetingProcessingAuditCard } from "@/app/components/meeting-processing-audit";
 import { useTranscriptStore } from "@/app/lib/use-transcript-store";
 import { Separator } from "@/app/components/ui/separator";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/app/components/ui/alert-dialog";
 import { Pencil, Download, Mail, Copy, FileText, FileDown, ChevronDown, Eye, RotateCcw, RefreshCw, Loader2, Languages, UserRound } from "lucide-react";
 import {
   DropdownMenu,
@@ -150,9 +160,27 @@ export default function MeetingDetailPage({
   const [reprocessError, setReprocessError] = useState<string | null>(null);
   const [processingAudit, setProcessingAudit] = useState<MeetingProcessingAudit | null>(null);
   const [processingAuditLoading, setProcessingAuditLoading] = useState(false);
+  const [cancelDialogOpen, setCancelDialogOpen] = useState(false);
+  const [isCancelling, setIsCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
 
   const { setSeekRequest } = useTranscriptStore();
   const resetTranscriptMedia = useTranscriptStore((state) => state.reset);
+
+  useEffect(() => {
+    let isCurrent = true;
+    fetchCurrentUser()
+      .then(({ id }) => {
+        if (isCurrent && Number.isSafeInteger(id) && id > 0) setCurrentUserId(id);
+      })
+      .catch(() => {
+        if (isCurrent) setCurrentUserId(null);
+      });
+    return () => {
+      isCurrent = false;
+    };
+  }, []);
 
   // Stub for user tier logic
   const isFreeTier = false;
@@ -174,6 +202,33 @@ export default function MeetingDetailPage({
   const canShareMeeting = meeting?.can_share_email === true;
   const canReTranscribeMeeting = meeting?.can_retranscribe === true;
   const canReprocessMeeting = meeting?.can_reprocess === true;
+  const canCancelProcessing = Boolean(
+    meeting
+      && currentUserId !== null
+      && Number.isSafeInteger(currentUserId)
+      && currentUserId > 0
+      && meeting.owner_id !== undefined
+      && Number.isSafeInteger(meeting.owner_id)
+      && meeting.owner_id === currentUserId,
+  );
+  const activeProcessingRun = currentUserId !== null
+    && Number.isSafeInteger(currentUserId)
+    && currentUserId > 0
+    && meeting !== null
+    && meeting.owner_id != null
+    && Number.isSafeInteger(meeting.owner_id)
+    && meeting.owner_id > 0
+    && meeting.owner_id === currentUserId
+    && processingAudit !== null
+    && processingAudit.meeting_id === meeting.id
+    && Array.isArray(processingAudit.runs)
+    ? processingAudit.runs.find(
+        (run) => run.meeting_id === meeting.id
+          && Number.isSafeInteger(run.id)
+          && run.id > 0
+          && (run.status === "queued" || run.status === "running"),
+      ) ?? null
+    : null;
   const assignableGroups = groups.filter(
     (group) => group.can_edit || group.id === meeting?.group_id,
   );
@@ -383,6 +438,38 @@ export default function MeetingDetailPage({
     }
   };
 
+  const refreshMeetingAndAudit = async (meetingId: number) => {
+    await Promise.all([
+      getMeeting(meetingId).then(setMeeting).catch(() => undefined),
+      refreshProcessingAudit(meetingId),
+    ]);
+  };
+
+  const handleCancelProcessing = async () => {
+    if (!meeting || !canCancelProcessing || !activeProcessingRun || isCancelling) return;
+
+    const runId = activeProcessingRun.id;
+    setIsCancelling(true);
+    setCancelError(null);
+    try {
+      await cancelMeetingProcessingRun(meeting.id, runId);
+      setCancelDialogOpen(false);
+      await refreshMeetingAndAudit(meeting.id);
+    } catch (err) {
+      const status = isRecord(err) && isRecord(err.response) ? err.response.status : null;
+      if (status === 409) {
+        await refreshMeetingAndAudit(meeting.id);
+        setCancelDialogOpen(false);
+        setCancelError("This processing run is no longer active. We attempted to refresh the meeting and processing state; verify the displayed status before taking further action.");
+      } else {
+        setCancelDialogOpen(false);
+        setCancelError(getRequestErrorMessage(err, "The processing run could not be cancelled. Please try again."));
+      }
+    } finally {
+      setIsCancelling(false);
+    }
+  };
+
   // Warn before navigating away with unsaved edits
   useEffect(() => {
     if (!isEditing) return;
@@ -460,6 +547,9 @@ export default function MeetingDetailPage({
 
   const isActive = isActiveMeeting(meeting);
   const userStage = getUserStage(meeting);
+  const visualOutcome = getVisualOutcome(meeting);
+  const visualCancelled = meeting.status === "completed" && visualOutcome === "cancelled";
+  const visualFailed = meeting.status === "completed" && visualOutcome === "error";
   const visualFallback = meeting.visual_breakdown_status === "fallback"
     || meeting.visual_breakdown_status === "skipped";
   const formattedDate = new Date(meeting.created_at).toLocaleString('en-US', {
@@ -578,6 +668,74 @@ export default function MeetingDetailPage({
             {reprocessError && (
               <p className="rounded-lg border border-red-200 bg-white px-3 py-2 text-red-700 dark:border-red-800/60 dark:bg-red-950/40 dark:text-red-300">
                 {reprocessError}
+              </p>
+            )}
+          </div>
+        )}
+
+        {(visualCancelled || visualFailed) && (
+          <div
+            role={visualFailed ? "alert" : "status"}
+            className={visualFailed
+              ? "rounded-lg border border-red-200 bg-red-50 px-5 py-4 text-sm text-red-800 dark:border-red-800/60 dark:bg-red-950/30 dark:text-red-200"
+              : "rounded-lg border border-stone-200 bg-stone-50 px-5 py-4 text-sm text-stone-700 dark:border-stone-700 dark:bg-stone-900 dark:text-stone-200"}
+          >
+            <p className="font-medium">
+              {visualCancelled ? "Visual analysis cancelled" : "Visual analysis failed"}
+            </p>
+            <p className="mt-1">
+              {visualCancelled
+                ? "The meeting, summary, and media remain available."
+                : "Visual analysis did not complete. The completed meeting, summary, and media remain available."}
+            </p>
+          </div>
+        )}
+
+        {((activeProcessingRun && canCancelProcessing) || cancelError) && (
+          <div className="flex flex-wrap items-center gap-3">
+            <AlertDialog
+              open={cancelDialogOpen && canCancelProcessing}
+              onOpenChange={(open) => {
+                if (!isCancelling && canCancelProcessing) setCancelDialogOpen(open);
+              }}
+            >
+              {activeProcessingRun && canCancelProcessing && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    setCancelError(null);
+                    setCancelDialogOpen(true);
+                  }}
+                  disabled={isCancelling}
+                >
+                  Cancel processing
+                </Button>
+              )}
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Cancel processing?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Cancelling asks the worker to stop future processing. Already-committed work may remain, and an in-flight provider call may finish before cancellation takes effect.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel disabled={isCancelling}>Keep processing</AlertDialogCancel>
+                  <AlertDialogAction
+                    variant="destructive"
+                    onClick={handleCancelProcessing}
+                    loading={isCancelling}
+                    disabled={!activeProcessingRun || !canCancelProcessing || isCancelling}
+                  >
+                    Confirm cancellation
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+            {cancelError && (
+              <p role="alert" className="text-sm text-red-700 dark:text-red-300">
+                {cancelError}
               </p>
             )}
           </div>

@@ -23,7 +23,7 @@ export interface QueueItem {
   displayName: string;
   sourceType: "upload" | "youtube";
   stage: UserStage;
-  status: "processing" | "done" | "failed";
+  status: "processing" | "done" | "failed" | "cancelled";
   errorMessage: string | null;
   addedAt: number;
 }
@@ -38,7 +38,7 @@ interface QueueState {
 
 type QueueAction =
   | { type: "ADD_ITEM"; payload: { meetingId: number; displayName: string; sourceType: "upload" | "youtube" } }
-  | { type: "UPDATE_STAGE"; payload: { meetingId: number; stage: UserStage; status?: "processing" | "done" | "failed"; errorMessage?: string | null } }
+  | { type: "UPDATE_STAGE"; payload: { meetingId: number; stage: UserStage; status?: "processing" | "done" | "failed" | "cancelled"; errorMessage?: string | null } }
   | { type: "SET_COLLAPSED"; payload: { collapsed: boolean } }
   | { type: "SET_VISIBLE"; payload: { visible: boolean } }
   | { type: "CLEAR" };
@@ -133,13 +133,15 @@ export function ProcessingQueueProvider({ children }: { children: ReactNode }) {
           const stage = getUserStage(meeting);
           const isFailed = stage === "failed";
           const isDone = stage === "done";
+          const isCancelled = stage === "cancelled";
+          const isTerminal = isFailed || isDone || isCancelled;
 
           dispatch({
             type: "UPDATE_STAGE",
             payload: {
               meetingId: item.meetingId,
               stage,
-              status: isFailed ? "failed" : isDone ? "done" : "processing",
+              status: isFailed ? "failed" : isDone ? "done" : isCancelled ? "cancelled" : "processing",
               errorMessage: isFailed ? (meeting.sub_status || "Processing failed") : null,
             },
           });
@@ -158,7 +160,7 @@ export function ProcessingQueueProvider({ children }: { children: ReactNode }) {
               error: meeting.sub_status || "Processing failed",
             });
           }
-          if (isDone || isFailed) {
+          if (isTerminal) {
             clearInterval(pollTimers.current.get(item.meetingId));
             pollTimers.current.delete(item.meetingId);
           }
@@ -189,7 +191,7 @@ export function ProcessingQueueProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (state.items.length === 0) return;
 
-    const allTerminal = state.items.every((i) => i.status === "done" || i.status === "failed");
+    const allTerminal = state.items.every((i) => i.status !== "processing");
 
     if (allTerminal) {
       autoHideTimer.current = setTimeout(() => {

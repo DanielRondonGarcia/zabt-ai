@@ -7,7 +7,8 @@ export type MeetingStatus =
   | "queued"
   | "processing"
   | "completed"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 /** Known pipeline sub-statuses. Error messages may still use arbitrary strings. */
 export type MeetingSubStatus =
@@ -34,7 +35,9 @@ export type VisualBreakdownStatus =
   | "processing"
   | "completed"
   | "skipped"
-  | "fallback";
+  | "fallback"
+  | "failed"
+  | "cancelled";
 
 export type TranscriptionType = "general" | "medical";
 
@@ -75,6 +78,7 @@ export const MEETING_STATUSES: readonly MeetingStatus[] = [
   "processing",
   "completed",
   "failed",
+  "cancelled",
 ] as const;
 
 export const MEETING_SUB_STATUSES: readonly MeetingSubStatus[] = [
@@ -102,6 +106,8 @@ export const VISUAL_BREAKDOWN_STATUSES: readonly VisualBreakdownStatus[] = [
   "completed",
   "skipped",
   "fallback",
+  "failed",
+  "cancelled",
 ] as const;
 
 export const TRANSCRIPTION_TYPES: readonly TranscriptionType[] = [
