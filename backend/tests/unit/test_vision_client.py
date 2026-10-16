@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 """Tests for VisionClient — HTTP local mode (mocked httpx)."""
+from hashlib import sha256
 import threading
 import sys
 import time
 from types import ModuleType, SimpleNamespace
 from unittest.mock import MagicMock, patch
+import uuid
 
 import httpx
 import pytest
@@ -533,6 +535,7 @@ def test_direct_visual_service_accepts_video_without_audio_and_persists_artifact
             "file_path": "users/1/meetings/7/source.mp4",
             "owner_id": "1",
             "meeting_id": "7",
+            "visual_epoch": 1,
             "params": {"content_type": "video/mp4"},
             "transcript": [],
         }
@@ -544,6 +547,99 @@ def test_direct_visual_service_accepts_video_without_audio_and_persists_artifact
     assert len(storage.uploads) == 2
     assert all("http" not in str(upload) for upload in storage.uploads)
     assert result.raw_output_s3_key == storage.uploads[-1][1]
+    assert result.raw_output_s3_key != "users/1/meetings/7/visual/raw_output.json"
+    assert "/visual/epoch-1/standalone-" in result.raw_output_s3_key
+
+
+def test_direct_visual_service_artifact_keys_are_unique_per_epoch_and_attempt():
+    storage = _FakeVisualStorage()
+    service = DirectVisionService(
+        storage_provider=storage,
+        inference=_FakeVisualInference(),
+        config=_direct_service_config(),
+    )
+    service._probe_media = MagicMock(
+        return_value=SimpleNamespace(duration_s=2.0, has_video=True, video_codec="h264", media_format="mp4")
+    )
+    service._extract_frames = MagicMock(return_value=[b"frame-0", b"frame-1"])
+    service._extract_thumbnails = MagicMock(return_value=[b"\x00" * 8, b"\xff" * 8])
+    base_payload = {
+        "file_path": "users/1/meetings/7/source.mp4",
+        "owner_id": "1",
+        "meeting_id": "7",
+        "params": {"content_type": "video/mp4"},
+    }
+    identities = [
+        {"visual_epoch": 3, "processing_run_id": 41, "dispatch_attempt_id": "opaque/attempt alpha"},
+        {"visual_epoch": 3, "processing_run_id": 41, "dispatch_attempt_id": "opaque/attempt beta"},
+        {"visual_epoch": 4, "processing_run_id": 41, "dispatch_attempt_id": "opaque/attempt alpha"},
+        {"visual_epoch": 5},
+        {"visual_epoch": 5},
+    ]
+    generated_epoch = uuid.uuid4().hex
+    identities.extend(
+        [
+            {
+                "visual_epoch": generated_epoch,
+                "processing_run_id": 41,
+                "dispatch_attempt_id": "generated epoch attempt",
+            },
+            {"visual_epoch": generated_epoch},
+            {"visual_epoch": generated_epoch},
+        ]
+    )
+
+    results = [
+        service.submit_and_wait({**base_payload, **identity})
+        for identity in identities
+    ]
+
+    assert all(result.status == "completed" for result in results)
+    raw_keys = [result.raw_output_s3_key for result in results]
+    screenshot_keys = [result.segments[0].screenshot_s3_key for result in results]
+    assert len(set(raw_keys)) == len(identities)
+    assert len(set(screenshot_keys)) == len(identities)
+    assert all(key and not key.endswith("/visual/raw_output.json") for key in raw_keys)
+    assert "/visual/epoch-3/run-41/attempt-" in raw_keys[0]
+    assert f"attempt-{sha256(b'opaque/attempt alpha').hexdigest()}" in raw_keys[0]
+    assert "/visual/epoch-4/run-41/attempt-" in raw_keys[2]
+    assert "/visual/epoch-5/standalone-" in raw_keys[3]
+    assert "/visual/epoch-5/standalone-" in raw_keys[4]
+    assert raw_keys[3] != raw_keys[4]
+    assert (
+        f"/visual/epoch-{generated_epoch}/run-41/attempt-"
+        f"{sha256(b'generated epoch attempt').hexdigest()}" in raw_keys[5]
+    )
+    assert f"/visual/epoch-{generated_epoch}/standalone-" in raw_keys[6]
+    assert f"/visual/epoch-{generated_epoch}/standalone-" in raw_keys[7]
+    assert raw_keys[6] != raw_keys[7]
+    assert all(
+        "opaque/attempt" not in key
+        and "alpha" not in key
+        and "beta" not in key
+        and "generated epoch attempt" not in key
+        for key in raw_keys + screenshot_keys
+    )
+    for malformed_attempt in (True, 123, ""):
+        with pytest.raises(DirectVisionError):
+            service._artifact_namespace({
+                **base_payload, "visual_epoch": 3, "processing_run_id": 41,
+                "dispatch_attempt_id": malformed_attempt,
+            })
+
+
+@pytest.mark.parametrize("owner,meeting", [(None, "7"), ("bad/id", "7"), ("1", None), ("1", "../7")])
+def test_direct_visual_service_rejects_invalid_artifact_identifiers(owner, meeting):
+    service = DirectVisionService(storage_provider=_FakeVisualStorage())
+    with pytest.raises(DirectVisionError):
+        service._artifact_namespace({"owner_id": owner, "meeting_id": meeting, "visual_epoch": 1})
+
+
+@pytest.mark.parametrize("epoch", [None, "", "abc", "A" * 32, "g" * 32, "../1"])
+def test_direct_visual_service_rejects_invalid_artifact_epochs(epoch):
+    service = DirectVisionService(storage_provider=_FakeVisualStorage())
+    with pytest.raises(DirectVisionError):
+        service._artifact_namespace({"owner_id": "1", "meeting_id": "7", "visual_epoch": epoch})
 
 
 def test_direct_visual_service_skips_audio_without_downloading_or_calling_inference():
@@ -584,6 +680,7 @@ def test_direct_visual_service_cleans_uploaded_artifacts_after_persistence_failu
             "file_path": "users/1/meetings/7/source.mp4",
             "owner_id": "1",
             "meeting_id": "7",
+            "visual_epoch": 1,
             "params": {"content_type": "video/mp4"},
         }
     )

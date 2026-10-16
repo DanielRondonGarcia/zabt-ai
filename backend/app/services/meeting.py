@@ -14,6 +14,7 @@ from app.models import (
     GroupMembership,
     Meeting,
     MeetingCreate,
+    MeetingProcessingRun,
     TranscriptSegment,
     TranscriptionType,
     VisualSegment,
@@ -21,12 +22,20 @@ from app.models import (
 from app.core.config import settings
 from app.db.engine import engine
 from app.services.base import BaseService
+from app.services.meeting_processing_audit import (
+    meeting_processing_audit,
+    sanitize_message,
+)
 
 logger = logging.getLogger(__name__)
 
 
 VISUAL_BREAKDOWN_ACTIVE_STATUSES = {"queued", "processing"}
 VISUAL_BREAKDOWN_TERMINAL_STATUSES = {"completed", "skipped", "fallback"}
+VISUAL_BREAKDOWN_CLOSED_STATUSES = VISUAL_BREAKDOWN_TERMINAL_STATUSES | {
+    "cancelled",
+    "failed",
+}
 
 class MeetingService(BaseService):
     def on_before_action(self, action: str, **kwargs):
@@ -376,6 +385,129 @@ class MeetingService(BaseService):
             meeting.template_name = template_name
         return self.save(meeting)
 
+    def mark_completed_for_processing_run(
+        self, meeting_id: int, *, processing_run_id: int, dispatch_attempt_id: str
+    ) -> bool:
+        """Complete durable recovery output only for its current dispatch attempt."""
+        with Session(engine) as session:
+            meeting, _ = meeting_processing_audit._locked_current_run(
+                session, processing_run_id, meeting_id, dispatch_attempt_id
+            )
+            if (
+                meeting is None
+                or meeting.structured_output_status != "completed"
+                or meeting.structured_output is None
+            ):
+                return False
+            meeting.status = "completed"
+            meeting.sub_status = None
+            session.add(meeting)
+            session.commit()
+            return True
+
+    def _locked_intelligence_meeting(
+        self,
+        session: Session,
+        meeting_id: int,
+        *,
+        processing_run_id: int,
+        dispatch_attempt_id: str,
+        owner_id: int,
+    ) -> Meeting | None:
+        meeting, run = meeting_processing_audit._locked_current_run(
+            session, processing_run_id, meeting_id, dispatch_attempt_id
+        )
+        if (
+            meeting is None
+            or run is None
+            or meeting.owner_id != owner_id
+            or run.owner_id != owner_id
+        ):
+            return None
+        return meeting
+
+    def begin_intelligence_for_attempt(
+        self,
+        meeting_id: int,
+        *,
+        processing_run_id: int,
+        dispatch_attempt_id: str,
+        owner_id: int,
+    ) -> bool:
+        """Set intelligence status only for the exact current owner and attempt."""
+        with Session(engine) as session:
+            meeting = self._locked_intelligence_meeting(
+                session,
+                meeting_id,
+                processing_run_id=processing_run_id,
+                dispatch_attempt_id=dispatch_attempt_id,
+                owner_id=owner_id,
+            )
+            if meeting is None:
+                return False
+            meeting.status = "processing"
+            meeting.structured_output_status = "processing"
+            if meeting.status != "completed":
+                meeting.processing_heartbeat_at = datetime.utcnow()
+            session.add(meeting)
+            session.commit()
+            return True
+
+    def complete_intelligence_for_attempt(
+        self,
+        meeting_id: int,
+        structured_output: dict,
+        *,
+        processing_run_id: int,
+        dispatch_attempt_id: str,
+        owner_id: int,
+    ) -> bool:
+        """Persist intelligence output and complete the Meeting atomically."""
+        with Session(engine) as session:
+            meeting = self._locked_intelligence_meeting(
+                session,
+                meeting_id,
+                processing_run_id=processing_run_id,
+                dispatch_attempt_id=dispatch_attempt_id,
+                owner_id=owner_id,
+            )
+            if meeting is None or not meeting.transcript_text:
+                return False
+            meeting.structured_output = structured_output
+            meeting.structured_output_status = "completed"
+            meeting.status = "completed"
+            meeting.sub_status = None
+            meeting.processing_heartbeat_at = datetime.utcnow()
+            session.add(meeting)
+            session.commit()
+            return True
+
+    def complete_without_intelligence_for_attempt(
+        self,
+        meeting_id: int,
+        *,
+        processing_run_id: int,
+        dispatch_attempt_id: str,
+        owner_id: int,
+    ) -> bool:
+        """Preserve empty-transcript completion, fenced by the exact attempt."""
+        with Session(engine) as session:
+            meeting = self._locked_intelligence_meeting(
+                session,
+                meeting_id,
+                processing_run_id=processing_run_id,
+                dispatch_attempt_id=dispatch_attempt_id,
+                owner_id=owner_id,
+            )
+            if meeting is None or meeting.transcript_text:
+                return False
+            meeting.status = "completed"
+            meeting.sub_status = None
+            meeting.processing_heartbeat_at = datetime.utcnow()
+            session.add(meeting)
+            session.commit()
+            return True
+
     def save_summary(
         self,
         meeting_id: int,
@@ -396,6 +528,43 @@ class MeetingService(BaseService):
         if template_name is not None:
             meeting.template_name = template_name
         return self.save(meeting)
+
+    def save_summary_for_attempt(
+        self,
+        meeting_id: int,
+        run_id: int,
+        attempt_id: str,
+        summary_text: str | None,
+        *,
+        template_id: int | None = None,
+        template_name: str | None = None,
+        inferred_title: str | None = None,
+    ) -> Optional[Meeting]:
+        """Commit summary fields only for the exact active processing attempt."""
+        with Session(engine) as session:
+            meeting, _run = meeting_processing_audit._locked_current_run(
+                session, run_id, meeting_id, attempt_id
+            )
+            if meeting is None:
+                return None
+            meeting.status = "processing"
+            meeting.sub_status = "summarizing"
+            meeting.processing_heartbeat_at = datetime.utcnow()
+            meeting.summary_text = summary_text
+            if template_id is not None:
+                meeting.template_id = template_id
+            if template_name is not None:
+                meeting.template_name = template_name
+            if inferred_title and meeting.title:
+                file_extensions = (
+                    ".m4a", ".mp3", ".wav", ".mp4", ".mov", ".webm", ".ogg", ".flac"
+                )
+                if any(meeting.title.lower().endswith(ext) for ext in file_extensions):
+                    meeting.title = inferred_title
+            session.add(meeting)
+            session.commit()
+            session.refresh(meeting)
+            return meeting
 
     def queue_visual_breakdown(
         self, meeting_id: int, user_id: int | None = None
@@ -418,6 +587,11 @@ class MeetingService(BaseService):
                 raise RuntimeError(f"Meeting {meeting_id} not found")
             if user_id is not None:
                 self._require_editor_in_session(session, meeting, user_id)
+            if meeting.status == "cancelled":
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Cancelled meetings cannot queue visual breakdown",
+                )
 
             params = dict(meeting.visual_breakdown_params or {})
             current_epoch = params.get("run_epoch")
@@ -444,21 +618,62 @@ class MeetingService(BaseService):
             self.touch_processing_heartbeat(meeting_id)
             return run_epoch, True
 
-    def begin_visual_breakdown(self, meeting_id: int) -> tuple[str, bool]:
-        """Return the current epoch or atomically start the first automatic run."""
-        with Session(engine) as session:
-            statement = (
+    @staticmethod
+    def _lock_visual_meeting_in_session(
+        session: Session,
+        meeting_id: int,
+        processing_run_id: int | None,
+        dispatch_attempt_id: str | None,
+    ) -> Meeting | None:
+        if (processing_run_id is None) != (dispatch_attempt_id is None):
+            return None
+        if processing_run_id is None:
+            return session.exec(
                 select(Meeting)
                 .where(Meeting.id == meeting_id)
                 .with_for_update()
+            ).first()
+
+        meeting, run = meeting_processing_audit._locked_current_run(
+            session, processing_run_id, meeting_id, dispatch_attempt_id
+        )
+        if meeting is None or run is None:
+            return None
+        if run.trigger == "visual_breakdown":
+            return meeting if meeting.status == "completed" else None
+        if meeting.status not in {"queued", "processing"}:
+            return None
+        return meeting
+
+    def begin_visual_breakdown(
+        self,
+        meeting_id: int,
+        *,
+        processing_run_id: int | None = None,
+        dispatch_attempt_id: str | None = None,
+    ) -> tuple[str, bool]:
+        """Return the current epoch or atomically start the first automatic run."""
+        with Session(engine) as session:
+            meeting = self._lock_visual_meeting_in_session(
+                session, meeting_id, processing_run_id, dispatch_attempt_id
             )
-            meeting = session.exec(statement).first()
             if meeting is None:
+                if processing_run_id is not None or dispatch_attempt_id is not None:
+                    return "", False
                 raise RuntimeError(f"Meeting {meeting_id} not found")
+            if (
+                processing_run_id is None
+                and dispatch_attempt_id is None
+                and meeting.status == "cancelled"
+            ):
+                return "", False
 
             params = dict(meeting.visual_breakdown_params or {})
             current_epoch = params.get("run_epoch")
-            if current_epoch and meeting.visual_breakdown_status in VISUAL_BREAKDOWN_TERMINAL_STATUSES:
+            if (
+                current_epoch
+                and meeting.visual_breakdown_status in VISUAL_BREAKDOWN_CLOSED_STATUSES
+            ):
                 return str(current_epoch), False
 
             if current_epoch and meeting.visual_breakdown_status == "processing":
@@ -467,9 +682,12 @@ class MeetingService(BaseService):
             if current_epoch and meeting.visual_breakdown_status == "queued":
                 meeting.visual_breakdown_status = "processing"
                 meeting.visual_breakdown_error = None
+                if processing_run_id is not None and meeting.status != "completed":
+                    meeting.processing_heartbeat_at = datetime.utcnow()
                 session.add(meeting)
                 session.commit()
-                self.touch_processing_heartbeat(meeting_id)
+                if processing_run_id is None:
+                    self.touch_processing_heartbeat(meeting_id)
                 return str(current_epoch), True
 
             run_epoch = uuid.uuid4().hex
@@ -487,9 +705,12 @@ class MeetingService(BaseService):
             meeting.visual_breakdown_error = None
             meeting.visual_breakdown_completed_at = None
             meeting.visual_breakdown_params = params
+            if processing_run_id is not None and meeting.status != "completed":
+                meeting.processing_heartbeat_at = datetime.utcnow()
             session.add(meeting)
             session.commit()
-            self.touch_processing_heartbeat(meeting_id)
+            if processing_run_id is None:
+                self.touch_processing_heartbeat(meeting_id)
             return run_epoch, True
 
     def reset_stale_visual_breakdown_in_session(
@@ -528,26 +749,72 @@ class MeetingService(BaseService):
         session.add(meeting)
         return run_epoch
 
-    def increment_visual_breakdown_attempt(self, meeting_id: int, run_epoch: str) -> int:
+    def increment_visual_breakdown_attempt(
+        self,
+        meeting_id: int,
+        run_epoch: str,
+        *,
+        processing_run_id: int | None = None,
+        dispatch_attempt_id: str | None = None,
+    ) -> int | None:
         """Increment the attempt counter for the active epoch under a row lock."""
+        identity_supplied = processing_run_id is not None or dispatch_attempt_id is not None
         with Session(engine) as session:
-            statement = (
-                select(Meeting)
-                .where(Meeting.id == meeting_id)
-                .with_for_update()
+            meeting = self._lock_visual_meeting_in_session(
+                session, meeting_id, processing_run_id, dispatch_attempt_id
             )
-            meeting = session.exec(statement).first()
             if meeting is None:
+                if identity_supplied:
+                    return None
                 raise RuntimeError(f"Meeting {meeting_id} not found")
+            if not identity_supplied and meeting.status == "cancelled":
+                return None
             params = dict(meeting.visual_breakdown_params or {})
             if params.get("run_epoch") != run_epoch:
-                return int(params.get("attempts") or 0)
+                return None if identity_supplied else int(params.get("attempts") or 0)
+            if identity_supplied and meeting.visual_breakdown_status != "processing":
+                return None
             attempts = int(params.get("attempts") or 0) + 1
             params["attempts"] = attempts
             meeting.visual_breakdown_params = params
             session.add(meeting)
             session.commit()
             return attempts
+
+    def update_visual_breakdown_progress(
+        self,
+        meeting_id: int,
+        run_epoch: str,
+        *,
+        processing_run_id: int | None = None,
+        dispatch_attempt_id: str | None = None,
+        sub_status: str | None = None,
+    ) -> bool:
+        """Update status/heartbeat only for the current visual epoch and attempt."""
+        with Session(engine) as session:
+            meeting = self._lock_visual_meeting_in_session(
+                session, meeting_id, processing_run_id, dispatch_attempt_id
+            )
+            identity_supplied = processing_run_id is not None or dispatch_attempt_id is not None
+            if meeting is None or (not identity_supplied and meeting.status == "cancelled"):
+                return False
+            params = dict(meeting.visual_breakdown_params or {})
+            if (
+                params.get("run_epoch") != run_epoch
+                or meeting.visual_breakdown_status != "processing"
+            ):
+                return False
+            publish_sub_status = sub_status is not None and meeting.status != "completed"
+            if publish_sub_status:
+                meeting.status = "processing"
+                meeting.sub_status = sub_status
+            if meeting.status != "completed":
+                meeting.processing_heartbeat_at = datetime.utcnow()
+            session.add(meeting)
+            session.commit()
+        if publish_sub_status:
+            self._publish_sub_status(meeting_id, sub_status)
+        return True
 
     def finalize_visual_breakdown(
         self,
@@ -562,6 +829,8 @@ class MeetingService(BaseService):
         model: str | None = None,
         segments: list | None = None,
         run_count: bool = True,
+        processing_run_id: int | None = None,
+        dispatch_attempt_id: str | None = None,
     ) -> dict:
         """Atomically converge a visual outcome and its segment replacement.
 
@@ -573,23 +842,28 @@ class MeetingService(BaseService):
 
         if outcome not in VISUAL_BREAKDOWN_TERMINAL_STATUSES:
             raise ValueError(f"Unsupported visual outcome: {outcome}")
+        identity_supplied = processing_run_id is not None or dispatch_attempt_id is not None
 
         with Session(engine) as session:
-            statement = (
-                select(Meeting)
-                .where(Meeting.id == meeting_id)
-                .with_for_update()
+            meeting = self._lock_visual_meeting_in_session(
+                session, meeting_id, processing_run_id, dispatch_attempt_id
             )
-            meeting = session.exec(statement).first()
             if meeting is None:
+                if identity_supplied:
+                    return {"applied": False, "meeting_id": meeting_id}
                 raise RuntimeError(f"Meeting {meeting_id} not found")
+            if not identity_supplied and meeting.status == "cancelled":
+                return {"applied": False, "meeting_id": meeting_id}
 
             params = dict(meeting.visual_breakdown_params or {})
-            if params.get("run_epoch") != run_epoch:
+            if (
+                params.get("run_epoch") != run_epoch
+                or (identity_supplied and meeting.visual_breakdown_status != "processing")
+            ):
                 return {"applied": False, "meeting_id": meeting_id}
 
             side_effects = dict(params.get("side_effects") or {})
-            if params.get("outcome") in VISUAL_BREAKDOWN_TERMINAL_STATUSES:
+            if params.get("outcome") in VISUAL_BREAKDOWN_CLOSED_STATUSES:
                 return {"applied": False, "meeting_id": meeting_id}
 
             segment_list = list(segments or [])
@@ -635,10 +909,13 @@ class MeetingService(BaseService):
             meeting.visual_breakdown_params = merged_params
             if run_count:
                 meeting.visual_breakdown_run_count = (meeting.visual_breakdown_run_count or 0) + 1
+            if identity_supplied and meeting.status != "completed":
+                meeting.processing_heartbeat_at = datetime.utcnow()
             session.add(meeting)
             session.commit()
 
-            self.touch_processing_heartbeat(meeting_id)
+            if not identity_supplied:
+                self.touch_processing_heartbeat(meeting_id)
 
             return {
                 "applied": True,
@@ -654,15 +931,68 @@ class MeetingService(BaseService):
                 "attempts": int(merged_params.get("attempts") or 0),
             }
 
-    def mark_failed(self, meeting_id: int, error_message: str) -> Optional[Meeting]:
-        """Mark a meeting as failed with an error message in summary_text."""
-        meeting = self.get(Meeting, meeting_id)
-        if not meeting:
-            return None
-        meeting.status = "failed"
-        meeting.sub_status = None
-        meeting.summary_text = f"[Error: {error_message}]"
-        return self.save(meeting)
+    def mark_failed(
+        self,
+        meeting_id: int,
+        error_message: str,
+        *,
+        processing_run_id: int | None = None,
+        dispatch_attempt_id: str | None = None,
+    ) -> Optional[Meeting]:
+        """Fail the current attempt; visual-only failures stay off meeting status."""
+        with Session(engine) as session:
+            meeting = session.exec(
+                select(Meeting)
+                .where(Meeting.id == meeting_id)
+                .with_for_update()
+            ).first()
+            if meeting is None:
+                return None
+
+            is_visual_breakdown_run = False
+            if processing_run_id is not None:
+                if dispatch_attempt_id is None:
+                    return None
+                run = session.exec(
+                    select(MeetingProcessingRun)
+                    .where(MeetingProcessingRun.id == processing_run_id)
+                    .with_for_update()
+                ).first()
+                if (
+                    run is None
+                    or run.meeting_id != meeting.id
+                    or meeting.current_processing_run_id != run.id
+                    or run.dispatch_attempt_id != dispatch_attempt_id
+                ):
+                    return None
+                is_visual_breakdown_run = run.trigger == "visual_breakdown"
+                if is_visual_breakdown_run:
+                    if (
+                        run.status not in {"queued", "running", "failed"}
+                        or meeting.status != "completed"
+                    ):
+                        return None
+                elif (
+                    run.status not in {"queued", "running", "failed"}
+                    or meeting.status not in {"queued", "processing"}
+                ):
+                    return None
+
+            if is_visual_breakdown_run:
+                meeting.visual_breakdown_status = "failed"
+                meeting.visual_breakdown_error = sanitize_message(error_message)
+                params = dict(meeting.visual_breakdown_params or {})
+                params["outcome"] = "failed"
+                meeting.visual_breakdown_params = params
+            else:
+                meeting.status = "failed"
+                meeting.sub_status = None
+                meeting.summary_text = f"[Error: {error_message}]"
+
+            session.add(meeting)
+            session.commit()
+            session.refresh(meeting)
+            return meeting
 
     def add_segment(self, meeting_id: int, start: float, end: float, text: str) -> TranscriptSegment:
         segment = TranscriptSegment(

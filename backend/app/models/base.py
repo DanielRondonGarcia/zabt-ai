@@ -269,6 +269,7 @@ class Meeting(MeetingBase, table=True):
     status: str = Field(default="pending_upload") # pending_upload, queued, processing, completed, failed
     sub_status: Optional[str] = None
     processing_heartbeat_at: Optional[datetime] = None
+    current_processing_run_id: Optional[int] = None
     transcript_text: Optional[str] = None
     summary_text: Optional[str] = None
     original_summary_text: Optional[str] = None
@@ -302,9 +303,9 @@ class Meeting(MeetingBase, table=True):
     )
 
     # Visual breakdown (reuses the existing Plan 2 columns; no media-kind or
-    # fused-context migration).  Status values are queued, processing,
-    # completed, skipped, or fallback.  Run epochs and one-time side-effect
-    # markers live in visual_breakdown_params.
+    # fused-context migration). Status values include queued, processing,
+    # completed, skipped, fallback, failed, and cancelled. Run epochs and
+    # one-time side-effect markers live in visual_breakdown_params.
     visual_breakdown_status: Optional[str] = None
     visual_breakdown_error: Optional[str] = None
     visual_breakdown_completed_at: Optional[datetime] = None

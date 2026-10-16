@@ -26,6 +26,42 @@ def _worker():
     return worker
 
 
+def _run_embedding(worker, meeting_id):
+    worker.stage_embedding.push_request(
+        headers={
+            "meeting_processing_run_id": "456",
+            "dispatch_attempt_id": "attempt-456",
+        }
+    )
+    try:
+        return worker.stage_embedding.run(meeting_id)
+    finally:
+        worker.stage_embedding.pop_request()
+
+
+def _install_embedding_run_check(monkeypatch, worker, *meetings):
+    responses = iter(meetings)
+    run = SimpleNamespace(id=456, status="running", dispatch_attempt_id="attempt-456")
+
+    def locked_current_run(session, run_id, meeting_id, attempt_id):
+        assert (run_id, meeting_id, attempt_id) == (456, meetings[0].id, "attempt-456")
+        return next(responses), run
+
+    monkeypatch.setattr(
+        worker.meeting_processing_audit,
+        "_locked_current_run",
+        locked_current_run,
+    )
+
+
+class _FakeSession:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return None
+
+
 def test_indexing_disabled_short_circuits_all_tasks(monkeypatch):
     worker = _worker()
     calls = []
@@ -43,11 +79,13 @@ def test_indexing_disabled_short_circuits_all_tasks(monkeypatch):
 def test_stage_embedding_skips_ungrouped_meeting(monkeypatch):
     worker = _worker()
     monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
-    monkeypatch.setattr(worker.meeting_service, "get", lambda model, meeting_id: SimpleNamespace(id=meeting_id, group_id=None))
+    meeting = SimpleNamespace(id=10, owner_id=20, group_id=None)
+    monkeypatch.setattr(worker, "Session", lambda engine: _FakeSession())
+    _install_embedding_run_check(monkeypatch, worker, meeting)
     calls = []
     monkeypatch.setattr(worker, "get_vector_store", lambda: calls.append("store"))
 
-    assert worker.stage_embedding.run(10) == 10
+    assert _run_embedding(worker, 10) == 10
     assert calls == []
 
 
@@ -81,8 +119,8 @@ def test_stage_embedding_builds_points_and_upserts(monkeypatch):
             return SimpleNamespace(first=lambda: meeting)
 
     monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
-    monkeypatch.setattr(worker.meeting_service, "get", lambda model, meeting_id: meeting)
     monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+    _install_embedding_run_check(monkeypatch, worker, meeting, meeting)
     monkeypatch.setattr(worker, "_get_group_introduction", lambda group_id: "Planning context")
     monkeypatch.setattr(
         worker,
@@ -97,7 +135,7 @@ def test_stage_embedding_builds_points_and_upserts(monkeypatch):
     monkeypatch.setattr(worker, "get_vector_store", lambda: SimpleNamespace(upsert_points=lambda points: upserts.append(points)))
     monkeypatch.setattr(worker.analytics, "capture", lambda owner_id, event, props: telemetry.append((owner_id, event, props)))
 
-    assert worker.stage_embedding.run(10) == 10
+    assert _run_embedding(worker, 10) == 10
     assert len(upserts) == 1
     assert {point.kind for point in upserts[0]} == {"summary", "transcript"}
     assert all(point.owner_id == 20 and point.group_id == 30 and point.meeting_id == 10 for point in upserts[0])
@@ -135,8 +173,8 @@ def test_stage_embedding_indexes_summary_without_transcript(monkeypatch):
             return SimpleNamespace(first=lambda: meeting)
 
     monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
-    monkeypatch.setattr(worker.meeting_service, "get", lambda model, meeting_id: meeting)
     monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+    _install_embedding_run_check(monkeypatch, worker, meeting, meeting)
     monkeypatch.setattr(worker, "_get_group_introduction", lambda group_id: None)
     monkeypatch.setattr(
         worker,
@@ -150,7 +188,7 @@ def test_stage_embedding_indexes_summary_without_transcript(monkeypatch):
     )
     monkeypatch.setattr(worker.analytics, "capture", lambda *args, **kwargs: None)
 
-    assert worker.stage_embedding.run(11) == 11
+    assert _run_embedding(worker, 11) == 11
     assert [point.kind for point in upserts[0]] == ["summary"]
     assert upserts[0][0].text == "A visual-only summary"
 
@@ -403,13 +441,13 @@ def test_stage_embedding_discards_stale_snapshot_and_requeues_current_assignment
             return SimpleNamespace(first=lambda: current)
 
     monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
-    monkeypatch.setattr(worker.meeting_service, "get", lambda model, meeting_id: snapshot)
     monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+    _install_embedding_run_check(monkeypatch, worker, snapshot, current)
     monkeypatch.setattr(worker, "_get_group_introduction", lambda group_id: "Planning context")
     monkeypatch.setattr(worker.reindex_meeting, "delay", lambda meeting_id: requeued.append(meeting_id))
     monkeypatch.setattr(worker, "get_embedding_provider", lambda: SimpleNamespace(embed=lambda texts: vector_calls.append(texts) or [[1.0] for _ in texts]))
     monkeypatch.setattr(worker, "get_vector_store", lambda: (_ for _ in ()).throw(AssertionError("stale work must not touch vectors")))
 
-    assert worker.stage_embedding.run(10) == 10
+    assert _run_embedding(worker, 10) == 10
     assert requeued == [10]
     assert vector_calls == [["Group introduction: Planning context\n\nsummary", "Group introduction: Planning context\n\none two three"]]

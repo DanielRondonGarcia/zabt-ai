@@ -1,15 +1,19 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+import asyncio
 import json
 import os
 import re
+import shutil
 import subprocess
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from hashlib import sha256
 from math import ceil, isfinite
 
 from celery import Celery, chain
+from celery.exceptions import Ignore
 from celery.signals import task_failure, task_prerun, task_success, worker_shutdown
 
 from app.core.config import settings
@@ -77,6 +81,7 @@ celery_app = Celery("worker", broker=settings.REDIS_URL, backend=settings.REDIS_
 def send_notification(
     emoji: str, label: str, user_email: str,
     meeting_title: str | None, meeting_id: int | None, extra: dict[str, str],
+    *, processing_run_id: int | None = None, dispatch_attempt_id: str | None = None,
 ) -> None:
     """Deliver a notification via the configured provider. Best-effort."""
     from app.services.notifications import get_provider
@@ -94,6 +99,16 @@ def send_notification(
         meeting_id=meeting_id,
         extra=extra,
     )
+    if processing_run_id is not None or dispatch_attempt_id is not None:
+        if processing_run_id is None or not dispatch_attempt_id or meeting_id is None:
+            return
+        eligible = asyncio.run(
+            meeting_processing_audit.success_effects_are_eligible(
+                meeting_id, processing_run_id, dispatch_attempt_id
+            )
+        )
+        if not eligible:
+            return
     provider.send(event)
 
 # ── Shared temp directory for passing file paths between stages ──────────────
@@ -107,10 +122,68 @@ def _configured_transcription_provider() -> str:
     return value.value if hasattr(value, "value") else str(value or ProviderName.GPU_LOCAL.value)
 
 
-def _temp_path_for(meeting_id: int, source_key: str | None = None) -> str:
-    """Return a stable temp path while preserving the source file extension."""
+def _temp_path_for(
+    meeting_id: int,
+    source_key: str | None,
+    *,
+    run_id: int,
+    attempt_id: str,
+) -> str:
+    """Return a temp path owned by exactly one processing attempt."""
+    if run_id is None or not attempt_id:
+        raise ValueError("Attempt-owned temp paths require a run and attempt identity")
     suffix = os.path.splitext(source_key or "")[1] or ".audio"
-    return os.path.join(TEMP_DIR, f"zabt_meeting_{meeting_id}{suffix}")
+    attempt_token = sha256(attempt_id.encode("utf-8")).hexdigest()
+    return os.path.join(TEMP_DIR, f"zabt_meeting_{meeting_id}_{run_id}_{attempt_token}{suffix}")
+
+
+def _youtube_attempt_artifacts(
+    owner_id: int, meeting_id: int, run_id: int, attempt_id: str, video_id: str
+) -> tuple[str, str]:
+    attempt_token = sha256(attempt_id.encode("utf-8")).hexdigest()
+    download_id = f"{video_id}_meeting_{meeting_id}_run_{run_id}_attempt_{attempt_token}"
+    file_key = (
+        f"users/{owner_id}/meetings/youtube/{meeting_id}/runs/{run_id}/"
+        f"attempts/{attempt_token}/{video_id}.mp3"
+    )
+    return download_id, file_key
+
+
+def _youtube_attempt_temp_dir(meeting_id: int, run_id: int, attempt_id: str) -> str:
+    attempt_token = sha256(attempt_id.encode("utf-8")).hexdigest()
+    return os.path.join(TEMP_DIR, f"zabt_youtube_{meeting_id}_{run_id}_{attempt_token}")
+
+
+def _cleanup_youtube_attempt_artifacts(
+    *,
+    work_dir: str | None,
+    handoff_path: str | None,
+    file_key: str | None,
+    object_write_started: bool,
+    promoted: bool,
+    meeting_id: int,
+    run_id: int,
+    attempt_id: str,
+) -> None:
+    if work_dir and os.path.isdir(work_dir):
+        try:
+            shutil.rmtree(work_dir)
+        except OSError:
+            logger.warning("Could not remove YouTube attempt directory", exc_info=True)
+    if not promoted and handoff_path and os.path.exists(handoff_path):
+        try:
+            os.remove(handoff_path)
+        except OSError:
+            logger.warning("Could not remove YouTube handoff file", exc_info=True)
+    if not object_write_started or promoted or not file_key:
+        return
+    try:
+        if not meeting_processing_audit.youtube_audio_was_promoted(
+            run_id=run_id, attempt_id=attempt_id, meeting_id=meeting_id
+        ):
+            storage.delete_file(file_key)
+    except Exception:
+        logger.warning("Could not remove unpromoted YouTube attempt object", exc_info=True)
 
 
 _LOCAL_MEDIA_PROBE_TIMEOUT_SECONDS = 10.0
@@ -206,12 +279,16 @@ def _probe_local_media(path: str) -> _LocalMediaProbe | None:
 def _clear_transcription_for_no_audio(
     meeting_id: int,
     duration_seconds: float | None,
-) -> None:
+    run_id: int,
+    attempt_id: str,
+) -> bool:
     """Remove stale spoken output before continuing with video-only stages."""
     with Session(engine) as session:
-        meeting = session.get(Meeting, meeting_id)
+        meeting, _run = meeting_processing_audit._locked_current_run(
+            session, run_id, meeting_id, attempt_id
+        )
         if meeting is None:
-            return
+            return False
 
         session.exec(delete(TranscriptSegment).where(TranscriptSegment.meeting_id == meeting_id))
         session.exec(delete(MeetingHighlight).where(MeetingHighlight.meeting_id == meeting_id))
@@ -224,12 +301,16 @@ def _clear_transcription_for_no_audio(
         meeting.action_items_text = None
         meeting.structured_output = None
         meeting.structured_output_status = "pending"
+        meeting.status = "processing"
+        meeting.sub_status = _TRANSCRIPTION_SKIPPED_NO_AUDIO
+        meeting.processing_heartbeat_at = datetime.utcnow()
         if duration_seconds is not None:
             meeting.duration_seconds = int(duration_seconds)
         session.add(meeting)
         session.commit()
 
-    meeting_service.update_sub_status(meeting_id, _TRANSCRIPTION_SKIPPED_NO_AUDIO)
+    meeting_service._publish_sub_status(meeting_id, _TRANSCRIPTION_SKIPPED_NO_AUDIO)
+    return True
 
 
 _AUDITED_STAGE_TASKS = {
@@ -238,16 +319,25 @@ _AUDITED_STAGE_TASKS = {
     "stage_transcribe",
     "stage_transliterate",
     "stage_optional_visual_breakdown",
+    "stage_visual_breakdown",
     "stage_summarize",
     "stage_extract_intelligence",
     "stage_embedding",
+    "finalize_recovered_meeting",
 }
 
 
-def _audit_headers(run_id: int | None, meeting_id: int, stage: str) -> dict[str, str]:
+def _audit_headers(
+    run_id: int | None,
+    meeting_id: int,
+    stage: str,
+    attempt_id: str | None = None,
+) -> dict[str, str]:
     headers = {"meeting_id": str(meeting_id), "stage": stage}
     if run_id is not None:
         headers["meeting_processing_run_id"] = str(run_id)
+    if attempt_id is not None:
+        headers["dispatch_attempt_id"] = attempt_id
     return headers
 
 
@@ -279,6 +369,51 @@ def _audit_run_id_from_task(task) -> int | None:
         return None
 
 
+def _audit_attempt_id_from_task(task) -> str | None:
+    return _get_audit_header(task, "dispatch_attempt_id")
+
+
+def _required_processing_identity(task) -> tuple[int, str]:
+    run_id = _audit_run_id_from_task(task)
+    attempt_id = _audit_attempt_id_from_task(task)
+    if run_id is None or not attempt_id:
+        raise Ignore()
+    return run_id, attempt_id
+
+
+def _visual_processing_identity(
+    task, *, allow_standalone: bool
+) -> tuple[int | None, str | None]:
+    run_header = _get_audit_header(task, "meeting_processing_run_id")
+    attempt_header = _get_audit_header(task, "dispatch_attempt_id")
+    if run_header is None and attempt_header is None:
+        if allow_standalone:
+            return None, None
+        raise Ignore()
+    return _required_processing_identity(task)
+
+
+def _update_sub_status_for_attempt(
+    meeting_id: int, run_id: int, attempt_id: str, sub_status: str | None
+) -> bool:
+    """Update current-attempt progress or heartbeat under the audit lock."""
+    with Session(engine) as session:
+        meeting, _run = meeting_processing_audit._locked_current_run(
+            session, run_id, meeting_id, attempt_id
+        )
+        if meeting is None:
+            return False
+        if sub_status is not None:
+            meeting.status = "processing"
+            meeting.sub_status = sub_status
+        meeting.processing_heartbeat_at = datetime.utcnow()
+        session.add(meeting)
+        session.commit()
+    if sub_status is not None:
+        meeting_service._publish_sub_status(meeting_id, sub_status)
+    return True
+
+
 def _meeting_id_from_task_args(args) -> int | None:
     if not args:
         return None
@@ -288,7 +423,12 @@ def _meeting_id_from_task_args(args) -> int | None:
         return None
 
 
-def _build_pipeline_signatures(meeting_id: int, stages: list, run_id: int | None):
+def _build_pipeline_signatures(
+    meeting_id: int,
+    stages: list,
+    run_id: int | None,
+    attempt_id: str | None = None,
+):
     signatures = []
     for index, stage in enumerate(stages):
         stage_name = stage.name
@@ -296,7 +436,7 @@ def _build_pipeline_signatures(meeting_id: int, stages: list, run_id: int | None
         link_errors = [] if stage_name == "stage_embedding" else [on_stage_failure.s()]
         signatures.append(
             signature.set(
-                headers=_audit_headers(run_id, meeting_id, stage_name),
+                headers=_audit_headers(run_id, meeting_id, stage_name, attempt_id),
                 link_error=link_errors,
             )
         )
@@ -308,12 +448,19 @@ def _record_audit_stage_started(task_id=None, task=None, args=None, **kwargs):
     stage = getattr(task, "name", None)
     if stage not in _AUDITED_STAGE_TASKS:
         return
+    if stage == "stage_summarize":
+        # The provider-admission claim is the summary stage's logical start.
+        return
     meeting_id = _meeting_id_from_task_args(args)
     if meeting_id is None:
         return
     run_id = _audit_run_id_from_task(task)
+    attempt_id = _audit_attempt_id_from_task(task)
+    if run_id is None or attempt_id is None:
+        return
     meeting_processing_audit.stage_started(
         run_id=run_id,
+        attempt_id=attempt_id,
         meeting_id=meeting_id,
         stage=stage,
         task_id=task_id,
@@ -334,16 +481,34 @@ def _record_audit_stage_succeeded(sender=None, result=None, **kwargs):
     if meeting_id is None:
         return
     run_id = _audit_run_id_from_task(task)
+    attempt_id = _audit_attempt_id_from_task(task)
+    if run_id is None or attempt_id is None:
+        return
     task_id = _task_request_id(task)
     meeting_processing_audit.stage_completed(
         run_id=run_id,
+        attempt_id=attempt_id,
         meeting_id=meeting_id,
         stage=stage,
         task_id=task_id,
         metadata={"celery_state": "SUCCESS"},
     )
-    if stage == "stage_embedding":
-        meeting_processing_audit.run_completed(run_id, message="Processing pipeline completed")
+    terminal_visual_success = (
+        stage == "stage_visual_breakdown"
+        and _get_audit_header(task, "meeting_processing_terminal_success") == "true"
+    )
+    if terminal_visual_success or stage == "stage_embedding" or (
+        stage == "finalize_recovered_meeting" and result == meeting_id
+    ):
+        meeting_processing_audit.run_completed(
+            run_id,
+            attempt_id=attempt_id,
+            message=(
+                "Visual analysis completed"
+                if terminal_visual_success
+                else "Processing pipeline completed"
+            ),
+        )
 
 
 @task_failure.connect
@@ -355,22 +520,30 @@ def _record_audit_stage_failed(task_id=None, exception=None, args=None, sender=N
     if meeting_id is None:
         return
     run_id = _audit_run_id_from_task(sender)
+    attempt_id = _audit_attempt_id_from_task(sender)
+    if run_id is None or attempt_id is None:
+        return
     meeting_processing_audit.stage_failed(
         run_id=run_id,
+        attempt_id=attempt_id,
         meeting_id=meeting_id,
         stage=stage,
         task_id=task_id,
         error=exception,
         metadata={"celery_task_name": stage},
     )
-    meeting_processing_audit.run_failed(run_id, error=exception)
+    meeting_processing_audit.run_failed(
+        run_id,
+        attempt_id=attempt_id,
+        error=exception,
+    )
 
 
 # ── Error callback (linked to each stage via link_error) ─────────────────────
 
 @celery_app.task(name="on_stage_failure")
 def on_stage_failure(request, exc, traceback):
-    """Error callback for any pipeline stage. Marks meeting as failed."""
+    """Fail the exact run while keeping visual-only failures meeting-scoped."""
     # The first argument of the original task is always meeting_id
     meeting_id = request.args[0] if request.args else None
     if meeting_id is None:
@@ -380,23 +553,42 @@ def on_stage_failure(request, exc, traceback):
     logger.info("on_stage_failure triggered meeting_id=%s exc=%s", meeting_id, str(exc))
     headers = getattr(request, "headers", None) or {}
     run_id = None
+    attempt_id = None
     if isinstance(headers, dict):
         try:
             header_run_id = headers.get("meeting_processing_run_id")
             run_id = int(header_run_id) if header_run_id else None
         except (TypeError, ValueError):
             run_id = None
-    # task_failure is the authority for per-stage failure events. The linked
-    # error callback still preserves existing meeting failure behavior and
-    # idempotently ensures the run is terminal when headers are available.
-    meeting_processing_audit.run_failed(run_id, error=exc)
-    meeting_service.mark_failed(meeting_id, str(exc))
+        attempt_id = headers.get("dispatch_attempt_id")
+    if run_id is None or not attempt_id:
+        logger.warning("on_stage_failure: missing processing identity meeting_id=%s", meeting_id)
+        return
+    # task_failure is the authority for per-stage events. This callback only
+    # updates meeting status for the exact current dispatch attempt.
+    failed_meeting = meeting_service.mark_failed(
+        meeting_id,
+        str(exc),
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+    )
+    if failed_meeting is None:
+        return
+    meeting_processing_audit.run_failed(run_id, attempt_id=attempt_id, error=exc)
+    if failed_meeting.status == "completed":
+        return
 
-    failed_meeting = None
+    # This check admits both failure effects. Its DB session closes before
+    # either network call; a retry/cancellation after admission may race them.
+    if not meeting_processing_audit.failure_effects_are_eligible(
+        meeting_id=meeting_id,
+        run_id=run_id,
+        attempt_id=attempt_id,
+    ):
+        return
 
     # Track failure in PostHog
     try:
-        failed_meeting = meeting_service.get(Meeting, meeting_id)
         if failed_meeting and failed_meeting.owner_id:
             error_reason = str(exc)[:200]
             analytics.capture(
@@ -415,7 +607,6 @@ def on_stage_failure(request, exc, traceback):
     # Send failure email (fire-and-forget — never raises)
     try:
         from app.services.email import email_service
-        failed_meeting = failed_meeting or meeting_service.get(Meeting, meeting_id)
         if failed_meeting and failed_meeting.owner_id:
             with Session(engine) as session:
                 user = session.get(User, failed_meeting.owner_id)
@@ -424,14 +615,7 @@ def on_stage_failure(request, exc, traceback):
     except Exception:
         logger.exception("on_stage_failure email lookup failed meeting_id=%s", meeting_id)
 
-    # Clean up temp files for both the legacy suffix and the source suffix.
-    temp_paths = {
-        _temp_path_for(meeting_id),
-        _temp_path_for(meeting_id, getattr(failed_meeting, "file_path", None)),
-    }
-    for temp_path in temp_paths:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+    # Meeting-scoped temp files may belong to a later attempt; leave them intact.
 
 
 # ── Stage 1: Download ────────────────────────────────────────────────────────
@@ -440,13 +624,17 @@ def on_stage_failure(request, exc, traceback):
 def stage_download(meeting_id: int) -> int:
     """Download audio from storage. Skips download for RunPod (it fetches via presigned URL)."""
     logger.info("stage_download started meeting_id=%s", meeting_id)
+    run_id, attempt_id = _required_processing_identity(stage_download)
+    temp_audio_path: str | None = None
 
     try:
+        if not _update_sub_status_for_attempt(
+            meeting_id, run_id, attempt_id, "downloading"
+        ):
+            raise Ignore()
         meeting = meeting_service.get(Meeting, meeting_id)
         if not meeting:
             raise ValueError(f"Meeting {meeting_id} not found.")
-
-        meeting_service.update_sub_status(meeting_id, "downloading")
 
         if not meeting.file_path:
             raise ValueError("No S3 file path associated with meeting.")
@@ -456,11 +644,20 @@ def stage_download(meeting_id: int) -> int:
             logger.info("stage_download skipped (RunPod mode) meeting_id=%s", meeting_id)
         else:
             download_url = storage.get_presigned_download_url(meeting.file_path)
-            temp_audio_path = _temp_path_for(meeting_id, meeting.file_path)
+            temp_audio_path = _temp_path_for(
+                meeting_id, meeting.file_path, run_id=run_id, attempt_id=attempt_id
+            )
             urllib.request.urlretrieve(download_url, temp_audio_path)
 
         logger.info("stage_download complete meeting_id=%s owner_id=%s", meeting_id, meeting.owner_id)
+    except Ignore:
+        raise
     except Exception:
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.remove(temp_audio_path)
+            except OSError:
+                logger.warning("Could not remove failed attempt-owned download", exc_info=True)
         logger.exception("stage_download failed meeting_id=%s", meeting_id)
         raise
 
@@ -506,36 +703,117 @@ def _resolve_meeting_language_for_transcription(
     return forced, allowed
 
 
+def _save_transcription_for_attempt(
+    meeting_id: int,
+    run_id: int,
+    attempt_id: str,
+    result,
+    *,
+    owner_id: int | None,
+    user_tier,
+) -> bool:
+    """Apply transcript rows and duration only while this attempt holds both locks."""
+    with Session(engine) as session:
+        meeting, _run = meeting_processing_audit._locked_current_run(
+            session, run_id, meeting_id, attempt_id
+        )
+        if meeting is None:
+            return False
+
+        old_segments = session.exec(
+            select(TranscriptSegment).where(TranscriptSegment.meeting_id == meeting_id)
+        ).all()
+        for old in old_segments:
+            session.delete(old)
+
+        for segment in result.segments:
+            words = [
+                {
+                    "word": word.word,
+                    "start": word.start,
+                    "end": word.end,
+                    "speaker": word.speaker_label,
+                }
+                for word in segment.words
+            ]
+            session.add(
+                TranscriptSegment(
+                    meeting_id=meeting_id,
+                    start_time=segment.start,
+                    end_time=segment.end,
+                    text=segment.text,
+                    speaker=segment.speaker or "SPEAKER_UNKNOWN",
+                    words=words,
+                )
+            )
+
+        meeting.transcript_text = result.text
+        if result.audio_duration_seconds is not None:
+            meeting.duration_seconds = int(result.audio_duration_seconds)
+        if user_tier is not None and result.audio_duration_seconds is not None:
+            user = session.get(User, owner_id) if owner_id else None
+            if user:
+                user.minutes_used_this_month += ceil(result.audio_duration_seconds / 60)
+                session.add(user)
+        session.add(meeting)
+        session.commit()
+    return True
+
+
 @celery_app.task(name="stage_transcribe")
 def stage_transcribe(meeting_id: int) -> int:
     """Run the transcription provider pipeline (transcribe + align + diarize)."""
     logger.info("stage_transcribe started meeting_id=%s", meeting_id)
 
+    run_id, attempt_id = _required_processing_identity(stage_transcribe)
     is_runpod = _configured_transcription_provider() == ProviderName.RUNPOD.value
-    temp_audio_path = _temp_path_for(meeting_id)
+    temp_audio_path: str | None = None
 
     def on_transcribe_progress(stage: str):
         """Callback from provider — updates sub_status for each internal stage."""
-        # Use the base stage key for sub_status (strip progress details like percentages)
-        sub = stage.split(" (")[0]
-        meeting_service.update_sub_status(meeting_id, sub)
+        sub_status = stage.split(" (")[0]
+        _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, sub_status)
 
     def on_transcription_heartbeat() -> None:
         """Refresh liveness without allowing metadata failures to abort work."""
-        meeting_service.touch_processing_heartbeat(meeting_id)
+        try:
+            _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, None)
+        except Exception:
+            logger.warning("Transcription heartbeat update failed", exc_info=True)
 
     try:
         with Session(engine) as session:
-            meeting = session.get(Meeting, meeting_id)
-            if not meeting:
-                raise ValueError(f"Meeting {meeting_id} not found.")
-            temp_audio_path = _temp_path_for(meeting_id, meeting.file_path)
+            candidate = session.get(Meeting, meeting_id)
+            if candidate is not None:
+                temp_audio_path = _temp_path_for(
+                    meeting_id,
+                    candidate.file_path,
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                )
+            meeting, _run = meeting_processing_audit._locked_current_run(
+                session, run_id, meeting_id, attempt_id
+            )
+            if meeting is None:
+                raise Ignore()
+            temp_audio_path = _temp_path_for(
+                meeting_id, meeting.file_path, run_id=run_id, attempt_id=attempt_id
+            )
             if not is_runpod and not os.path.exists(temp_audio_path):
                 raise FileNotFoundError(f"Temp audio file not found: {temp_audio_path}")
 
-            # Look up user tier for provider routing
-            user: User | None = session.get(User, meeting.owner_id) if meeting.owner_id else None
+            owner_id = meeting.owner_id
+            file_key = meeting.file_path
+            transcription_type = meeting.transcription_type
+            user: User | None = session.get(User, owner_id) if owner_id else None
             user_tier = user.tier if user else None
+            meeting.status = "processing"
+            meeting.sub_status = "transcribing"
+            meeting.processing_heartbeat_at = datetime.utcnow()
+            session.add(meeting)
+            session.commit()
+
+        meeting_service._publish_sub_status(meeting_id, "transcribing")
 
         if not is_runpod:
             media_probe = _probe_local_media(temp_audio_path)
@@ -546,10 +824,14 @@ def stage_transcribe(meeting_id: int) -> int:
                     meeting_id,
                     media_probe.duration_seconds,
                 )
-                _clear_transcription_for_no_audio(
+                cleared = _clear_transcription_for_no_audio(
                     meeting_id,
                     media_probe.duration_seconds,
+                    run_id,
+                    attempt_id,
                 )
+                if not cleared:
+                    raise Ignore()
                 return meeting_id
 
         # Resolve language preferences for this meeting
@@ -565,15 +847,15 @@ def stage_transcribe(meeting_id: int) -> int:
             language=forced_lang,
             allowed_languages=allowed_langs or None,
         )
-        config.transcription_type = meeting.transcription_type or TranscriptionType.GENERAL
+        config.transcription_type = transcription_type or TranscriptionType.GENERAL
 
-        meeting_service.update_sub_status(meeting_id, "transcribing")
-
+        if not _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, None):
+            raise Ignore()
         with get_provider(user_tier=user_tier) as provider:
             source = AudioSourceResolver.resolve_for_provider(
                 temp_audio_path,
                 getattr(provider, "provider_name", _configured_transcription_provider()),
-                storage_key=meeting.file_path,
+                storage_key=file_key,
             )
             request = BatchTranscriptionRequest(
                 source=source,
@@ -592,58 +874,30 @@ def stage_transcribe(meeting_id: int) -> int:
                 on_heartbeat=on_transcription_heartbeat,
             )
 
-        # Write segments to DB
-        with Session(engine) as session:
-            # Delete old segments if this is a retried job
-            old_segments = session.exec(
-                select(TranscriptSegment).where(TranscriptSegment.meeting_id == meeting_id)
-            ).all()
-            for old in old_segments:
-                session.delete(old)
+        if not _save_transcription_for_attempt(
+            meeting_id,
+            run_id,
+            attempt_id,
+            result,
+            owner_id=owner_id,
+            user_tier=user_tier,
+        ):
+            raise Ignore()
 
-            # Write new segments from TranscriptionResult
-            for seg in result.segments:
-                words_dicts = [
-                    {
-                        "word": w.word,
-                        "start": w.start,
-                        "end": w.end,
-                        "speaker": w.speaker_label,
-                    }
-                    for w in seg.words
-                ]
-                db_segment = TranscriptSegment(
-                    meeting_id=meeting_id,
-                    start_time=seg.start,
-                    end_time=seg.end,
-                    text=seg.text,
-                    speaker=seg.speaker or "SPEAKER_UNKNOWN",
-                    words=words_dicts,
-                )
-                session.add(db_segment)
-
-            meeting_obj = session.get(Meeting, meeting_id)
-            if meeting_obj:
-                meeting_obj.transcript_text = result.text
-                if result.audio_duration_seconds is not None:
-                    meeting_obj.duration_seconds = int(result.audio_duration_seconds)
-            session.commit()
-
-            # Update minutes used this month
-            if user_tier is not None:
-                user_obj = session.get(User, meeting.owner_id) if meeting.owner_id else None
-                if user_obj and result.audio_duration_seconds is not None:
-                    user_obj.minutes_used_this_month += ceil(result.audio_duration_seconds / 60)
-                    session.add(user_obj)
-                    session.commit()
-
+    except Ignore:
+        raise
     except Exception as provider_exc:
+        if not _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, None):
+            raise Ignore() from provider_exc
         logger.exception("stage_transcribe failed meeting_id=%s", meeting_id)
-        raise provider_exc
+        raise
 
     finally:
-        if os.path.exists(temp_audio_path):
-            os.remove(temp_audio_path)
+        if temp_audio_path and os.path.exists(temp_audio_path):
+            try:
+                os.remove(temp_audio_path)
+            except OSError:
+                logger.warning("Could not remove attempt-owned transcription temp file", exc_info=True)
 
     def _duration_tier(seconds: float | None) -> str:
         if seconds is None:
@@ -654,6 +908,7 @@ def stage_transcribe(meeting_id: int) -> int:
             return "medium"
         return "long"
 
+    transcription_notification: tuple[str, str | None, str] | None = None
     with Session(engine) as session:
         meeting_for_analytics = session.get(Meeting, meeting_id)
         if meeting_for_analytics and meeting_for_analytics.owner_id:
@@ -671,18 +926,11 @@ def stage_transcribe(meeting_id: int) -> int:
                 if result.audio_duration_seconds is not None
                 else None
             )
-            notify(
-                "transcription_completed",
-                (user_obj.email if user_obj else None) or str(meeting_for_analytics.owner_id),
+            transcription_notification = (
+                (user_obj.email if user_obj else None)
+                or str(meeting_for_analytics.owner_id),
                 meeting_for_analytics.title,
-                meeting_id=meeting_id,
-                extra={
-                    "Duration": (
-                        f"{duration_minutes} min"
-                        if duration_minutes is not None
-                        else "unknown"
-                    )
-                },
+                f"{duration_minutes} min" if duration_minutes is not None else "unknown",
             )
 
             # Capture language-resolution telemetry (best-effort)
@@ -705,6 +953,18 @@ def stage_transcribe(meeting_id: int) -> int:
                     "Failed to capture transcription_language_resolved", exc_info=True
                 )
 
+    if transcription_notification is not None:
+        notification_email, notification_title, duration_label = transcription_notification
+        notify(
+            "transcription_completed",
+            notification_email,
+            notification_title,
+            meeting_id=meeting_id,
+            processing_run_id=run_id,
+            dispatch_attempt_id=attempt_id,
+            extra={"Duration": duration_label},
+        )
+
     logger.info("stage_transcribe complete meeting_id=%s", meeting_id)
     return meeting_id
 
@@ -715,15 +975,19 @@ def stage_transcribe(meeting_id: int) -> int:
 def stage_transliterate(meeting_id: int) -> int:
     """If meeting.requested_language has a transliteration target, populate
     meeting.transliterated_text with the alternate-script version."""
-    from app.models.base import Meeting
     from app.services.languages import catalog as lang_catalog
     from app.services.languages.transliteration import transliterate
 
     logger.info("stage_transliterate started meeting_id=%s", meeting_id)
+    run_id, attempt_id = _required_processing_identity(stage_transliterate)
 
     with Session(engine) as session:
-        meeting = session.get(Meeting, meeting_id)
-        if meeting is None or meeting.requested_language is None:
+        meeting, _run = meeting_processing_audit._locked_current_run(
+            session, run_id, meeting_id, attempt_id
+        )
+        if meeting is None:
+            raise Ignore()
+        if meeting.requested_language is None:
             return meeting_id
 
         requested = lang_catalog.get_entry(session, meeting.requested_language)
@@ -750,53 +1014,36 @@ def stage_transliterate(meeting_id: int) -> int:
         if not meeting.transcript_text:
             logger.info("stage_transliterate: no transcript_text yet for %s", meeting_id)
             return meeting_id
+        source_text = meeting.transcript_text
 
-        try:
-            roman = transliterate(
-                text=meeting.transcript_text,
-                source_code=source_code,
-                target_code=target_code,
-            )
-        except Exception as exc:
-            logger.exception("Transliteration failed for meeting %s", meeting_id)
-            try:
-                if meeting.owner_id:
-                    analytics.capture(
-                        meeting.owner_id,
-                        "transliteration_failed",
-                        {
-                            "meeting_id": meeting_id,
-                            "source_code": source_code,
-                            "target_code": target_code,
-                            "error": str(exc)[:200],
-                        },
-                    )
-            except Exception:
-                logger.warning(
-                    "Failed to capture transliteration_failed meeting_id=%s", meeting_id
-                )
-            return meeting_id
+    claim = meeting_processing_audit.claim_transliteration(
+        run_id=run_id,
+        attempt_id=attempt_id,
+        meeting_id=meeting_id,
+        task_id=_task_request_id(stage_transliterate),
+    )
+    if claim is None:
+        raise Ignore()
 
+    try:
+        roman = transliterate(
+            text=source_text,
+            source_code=source_code,
+            target_code=target_code,
+        )
+    except Exception:
+        logger.exception("Transliteration failed for meeting %s", meeting_id)
+        raise
+
+    with Session(engine) as session:
+        meeting, _run = meeting_processing_audit._locked_current_run(
+            session, run_id, meeting_id, attempt_id
+        )
+        if meeting is None:
+            raise Ignore()
         meeting.transliterated_text = roman
         session.add(meeting)
         session.commit()
-
-        try:
-            if meeting.owner_id:
-                analytics.capture(
-                    meeting.owner_id,
-                    "transliteration_completed",
-                    {
-                        "meeting_id": meeting_id,
-                        "source_code": source_code,
-                        "target_code": target_code,
-                        "text_length": len(roman),
-                    },
-                )
-        except Exception:
-            logger.warning(
-                "Failed to capture transliteration_completed meeting_id=%s", meeting_id
-            )
 
     return meeting_id
 
@@ -812,8 +1059,19 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
     is still running.
     """
     logger.info("stage_summarize started meeting_id=%s template_id=%s", meeting_id, template_id)
-
-    meeting_service.update_sub_status(meeting_id, "building_context")
+    run_id, attempt_id = _required_processing_identity(stage_summarize)
+    claim = meeting_processing_audit.claim_summary(
+        run_id=run_id,
+        attempt_id=attempt_id,
+        meeting_id=meeting_id,
+        task_id=_task_request_id(stage_summarize),
+    )
+    if claim is None:
+        raise Ignore()
+    if not _update_sub_status_for_attempt(
+        meeting_id, run_id, attempt_id, "building_context"
+    ):
+        raise Ignore()
 
     meeting = meeting_service.get(Meeting, meeting_id)
     if not meeting:
@@ -861,12 +1119,9 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             ",".join(context_result.warning_codes),
         )
 
-    meeting_service.update_sub_status(meeting_id, "summarizing")
-
     summary_text = None
     active_template = None
     completion_client = None
-
     if meeting.transcript_text or visual_segments:
         style_examples = style_service.get_style_examples()
 
@@ -883,7 +1138,10 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             except Exception:
                 active_template = None
 
-        template_body = active_template.body if active_template else None
+        if not _update_sub_status_for_attempt(
+            meeting_id, run_id, attempt_id, "summarizing"
+        ):
+            raise Ignore()
         completion_client = get_completion_client(
             meeting.owner_id,
             purpose="summary",
@@ -893,7 +1151,7 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
         summary_text = summarize_transcript(
             meeting.transcript_text or "",
             style_examples=style_examples,
-            template_body=template_body,
+            template_body=active_template.body if active_template else None,
             template_id=str(active_template.id) if active_template else None,
             upload_date=meeting.created_at.strftime("%B %d, %Y") if meeting.created_at else None,
             context=context_result,
@@ -901,28 +1159,33 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             completion_client=completion_client,
         )
 
-    # Infer a meaningful title from the summary via LLM
     inferred_title = None
     if summary_text:
+        if not _update_sub_status_for_attempt(
+            meeting_id, run_id, attempt_id, "summarizing"
+        ):
+            raise Ignore()
         from app.services.ai_agent import infer_title
+
         inferred_title = infer_title(
             summary_text,
             output_language=meeting.requested_language,
             completion_client=completion_client,
         )
 
-    meeting_service.save_summary(
+    saved_meeting = meeting_service.save_summary_for_attempt(
         meeting_id,
+        run_id,
+        attempt_id,
         summary_text,
         template_id=active_template.id if active_template else None,
         template_name=active_template.name if active_template else None,
+        inferred_title=inferred_title,
     )
+    if saved_meeting is None:
+        raise Ignore()
 
-    if inferred_title and meeting.title:
-        file_extensions = ('.m4a', '.mp3', '.wav', '.mp4', '.mov', '.webm', '.ogg', '.flac')
-        if any(meeting.title.lower().endswith(ext) for ext in file_extensions):
-            meeting_service.update_field(meeting_id, "title", inferred_title)
-    if meeting.owner_id:
+    if saved_meeting.owner_id:
         def _word_count_tier(n: int) -> str:
             if n < 200:
                 return "short"
@@ -931,7 +1194,7 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             return "long"
 
         analytics.capture(
-            meeting.owner_id,
+            saved_meeting.owner_id,
             "summary_generated",
             {
                 "meeting_id": meeting_id,
@@ -940,19 +1203,35 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             },
         )
 
-    # Send summary email and notification (fire-and-forget — never raises)
-    if meeting.owner_id:
+    # Send summary email and notification only after the exact-attempt write commits.
+    if saved_meeting.owner_id:
         try:
             from app.services.email import email_service
             with Session(engine) as session:
-                user = session.get(User, meeting.owner_id)
+                user = session.get(User, saved_meeting.owner_id)
             if user and user.email:
-                email_service.send_summary_email(user.email, meeting)
-                notify("summary_generated", user.email, meeting.title, meeting_id=meeting_id)
+                if asyncio.run(
+                    meeting_processing_audit.success_effects_are_eligible(
+                        meeting_id, run_id, attempt_id
+                    )
+                ):
+                    email_service.send_summary_email(user.email, saved_meeting)
+                notify(
+                    "summary_generated",
+                    user.email,
+                    saved_meeting.title,
+                    meeting_id=meeting_id,
+                    processing_run_id=run_id,
+                    dispatch_attempt_id=attempt_id,
+                )
         except Exception:
             logger.exception("stage_summarize email lookup failed meeting_id=%s", meeting_id)
 
-    logger.info("stage_summarize complete meeting_id=%s owner_id=%s", meeting_id, meeting.owner_id)
+    logger.info(
+        "stage_summarize complete meeting_id=%s owner_id=%s",
+        meeting_id,
+        saved_meeting.owner_id,
+    )
     return meeting_id
 
 
@@ -960,64 +1239,73 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
 
 @celery_app.task(name="stage_extract_intelligence")
 def stage_extract_intelligence(meeting_id: int) -> int:
-    """Extract transcript-only intelligence and finalize the meeting."""
+    """Extract intelligence, then complete only the current processing attempt."""
     logger.info("stage_extract_intelligence started meeting_id=%s", meeting_id)
-    meeting_service.touch_processing_heartbeat(meeting_id)
+    run_id, attempt_id = _required_processing_identity(stage_extract_intelligence)
+    claim = meeting_processing_audit.claim_intelligence(
+        run_id=run_id,
+        attempt_id=attempt_id,
+        meeting_id=meeting_id,
+        task_id=_task_request_id(stage_extract_intelligence),
+    )
+    if claim is None:
+        raise Ignore()
 
     meeting = meeting_service.get(Meeting, meeting_id)
-    if not meeting or not meeting.transcript_text:
+    if not meeting:
+        raise ValueError(f"Meeting {meeting_id} not found.")
+    if meeting.owner_id is None:
+        raise Ignore()
+    if not meeting.transcript_text:
         logger.warning("stage_extract_intelligence: no transcript for meeting_id=%s", meeting_id)
-        if meeting:
-            meeting_service.mark_completed(meeting_id)
+        if not meeting_service.complete_without_intelligence_for_attempt(
+            meeting_id,
+            processing_run_id=run_id,
+            dispatch_attempt_id=attempt_id,
+            owner_id=meeting.owner_id,
+        ):
+            raise Ignore()
         return meeting_id
 
-    from app.services.meeting_intelligence import intelligence_service
+    if not meeting_service.begin_intelligence_for_attempt(
+        meeting_id,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+        owner_id=meeting.owner_id,
+    ):
+        raise Ignore()
+
+    from app.services.meeting_intelligence import (
+        HighlightSaveRejected,
+        intelligence_service,
+    )
 
     meeting_type = meeting.meeting_type or "generic"
 
-    # Update status to processing
-    with Session(engine) as session:
-        db_meeting = session.get(Meeting, meeting_id)
-        if db_meeting:
-            db_meeting.structured_output_status = "processing"
-            session.add(db_meeting)
-            session.commit()
-            meeting_service.touch_processing_heartbeat(meeting_id)
+    highlights_data = intelligence_service.extract_highlights(meeting.transcript_text)
+    highlight_result = intelligence_service.save_highlights(
+        meeting_id,
+        highlights_data,
+        owner_id=meeting.owner_id,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+    )
+    if highlight_result is HighlightSaveRejected.STALE_OR_CANCELLED:
+        raise Ignore()
 
-    try:
-        # Call 1: Extract highlights (action items, key questions, chapters)
-        highlights_data = intelligence_service.extract_highlights(meeting.transcript_text)
-        intelligence_service.save_highlights(meeting_id, highlights_data)
+    structured_output = intelligence_service.extract_structured_output(
+        meeting.transcript_text, meeting_type
+    )
+    if not meeting_service.complete_intelligence_for_attempt(
+        meeting_id,
+        structured_output,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+        owner_id=meeting.owner_id,
+    ):
+        raise Ignore()
 
-        # Call 2: Extract structured output (meeting-type-specific)
-        structured_output = intelligence_service.extract_structured_output(
-            meeting.transcript_text, meeting_type
-        )
-
-        # Save structured output and mark as completed
-        with Session(engine) as session:
-            db_meeting = session.get(Meeting, meeting_id)
-            if db_meeting:
-                db_meeting.structured_output = structured_output
-                db_meeting.structured_output_status = "completed"
-                session.add(db_meeting)
-                session.commit()
-
-        logger.info("stage_extract_intelligence complete meeting_id=%s type=%s", meeting_id, meeting_type)
-
-    except Exception:
-        logger.exception("stage_extract_intelligence failed meeting_id=%s", meeting_id)
-        with Session(engine) as session:
-            db_meeting = session.get(Meeting, meeting_id)
-            if db_meeting:
-                db_meeting.structured_output_status = "failed"
-                session.add(db_meeting)
-                session.commit()
-
-    # Intelligence may have failed, but the extraction attempt is complete and
-    # the summary remains usable.  Do not finalize from stage_summarize: this is
-    # the only stage that owns the completed transition.
-    meeting_service.mark_completed(meeting_id)
+    logger.info("stage_extract_intelligence complete meeting_id=%s type=%s", meeting_id, meeting_type)
 
     return meeting_id
 
@@ -1216,7 +1504,13 @@ def _safe_visual_params(result) -> dict:
     }
 
 
-def _emit_visual_side_effects(finalization: dict, result=None) -> None:
+def _emit_visual_side_effects(
+    finalization: dict,
+    result=None,
+    *,
+    processing_run_id: int | None = None,
+    dispatch_attempt_id: str | None = None,
+) -> None:
     """Emit only the side effects claimed by the atomic finalization."""
     if not finalization.get("applied") or finalization.get("owner_id") is None:
         return
@@ -1252,12 +1546,21 @@ def _emit_visual_side_effects(finalization: dict, result=None) -> None:
         try:
             with Session(engine) as session:
                 user_obj = session.get(User, owner_id)
+            identity = (
+                {
+                    "processing_run_id": processing_run_id,
+                    "dispatch_attempt_id": dispatch_attempt_id,
+                }
+                if processing_run_id is not None
+                else {}
+            )
             notify(
                 "visual_breakdown_completed",
                 (user_obj.email if user_obj else None) or str(owner_id),
                 finalization.get("title"),
                 meeting_id=meeting_id,
                 extra={"segment_count": str(finalization.get("segment_count", 0))},
+                **identity,
             )
         except Exception:
             logger.warning("visual breakdown notification failed", exc_info=True)
@@ -1273,15 +1576,147 @@ def _emit_visual_side_effects(finalization: dict, result=None) -> None:
         )
 
 
+def _cleanup_visual_result_artifacts(
+    result,
+    *,
+    owner_id,
+    meeting_id: int,
+    visual_epoch: str | int,
+    processing_run_id: int | None,
+    dispatch_attempt_id: str | None,
+) -> None:
+    """Delete only artifacts in the namespace returned by this rejected run."""
+    if (
+        not isinstance(owner_id, int)
+        or isinstance(owner_id, bool)
+        or owner_id <= 0
+        or not isinstance(meeting_id, int)
+        or isinstance(meeting_id, bool)
+        or meeting_id <= 0
+    ):
+        return
+
+    pipeline_identity_present = (
+        processing_run_id is not None or dispatch_attempt_id is not None
+    )
+    if pipeline_identity_present and (
+        not isinstance(processing_run_id, int)
+        or isinstance(processing_run_id, bool)
+        or processing_run_id <= 0
+        or not isinstance(dispatch_attempt_id, str)
+        or not dispatch_attempt_id
+    ):
+        return
+
+    raw_key = getattr(result, "raw_output_s3_key", None)
+    if not isinstance(raw_key, str):
+        return
+
+    owner = str(owner_id)
+    meeting = str(meeting_id)
+    epoch = str(visual_epoch)
+    if not re.fullmatch(r"(?:[0-9]+|[0-9a-f]{32})", epoch):
+        return
+    epoch_prefix = f"users/{owner}/meetings/{meeting}/visual/epoch-{epoch}"
+
+    if pipeline_identity_present:
+        attempt_hash = sha256(str(dispatch_attempt_id).encode("utf-8")).hexdigest()
+        run_id = str(processing_run_id)
+        namespace = f"{epoch_prefix}/run-{run_id}/attempt-{attempt_hash}"
+    else:
+        namespace = raw_key.rsplit("/", 1)[0]
+        if not re.fullmatch(re.escape(epoch_prefix) + r"/standalone-[0-9a-f]{32}", namespace):
+            return
+
+    if raw_key != f"{namespace}/raw_output.json":
+        return
+
+    keys = {raw_key}
+    for segment in getattr(result, "segments", ()) or ():
+        key = getattr(segment, "screenshot_s3_key", None)
+        if isinstance(key, str) and re.fullmatch(
+            re.escape(namespace) + r"/[0-9a-f]{32}\.jpg", key
+        ):
+            keys.add(key)
+    for key in keys:
+        try:
+            storage.delete_file(key)
+        except Exception:
+            logger.warning("rejected visual artifact cleanup failed", exc_info=True)
+
+
 def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
+    task = stage_optional_visual_breakdown if optional else stage_visual_breakdown
+    processing_run_id, dispatch_attempt_id = _visual_processing_identity(
+        task, allow_standalone=not optional
+    )
+    pipeline_mode = processing_run_id is not None
+    visual_only_run = not optional and pipeline_mode
+
     logger.info(
         "%s started meeting_id=%s",
         "stage_optional_visual_breakdown" if optional else "stage_visual_breakdown",
         meeting_id,
     )
-    run_epoch, should_process = meeting_service.begin_visual_breakdown(meeting_id)
-    if not should_process or not _acquire_visual_lease(meeting_id, run_epoch):
+    run_epoch, should_process = meeting_service.begin_visual_breakdown(
+        meeting_id,
+        processing_run_id=processing_run_id,
+        dispatch_attempt_id=dispatch_attempt_id,
+    )
+    if not run_epoch:
+        if pipeline_mode:
+            raise Ignore()
         return meeting_id
+    if not should_process:
+        if visual_only_run:
+            raise Ignore()
+        return meeting_id
+    if not _acquire_visual_lease(meeting_id, run_epoch):
+        if visual_only_run:
+            raise Ignore()
+        return meeting_id
+
+    def update_progress(sub_status: str | None = None) -> None:
+        if not meeting_service.update_visual_breakdown_progress(
+            meeting_id,
+            run_epoch,
+            processing_run_id=processing_run_id,
+            dispatch_attempt_id=dispatch_attempt_id,
+            sub_status=sub_status,
+        ):
+            raise Ignore()
+
+    def finalize(**kwargs) -> dict:
+        result = meeting_service.finalize_visual_breakdown(
+            meeting_id,
+            run_epoch,
+            processing_run_id=processing_run_id,
+            dispatch_attempt_id=dispatch_attempt_id,
+            **kwargs,
+        )
+        if pipeline_mode and not result.get("applied"):
+            raise Ignore()
+        return result
+
+    def cleanup_result_artifacts(result) -> None:
+        _cleanup_visual_result_artifacts(
+            result,
+            owner_id=owner_id,
+            meeting_id=meeting_id,
+            visual_epoch=run_epoch,
+            processing_run_id=processing_run_id,
+            dispatch_attempt_id=dispatch_attempt_id,
+        )
+
+    def finalize_result(result, **kwargs) -> dict:
+        try:
+            finalization = finalize(**kwargs)
+        except Ignore:
+            cleanup_result_artifacts(result)
+            raise
+        if not finalization.get("applied"):
+            cleanup_result_artifacts(result)
+        return finalization
 
     with Session(engine) as session:
         meeting = session.get(Meeting, meeting_id)
@@ -1307,9 +1742,7 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
         ]
 
     if optional and not settings.VISION_ENABLED:
-        finalization = meeting_service.finalize_visual_breakdown(
-            meeting_id,
-            run_epoch,
+        finalization = finalize(
             outcome="skipped",
             reason="vision_disabled",
             warning_code="visual_disabled",
@@ -1318,9 +1751,7 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
         return meeting_id
 
     if not file_path:
-        finalization = meeting_service.finalize_visual_breakdown(
-            meeting_id,
-            run_epoch,
+        finalization = finalize(
             outcome="skipped",
             reason="no_media_file",
             warning_code="no_video_file",
@@ -1329,9 +1760,7 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
         return meeting_id
 
     if source_type == "youtube":
-        finalization = meeting_service.finalize_visual_breakdown(
-            meeting_id,
-            run_epoch,
+        finalization = finalize(
             outcome="skipped",
             reason="youtube_audio_only",
             warning_code="youtube_audio_only",
@@ -1339,14 +1768,26 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
         _emit_visual_side_effects(finalization)
         return meeting_id
 
-    meeting_service.update_sub_status(meeting_id, "analyzing_video")
-    meeting_service.increment_visual_breakdown_attempt(meeting_id, run_epoch)
+    update_progress("analyzing_video")
+    attempts = meeting_service.increment_visual_breakdown_attempt(
+        meeting_id,
+        run_epoch,
+        processing_run_id=processing_run_id,
+        dispatch_attempt_id=dispatch_attempt_id,
+    )
+    if pipeline_mode and attempts is None:
+        raise Ignore()
+
     try:
+        update_progress()
         result = DirectVisionService().submit_and_wait(
             {
                 "file_path": file_path,
                 "owner_id": str(owner_id) if owner_id is not None else "unknown",
                 "meeting_id": str(meeting_id),
+                "visual_epoch": run_epoch,
+                "processing_run_id": processing_run_id,
+                "dispatch_attempt_id": dispatch_attempt_id,
                 "source_type": source_type,
                 "transcript": transcript_payload,
                 "params": {
@@ -1355,13 +1796,16 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
                     if key in stored_visual_params
                 },
             },
-            on_heartbeat=lambda: meeting_service.touch_processing_heartbeat(meeting_id),
+            on_heartbeat=update_progress,
         )
+    except Ignore:
+        raise
     except Exception as error:
+        if visual_only_run:
+            raise RuntimeError(_sanitize_visual_error(error)) from error
+        update_progress()
         logger.warning("visual worker failed meeting_id=%s error=%s", meeting_id, _sanitize_visual_error(error))
-        finalization = meeting_service.finalize_visual_breakdown(
-            meeting_id,
-            run_epoch,
+        finalization = finalize(
             outcome="fallback",
             reason="vision_worker_error",
             warning_code="vision_worker_error",
@@ -1370,10 +1814,22 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
         _emit_visual_side_effects(finalization)
         return meeting_id
 
+    try:
+        update_progress()
+    except Ignore:
+        cleanup_result_artifacts(result)
+        raise
+
     if result.status != "completed":
-        finalization = meeting_service.finalize_visual_breakdown(
-            meeting_id,
-            run_epoch,
+        if visual_only_run:
+            cleanup_result_artifacts(result)
+            raise RuntimeError(
+                _sanitize_visual_error(
+                    getattr(result, "error", None) or "Visual analysis failed"
+                )
+            )
+        finalization = finalize_result(
+            result,
             outcome="fallback",
             reason="vision_worker_failed",
             warning_code="vision_worker_failed",
@@ -1384,9 +1840,8 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
 
     if not result.segments:
         skip_reason = str(getattr(result, "params", {}).get("skip_reason") or "no_relevant_visual")
-        finalization = meeting_service.finalize_visual_breakdown(
-            meeting_id,
-            run_epoch,
+        finalization = finalize_result(
+            result,
             outcome="skipped",
             reason=skip_reason,
             warning_code=skip_reason,
@@ -1407,16 +1862,20 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
         )
         for segment in result.segments
     ]
-    finalization = meeting_service.finalize_visual_breakdown(
-        meeting_id,
-        run_epoch,
+    finalization = finalize_result(
+        result,
         outcome="completed",
         result_params=_safe_visual_params(result),
         raw_output_s3_key=result.raw_output_s3_key,
         model=result.model,
         segments=worker_segments,
     )
-    _emit_visual_side_effects(finalization, result)
+    _emit_visual_side_effects(
+        finalization,
+        result,
+        processing_run_id=processing_run_id,
+        dispatch_attempt_id=dispatch_attempt_id,
+    )
     logger.info(
         "visual breakdown done meeting_id=%s segments=%s",
         meeting_id,
@@ -1444,10 +1903,18 @@ def finalize_recovered_meeting(meeting_id: int) -> int:
     if not meeting:
         raise RuntimeError(f"Meeting {meeting_id} not found")
     if (
-        meeting.structured_output_status == "completed"
-        and meeting.structured_output is not None
+        meeting.structured_output_status != "completed"
+        or meeting.structured_output is None
     ):
-        meeting_service.mark_completed(meeting_id)
+        raise RuntimeError("Recovery finalization requires completed structured output")
+    run_id = _audit_run_id_from_task(finalize_recovered_meeting)
+    attempt_id = _audit_attempt_id_from_task(finalize_recovered_meeting)
+    if run_id is None or attempt_id is None:
+        raise RuntimeError("Recovery finalization requires a current processing identity")
+    if not meeting_service.mark_completed_for_processing_run(
+        meeting_id, processing_run_id=run_id, dispatch_attempt_id=attempt_id
+    ):
+        raise RuntimeError("Recovery finalization was rejected for the current processing attempt")
     return meeting_id
 
 
@@ -1486,8 +1953,14 @@ def _dispatch_recovery_stages(meeting_id: int, stages: list) -> None:
         return
 
     run = meeting_processing_audit.get_or_create_pending_run(meeting_id, trigger="recovery")
-    result = chain(*_build_pipeline_signatures(meeting_id, stages, getattr(run, "id", None))).apply_async()
-    meeting_processing_audit.set_root_task(getattr(run, "id", None), getattr(result, "id", None))
+    run_id = getattr(run, "id", None)
+    attempt_id = getattr(run, "dispatch_attempt_id", None)
+    if run_id is None or not attempt_id:
+        return
+    result = chain(*_build_pipeline_signatures(meeting_id, stages, run_id, attempt_id)).apply_async()
+    meeting_processing_audit.set_root_task(
+        run_id, getattr(result, "id", None), attempt_id=attempt_id
+    )
 
 
 def _dispatch_recovery_plan(meeting_id: int, plan: MeetingRecoveryPlan) -> None:
@@ -1509,7 +1982,9 @@ def _dispatch_recovery_plan(meeting_id: int, plan: MeetingRecoveryPlan) -> None:
         dispatch_full_pipeline=dispatch_pipeline,
         dispatch_youtube_pipeline=dispatch_youtube_pipeline,
         dispatch_stages=dispatch_stages,
-        finalize=meeting_service.mark_completed,
+        finalize=lambda mid: _dispatch_recovery_stages(
+            mid, [finalize_recovered_meeting]
+        ),
     )
 
 
@@ -1675,10 +2150,13 @@ def stage_embedding(meeting_id: int) -> int:
         logger.info("stage_embedding skipped disabled meeting_id=%s", meeting_id)
         return meeting_id
 
-    meeting = meeting_service.get(Meeting, meeting_id)
-    if not meeting:
-        logger.warning("stage_embedding skipped missing meeting_id=%s", meeting_id)
-        return meeting_id
+    run_id, attempt_id = _required_processing_identity(stage_embedding)
+    with Session(engine) as session:
+        meeting, _run = meeting_processing_audit._locked_current_run(
+            session, run_id, meeting_id, attempt_id
+        )
+    if meeting is None:
+        raise Ignore()
     if not meeting.group_id:
         logger.info("stage_embedding skipped ungrouped meeting_id=%s", meeting_id)
         return meeting_id
@@ -1733,15 +2211,15 @@ def stage_embedding(meeting_id: int) -> int:
                 for chunk, vector in zip(chunks, vectors)
             ]
 
-        # Keep the assignment row locked across the destructive delete and the
-        # upsert. The API takes the same lock before committing reassignment, so
-        # an old snapshot cannot write after a newer assignment commits.
+        # Revalidate and hold Meeting-then-Run locks through vector mutation.
+        # Embedding-provider calls above run without database locks.
         stale_assignment: Meeting | None = None
         with Session(engine) as session:
-            current = _get_locked_meeting(session, meeting_id)
+            current, _run = meeting_processing_audit._locked_current_run(
+                session, run_id, meeting_id, attempt_id
+            )
             if current is None:
-                logger.warning("stage_embedding skipped missing meeting_id=%s", meeting_id)
-                return meeting_id
+                raise Ignore()
             if (
                 current.owner_id != meeting.owner_id
                 or current.group_id != meeting.group_id
@@ -1761,6 +2239,8 @@ def stage_embedding(meeting_id: int) -> int:
         if stale_assignment is not None:
             _requeue_stale_meeting_index(meeting_id, meeting, stale_assignment)
             return meeting_id
+    except Ignore:
+        raise
     except Exception:
         logger.exception(
             "stage_embedding failed meeting_id=%s owner_id=%s group_id=%s",
@@ -1923,6 +2403,10 @@ def reindex_group(group_id: int) -> int:
 def dispatch_pipeline(meeting_id: int):
     """Build and dispatch the Celery chain for processing a meeting."""
     run = meeting_processing_audit.get_or_create_pending_run(meeting_id, trigger="pipeline")
+    run_id = getattr(run, "id", None)
+    attempt_id = getattr(run, "dispatch_attempt_id", None)
+    if run_id is None or not attempt_id:
+        return
     stages = [
         stage_download,
         stage_transcribe,
@@ -1932,8 +2416,10 @@ def dispatch_pipeline(meeting_id: int):
         stage_extract_intelligence,
         stage_embedding,
     ]
-    result = chain(*_build_pipeline_signatures(meeting_id, stages, getattr(run, "id", None))).apply_async()
-    meeting_processing_audit.set_root_task(getattr(run, "id", None), getattr(result, "id", None))
+    result = chain(*_build_pipeline_signatures(meeting_id, stages, run_id, attempt_id)).apply_async()
+    meeting_processing_audit.set_root_task(
+        run_id, getattr(result, "id", None), attempt_id=attempt_id
+    )
 
 
 # ── Stage 0 (YouTube): Download from YouTube ────────────────────────────────
@@ -1953,19 +2439,41 @@ def stage_youtube_download(meeting_id: int) -> int:
     )
 
     logger.info("stage_youtube_download started meeting_id=%s", meeting_id)
+    run_id, attempt_id = _required_processing_identity(stage_youtube_download)
+    if meeting_processing_audit.claim_youtube_download(
+        run_id=run_id,
+        attempt_id=attempt_id,
+        meeting_id=meeting_id,
+        task_id=_task_request_id(stage_youtube_download),
+    ) is None:
+        raise Ignore()
 
-    meeting = meeting_service.get(Meeting, meeting_id)
-    if not meeting:
-        raise ValueError(f"Meeting {meeting_id} not found.")
-
-    if not meeting.source_url:
-        raise ValueError("No YouTube URL associated with meeting.")
-
-    meeting_service.update_sub_status(meeting_id, "downloading_youtube")
-
+    attempt_work_dir: str | None = None
+    handoff_path: str | None = None
+    file_key: str | None = None
+    object_write_started = False
+    promoted = False
     try:
+        if not _update_sub_status_for_attempt(
+            meeting_id, run_id, attempt_id, "downloading_youtube"
+        ):
+            raise Ignore()
+        meeting = meeting_service.get(Meeting, meeting_id)
+        if not meeting:
+            raise ValueError(f"Meeting {meeting_id} not found.")
+        if not meeting.source_url:
+            raise ValueError("No YouTube URL associated with meeting.")
+        if meeting.owner_id is None:
+            raise ValueError("YouTube meeting has no owner.")
+        source_url = meeting.source_url
+        owner_id = meeting.owner_id
+
         # Step 1: Extract metadata (title, duration, thumbnail, channel)
-        metadata = extract_metadata(meeting.source_url)
+        if not _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, None):
+            raise Ignore()
+        metadata = extract_metadata(source_url)
+        if not _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, None):
+            raise Ignore()
 
         # Step 2: Validate duration (max 4 hours = 14400 seconds)
         if metadata["duration"] > 14400:
@@ -1973,38 +2481,55 @@ def stage_youtube_download(meeting_id: int) -> int:
                 "Video exceeds the maximum duration of 4 hours."
             )
 
-        # Step 3: Update meeting with YouTube metadata
+        # Update metadata only while the exact run and attempt remain current.
         with Session(engine) as session:
-            m = session.get(Meeting, meeting_id)
-            if m:
-                m.title = metadata["title"]
-                m.youtube_title = metadata["title"]
-                m.youtube_duration_seconds = metadata["duration"]
-                m.youtube_thumbnail_url = metadata["thumbnail"]
-                m.youtube_channel = metadata["channel"]
-                session.add(m)
-                session.commit()
+            m, _run = meeting_processing_audit._locked_current_run(
+                session, run_id, meeting_id, attempt_id
+            )
+            if m is None or m.owner_id != owner_id:
+                raise Ignore()
+            m.title = metadata["title"]
+            m.youtube_title = metadata["title"]
+            m.youtube_duration_seconds = metadata["duration"]
+            m.youtube_thumbnail_url = metadata["thumbnail"]
+            m.youtube_channel = metadata["channel"]
+            session.add(m)
+            session.commit()
 
-        # Step 4: Download audio to temp directory
+        # Step 3: Download to a local path unique to this meeting attempt.
         video_id = metadata["id"]
-        audio_path = download_audio(meeting.source_url, TEMP_DIR, video_id)
+        attempt_video_id, file_key = _youtube_attempt_artifacts(
+            owner_id, meeting_id, run_id, attempt_id, video_id
+        )
+        if not _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, None):
+            raise Ignore()
+        attempt_work_dir = _youtube_attempt_temp_dir(meeting_id, run_id, attempt_id)
+        os.makedirs(attempt_work_dir, exist_ok=True)
+        audio_path = download_audio(source_url, attempt_work_dir, attempt_video_id)
 
-        # Step 5: Upload audio to object storage
-        file_key = f"users/{meeting.owner_id}/meetings/yt_{video_id}.mp3"
+        # Step 4: Upload under an immutable key unique to this meeting attempt.
+        if not _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, None):
+            raise Ignore()
+        object_write_started = True
         with open(audio_path, "rb") as f:
             storage.upload_file(f.read(), file_key, "audio/mpeg")
+        if not _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, None):
+            raise Ignore()
 
-        # Step 6: Update meeting file_path and set temp path for transcription
-        with Session(engine) as session:
-            m = session.get(Meeting, meeting_id)
-            if m:
-                m.file_path = file_key
-                session.add(m)
-                session.commit()
-
-        # Move/rename to the conventional temp path for stage_transcribe
-        conventional_path = _temp_path_for(meeting_id, file_key)
-        os.rename(audio_path, conventional_path)
+        # Match stage_transcribe's attempt path derived from the promoted key.
+        handoff_path = _temp_path_for(
+            meeting_id, file_key, run_id=run_id, attempt_id=attempt_id
+        )
+        os.replace(audio_path, handoff_path)
+        if not meeting_processing_audit.promote_youtube_audio(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            meeting_id=meeting_id,
+            owner_id=owner_id,
+            file_key=file_key,
+        ):
+            raise Ignore()
+        promoted = True
 
         logger.info(
             "stage_youtube_download complete meeting_id=%s video_id=%s duration=%s",
@@ -2013,9 +2538,9 @@ def stage_youtube_download(meeting_id: int) -> int:
             metadata["duration"],
         )
 
-        if meeting.owner_id:
+        if owner_id:
             analytics.capture(
-                meeting.owner_id,
+                owner_id,
                 "youtube_download_completed",
                 {
                     "meeting_id": meeting_id,
@@ -2024,11 +2549,26 @@ def stage_youtube_download(meeting_id: int) -> int:
                 },
             )
 
+    except Ignore:
+        raise
     except YouTubeError:
         raise  # Let link_error handler catch it with the descriptive message
+    except Ignore:
+        raise
     except Exception:
         logger.exception("stage_youtube_download failed meeting_id=%s", meeting_id)
         raise
+    finally:
+        _cleanup_youtube_attempt_artifacts(
+            work_dir=attempt_work_dir,
+            handoff_path=handoff_path,
+            file_key=file_key,
+            object_write_started=object_write_started,
+            promoted=promoted,
+            meeting_id=meeting_id,
+            run_id=run_id,
+            attempt_id=attempt_id,
+        )
 
     return meeting_id
 
@@ -2041,6 +2581,10 @@ def dispatch_youtube_pipeline(meeting_id: int):
     optional stage short-circuits YouTube audio without downloading media twice.
     """
     run = meeting_processing_audit.get_or_create_pending_run(meeting_id, trigger="youtube")
+    run_id = getattr(run, "id", None)
+    attempt_id = getattr(run, "dispatch_attempt_id", None)
+    if run_id is None or not attempt_id:
+        return
     stages = [
         stage_youtube_download,
         stage_transcribe,
@@ -2050,5 +2594,7 @@ def dispatch_youtube_pipeline(meeting_id: int):
         stage_extract_intelligence,
         stage_embedding,
     ]
-    result = chain(*_build_pipeline_signatures(meeting_id, stages, getattr(run, "id", None))).apply_async()
-    meeting_processing_audit.set_root_task(getattr(run, "id", None), getattr(result, "id", None))
+    result = chain(*_build_pipeline_signatures(meeting_id, stages, run_id, attempt_id)).apply_async()
+    meeting_processing_audit.set_root_task(
+        run_id, getattr(result, "id", None), attempt_id=attempt_id
+    )

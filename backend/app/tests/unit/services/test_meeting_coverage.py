@@ -11,6 +11,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from app.models import Meeting, MeetingCreate, TranscriptSegment, TranscriptionType, VisualSegment
 from app.services import base as base_module
@@ -41,6 +42,7 @@ class MeetingStore:
         self.deleted_visual_for: list[int] = []
         self.deleted_meeting_ids: list[int] = []
         self.added: list[object] = []
+        self.commit_count = 0
 
     def session(self):
         return FakeMeetingSession(self)
@@ -113,6 +115,7 @@ class FakeMeetingSession:
 
     def commit(self):
         self.commits += 1
+        self.store.commit_count += 1
 
     def refresh(self, _obj):
         pass
@@ -132,6 +135,33 @@ def fixture_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[MeetingStore]:
 @pytest.fixture(name="service")
 def fixture_service() -> MeetingService:
     return MeetingService()
+
+
+def install_visual_run_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    meeting: Meeting,
+    *,
+    run_id: int,
+    attempt_id: str,
+):
+    calls = []
+
+    def locked_current_run(session, requested_run_id, meeting_id, requested_attempt_id):
+        calls.append((session, requested_run_id, meeting_id, requested_attempt_id))
+        if (
+            requested_run_id == run_id
+            and meeting_id == meeting.id
+            and requested_attempt_id == attempt_id
+        ):
+            return meeting, SimpleNamespace(status="running", trigger="pipeline")
+        return None, None
+
+    monkeypatch.setattr(
+        meeting_module.meeting_processing_audit,
+        "_locked_current_run",
+        locked_current_run,
+    )
+    return calls
 
 
 def install_worker(monkeypatch: pytest.MonkeyPatch):
@@ -517,6 +547,355 @@ def test_finalize_visual_breakdown_warning_outcome_claims_warning_event_without_
     assert meeting.visual_breakdown_status == "fallback"
     assert meeting.visual_breakdown_error == "low_confidence"
     assert meeting.visual_breakdown_run_count == 7
+
+
+def test_visual_processing_identity_and_epoch_are_atomic_through_finalization(
+    service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_id, attempt_id = 41, "current-attempt"
+    meeting = store.add_meeting(
+        title="Guarded visual",
+        owner_id=5,
+        status="queued",
+        sub_status="before-visual",
+        current_processing_run_id=run_id,
+    )
+    lock_calls = install_visual_run_lock(
+        monkeypatch, meeting, run_id=run_id, attempt_id=attempt_id
+    )
+    published: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        service, "_publish_sub_status", lambda mid, status: published.append((mid, status))
+    )
+    replaced: list[tuple[int, list]] = []
+
+    class FakeVisualSegmentService:
+        @staticmethod
+        def replace_for_meeting_in_session(_session, meeting_id, segments):
+            replaced.append((meeting_id, list(segments)))
+
+    visual_module = types.ModuleType("app.services.visual_segments")
+    visual_module.VisualSegmentService = FakeVisualSegmentService
+    monkeypatch.setitem(sys.modules, "app.services.visual_segments", visual_module)
+
+    run_epoch, started = service.begin_visual_breakdown(
+        meeting.id,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+    )
+    assert started is True
+    assert meeting.visual_breakdown_status == "processing"
+    assert meeting.processing_heartbeat_at is not None
+    assert meeting.status == "queued"
+
+    assert service.update_visual_breakdown_progress(
+        meeting.id,
+        run_epoch,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+        sub_status="analyzing_video",
+    ) is True
+    assert service.increment_visual_breakdown_attempt(
+        meeting.id,
+        run_epoch,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+    ) == 1
+
+    result = service.finalize_visual_breakdown(
+        meeting.id,
+        run_epoch,
+        outcome="completed",
+        raw_output_s3_key="visual/raw.json",
+        model="test-model",
+        segments=[{"caption": "current output"}],
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+    )
+
+    assert result["applied"] is True
+    assert meeting.visual_breakdown_status == "completed"
+    assert meeting.visual_raw_output_s3_key == "visual/raw.json"
+    assert meeting.sub_status == "analyzing_video"
+    assert replaced == [(meeting.id, [{"caption": "current output"}])]
+    assert published == [(meeting.id, "analyzing_video")]
+    assert store.commit_count == 4
+    assert len(lock_calls) == 4
+    assert all(
+        call[1:] == (run_id, meeting.id, attempt_id)
+        for call in lock_calls
+    )
+
+
+@pytest.mark.parametrize("rejection", ["cancelled", "stale_run", "wrong_attempt", "stale_epoch"])
+def test_visual_operations_reject_inactive_identity_or_epoch_without_side_effects(
+    service: MeetingService,
+    store: MeetingStore,
+    monkeypatch: pytest.MonkeyPatch,
+    rejection: str,
+) -> None:
+    run_id, attempt_id = 41, "current-attempt"
+    meeting = store.add_meeting(
+        title="Rejected visual",
+        owner_id=5,
+        status="cancelled" if rejection == "cancelled" else "processing",
+        sub_status="before-visual",
+        current_processing_run_id=run_id,
+        visual_breakdown_status="processing",
+        visual_breakdown_params={"run_epoch": "current-epoch", "attempts": 3},
+        visual_raw_output_s3_key="old-output.json",
+        visual_breakdown_model="old-model",
+        visual_breakdown_run_count=7,
+    )
+    lock_calls = install_visual_run_lock(
+        monkeypatch, meeting, run_id=run_id, attempt_id=attempt_id
+    )
+    requested_run_id = run_id + 1 if rejection == "stale_run" else run_id
+    requested_attempt_id = "wrong-attempt" if rejection == "wrong_attempt" else attempt_id
+    requested_epoch = "old-epoch" if rejection == "stale_epoch" else "current-epoch"
+    before = (
+        meeting.status,
+        meeting.sub_status,
+        meeting.visual_breakdown_status,
+        dict(meeting.visual_breakdown_params),
+        meeting.visual_raw_output_s3_key,
+        meeting.visual_breakdown_model,
+        meeting.visual_breakdown_run_count,
+        meeting.processing_heartbeat_at,
+    )
+    replacements: list[list] = []
+
+    visual_module = types.ModuleType("app.services.visual_segments")
+    visual_module.VisualSegmentService = SimpleNamespace(
+        replace_for_meeting_in_session=lambda _session, _mid, segments: replacements.append(
+            list(segments)
+        )
+    )
+    monkeypatch.setitem(sys.modules, "app.services.visual_segments", visual_module)
+
+    _epoch, started = service.begin_visual_breakdown(
+        meeting.id,
+        processing_run_id=requested_run_id,
+        dispatch_attempt_id=requested_attempt_id,
+    )
+    assert started is False
+    assert service.increment_visual_breakdown_attempt(
+        meeting.id,
+        requested_epoch,
+        processing_run_id=requested_run_id,
+        dispatch_attempt_id=requested_attempt_id,
+    ) is None
+    assert service.update_visual_breakdown_progress(
+        meeting.id,
+        requested_epoch,
+        processing_run_id=requested_run_id,
+        dispatch_attempt_id=requested_attempt_id,
+        sub_status="late-progress",
+    ) is False
+    result = service.finalize_visual_breakdown(
+        meeting.id,
+        requested_epoch,
+        outcome="completed",
+        raw_output_s3_key="late-output.json",
+        segments=[{"caption": "late"}],
+        processing_run_id=requested_run_id,
+        dispatch_attempt_id=requested_attempt_id,
+    )
+
+    assert result == {"applied": False, "meeting_id": meeting.id}
+    assert replacements == []
+    assert store.commit_count == 0
+    assert (
+        meeting.status,
+        meeting.sub_status,
+        meeting.visual_breakdown_status,
+        dict(meeting.visual_breakdown_params),
+        meeting.visual_raw_output_s3_key,
+        meeting.visual_breakdown_model,
+        meeting.visual_breakdown_run_count,
+        meeting.processing_heartbeat_at,
+    ) == before
+    assert len(lock_calls) == 4
+
+
+def test_visual_operations_reject_partial_identity_without_standalone_fallback(
+    service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    meeting = store.add_meeting(
+        title="Partial identity",
+        status="processing",
+        visual_breakdown_status="processing",
+        visual_breakdown_params={"run_epoch": "epoch", "attempts": 1},
+    )
+    monkeypatch.setattr(
+        meeting_module.meeting_processing_audit,
+        "_locked_current_run",
+        lambda *_args: pytest.fail("partial identity must not reach the run lock"),
+    )
+
+    assert service.begin_visual_breakdown(
+        meeting.id, processing_run_id=41
+    ) == ("", False)
+    assert service.increment_visual_breakdown_attempt(
+        meeting.id, "epoch", dispatch_attempt_id="attempt"
+    ) is None
+    assert service.update_visual_breakdown_progress(
+        meeting.id, "epoch", processing_run_id=41, sub_status="late"
+    ) is False
+    assert service.finalize_visual_breakdown(
+        meeting.id, "epoch", outcome="completed", dispatch_attempt_id="attempt"
+    ) == {"applied": False, "meeting_id": meeting.id}
+    assert store.commit_count == 0
+    assert meeting.status == "processing"
+    assert meeting.sub_status is None
+    assert meeting.visual_breakdown_status == "processing"
+    assert meeting.visual_breakdown_params == {"run_epoch": "epoch", "attempts": 1}
+
+
+def test_visual_progress_without_processing_identity_preserves_manual_behavior(
+    service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    meeting = store.add_meeting(
+        title="Manual visual",
+        status="completed",
+        visual_breakdown_status="processing",
+        visual_breakdown_params={"run_epoch": "manual-epoch"},
+    )
+    main_state = (meeting.status, meeting.sub_status)
+    store.exec_queue.append([meeting])
+    published: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        service, "_publish_sub_status", lambda mid, status: published.append((mid, status))
+    )
+
+    assert service.update_visual_breakdown_progress(
+        meeting.id, "manual-epoch", sub_status="analyzing_video"
+    ) is True
+    assert (meeting.status, meeting.sub_status) == main_state == ("completed", None)
+    assert meeting.visual_breakdown_status == "processing"
+    assert meeting.visual_breakdown_params["run_epoch"] == "manual-epoch"
+    assert meeting.processing_heartbeat_at is None
+    assert published == []
+    assert store.commit_count == 1
+
+
+def test_manual_visual_endpoint_rejects_cancelled_meeting_before_enqueue(
+    service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    meeting = store.add_meeting(
+        title="Cancelled video",
+        owner_id=5,
+        file_path="video.mp4",
+        status="cancelled",
+        visual_breakdown_status="completed",
+        visual_breakdown_params={"run_epoch": "old", "attempts": 4},
+        visual_raw_output_s3_key="old-output.json",
+    )
+    enqueued: list[dict] = []
+    worker = types.ModuleType("app.worker")
+    worker.stage_visual_breakdown = SimpleNamespace(
+        apply_async=lambda **kwargs: enqueued.append(kwargs),
+        s=lambda: None,
+    )
+    worker.on_stage_failure = SimpleNamespace(s=lambda: None)
+    monkeypatch.setitem(sys.modules, "app.worker", worker)
+
+    from app.api.v1.endpoints import meetings as meetings_endpoint
+
+    monkeypatch.setattr(meetings_endpoint, "meeting_service", service)
+    monkeypatch.setattr(
+        meetings_endpoint, "_get_meeting_for_access", lambda *_args: meeting
+    )
+    with pytest.raises(HTTPException) as raised:
+        meetings_endpoint.request_visual_breakdown(meeting.id, SimpleNamespace(id=5))
+
+    assert raised.value.status_code == 409
+    assert enqueued == []
+    assert store.commit_count == 0
+    assert meeting.status == "cancelled"
+    assert meeting.visual_breakdown_status == "completed"
+    assert meeting.visual_breakdown_params == {"run_epoch": "old", "attempts": 4}
+    assert meeting.visual_raw_output_s3_key == "old-output.json"
+
+
+def test_cancelled_identityless_visual_begin_and_attempt_are_noops(
+    service: MeetingService, store: MeetingStore
+) -> None:
+    meeting = store.add_meeting(
+        title="Cancelled visual",
+        status="cancelled",
+        visual_breakdown_status="queued",
+        visual_breakdown_params={"run_epoch": "old", "attempts": 4},
+        visual_raw_output_s3_key="old-output.json",
+    )
+
+    assert service.begin_visual_breakdown(meeting.id) == ("", False)
+    assert service.increment_visual_breakdown_attempt(meeting.id, "old") is None
+    assert store.commit_count == 0
+    assert meeting.status == "cancelled"
+    assert meeting.visual_breakdown_status == "queued"
+    assert meeting.visual_breakdown_params == {"run_epoch": "old", "attempts": 4}
+    assert meeting.visual_raw_output_s3_key == "old-output.json"
+
+
+def test_late_identityless_visual_progress_and_finalization_preserve_cancellation(
+    service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    heartbeat = datetime(2026, 1, 1)
+    meeting = store.add_meeting(
+        title="Cancelled visual",
+        status="cancelled",
+        sub_status="cancelled",
+        processing_heartbeat_at=heartbeat,
+        visual_breakdown_status="processing",
+        visual_breakdown_params={"run_epoch": "old", "attempts": 4},
+        visual_raw_output_s3_key="old-output.json",
+        visual_breakdown_model="old-model",
+        visual_breakdown_run_count=2,
+    )
+    replacements: list[list] = []
+    visual_module = types.ModuleType("app.services.visual_segments")
+    visual_module.VisualSegmentService = SimpleNamespace(
+        replace_for_meeting_in_session=lambda _session, _mid, segments: replacements.append(
+            list(segments)
+        )
+    )
+    monkeypatch.setitem(sys.modules, "app.services.visual_segments", visual_module)
+    before = (
+        meeting.status,
+        meeting.sub_status,
+        meeting.processing_heartbeat_at,
+        meeting.visual_breakdown_status,
+        dict(meeting.visual_breakdown_params),
+        meeting.visual_raw_output_s3_key,
+        meeting.visual_breakdown_model,
+        meeting.visual_breakdown_run_count,
+    )
+
+    assert service.update_visual_breakdown_progress(
+        meeting.id, "old", sub_status="late-progress"
+    ) is False
+    assert service.finalize_visual_breakdown(
+        meeting.id,
+        "old",
+        outcome="completed",
+        raw_output_s3_key="late-output.json",
+        model="late-model",
+        segments=[{"caption": "late"}],
+    ) == {"applied": False, "meeting_id": meeting.id}
+
+    assert replacements == []
+    assert store.commit_count == 0
+    assert (
+        meeting.status,
+        meeting.sub_status,
+        meeting.processing_heartbeat_at,
+        meeting.visual_breakdown_status,
+        dict(meeting.visual_breakdown_params),
+        meeting.visual_raw_output_s3_key,
+        meeting.visual_breakdown_model,
+        meeting.visual_breakdown_run_count,
+    ) == before
 
 
 def test_mark_failed_and_add_segment(service: MeetingService, store: MeetingStore) -> None:

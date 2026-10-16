@@ -4,10 +4,18 @@
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from sqlmodel import Session
+from sqlmodel import Session, delete
 
 from app.db.engine import engine
-from app.models import Meeting, User
+from app.models import (
+    Meeting,
+    MeetingProcessingEvent,
+    MeetingProcessingRun,
+    TranscriptSegment,
+    User,
+    VisualSegment,
+)
+from app.services.meeting_processing_audit import meeting_processing_audit
 
 
 def _ensure_user(session: Session, user_id: int) -> None:
@@ -20,7 +28,12 @@ def _ensure_user(session: Session, user_id: int) -> None:
 def _make_meeting(owner_id: int = 1, file_path: str | None = "users/1/meetings/X/audio.mp4") -> int:
     with Session(engine) as s:
         _ensure_user(s, owner_id)
-        m = Meeting(owner_id=owner_id, title="VB endpoint test", file_path=file_path)
+        m = Meeting(
+            owner_id=owner_id,
+            title="VB endpoint test",
+            file_path=file_path,
+            status="completed",
+        )
         s.add(m)
         s.commit()
         s.refresh(m)
@@ -31,14 +44,21 @@ def _delete_meeting(meeting_id: int) -> None:
     with Session(engine) as s:
         m = s.get(Meeting, meeting_id)
         if m:
+            m.current_processing_run_id = None
+            s.add(m)
+            s.flush()
+        for model in (MeetingProcessingEvent, MeetingProcessingRun, TranscriptSegment, VisualSegment):
+            s.exec(delete(model).where(model.meeting_id == meeting_id))
+        if m:
             s.delete(m)
-            s.commit()
+        s.commit()
 
 
 def test_post_visual_breakdown_returns_202_and_enqueues_task(client: TestClient, normal_user_token_headers):
     meeting_id = _make_meeting()
     try:
         with patch("app.worker.stage_visual_breakdown.apply_async") as mock_apply:
+            mock_apply.return_value.id = "visual-task-id"
             r = client.post(
                 f"/api/v1/meetings/{meeting_id}/visual-breakdown",
                 headers=normal_user_token_headers,
@@ -46,13 +66,23 @@ def test_post_visual_breakdown_returns_202_and_enqueues_task(client: TestClient,
         assert r.status_code == 202, r.text
         body = r.json()
         assert body["meeting_id"] == meeting_id
+        assert body["run_id"]
         assert body["visual_breakdown_status"] == "queued"
-        mock_apply.assert_called_once_with(args=[meeting_id])
+        assert mock_apply.call_args.kwargs["args"] == [meeting_id]
+        headers = mock_apply.call_args.kwargs["headers"]
+        assert headers["meeting_processing_run_id"] == str(body["run_id"])
+        assert headers["dispatch_attempt_id"]
+        assert headers["meeting_processing_terminal_success"] == "true"
+        assert mock_apply.call_args.kwargs["link_error"]
 
         # DB updated to queued
         with Session(engine) as session:
             m = session.get(Meeting, meeting_id)
             assert m.visual_breakdown_status == "queued"
+            assert m.status == "completed"
+            run = session.get(MeetingProcessingRun, body["run_id"])
+            assert run.dispatch_attempt_id == headers["dispatch_attempt_id"]
+            assert run.root_task_id == "visual-task-id"
     finally:
         _delete_meeting(meeting_id)
 
@@ -60,11 +90,9 @@ def test_post_visual_breakdown_returns_202_and_enqueues_task(client: TestClient,
 def test_post_visual_breakdown_409_when_already_running(client: TestClient, normal_user_token_headers):
     meeting_id = _make_meeting()
     try:
-        with Session(engine) as session:
-            m = session.get(Meeting, meeting_id)
-            m.visual_breakdown_status = "processing"
-            session.add(m)
-            session.commit()
+        admitted = meeting_processing_audit.create_visual_breakdown_run(meeting_id)
+        assert admitted is not None
+        original_run_id = admitted[0].id
 
         with patch("app.worker.stage_visual_breakdown.apply_async") as mock_apply:
             r = client.post(
@@ -73,6 +101,11 @@ def test_post_visual_breakdown_409_when_already_running(client: TestClient, norm
             )
         assert r.status_code == 409
         mock_apply.assert_not_called()
+        with Session(engine) as session:
+            meeting = session.get(Meeting, meeting_id)
+            assert meeting.status == "completed"
+            assert meeting.visual_breakdown_status == "queued"
+            assert meeting.current_processing_run_id == original_run_id
     finally:
         _delete_meeting(meeting_id)
 
@@ -99,6 +132,62 @@ def test_post_visual_breakdown_404_when_meeting_missing(client: TestClient, norm
         )
     assert r.status_code == 404
     mock_apply.assert_not_called()
+
+
+def test_post_visual_breakdown_returns_202_with_warning_when_root_task_save_fails(
+    client: TestClient, normal_user_token_headers
+):
+    meeting_id = _make_meeting()
+    try:
+        with (
+            patch("app.worker.stage_visual_breakdown.apply_async") as mock_apply,
+            patch(
+                "app.api.v1.endpoints.meetings.meeting_processing_audit.set_root_task",
+                return_value=False,
+            ),
+        ):
+            mock_apply.return_value.id = "visual-task-id"
+            response = client.post(
+                f"/api/v1/meetings/{meeting_id}/visual-breakdown",
+                headers=normal_user_token_headers,
+            )
+
+        assert response.status_code == 202, response.text
+        assert "root task ID could not be saved" in response.json()["warning"]
+        mock_apply.assert_called_once()
+        mock_apply.return_value.revoke.assert_not_called()
+        with Session(engine) as session:
+            meeting = session.get(Meeting, meeting_id)
+            assert meeting.status == "completed"
+            assert meeting.visual_breakdown_status == "queued"
+    finally:
+        _delete_meeting(meeting_id)
+
+
+def test_post_visual_breakdown_enqueue_failure_only_fails_visual_run(
+    client: TestClient, normal_user_token_headers
+):
+    meeting_id = _make_meeting()
+    try:
+        with patch(
+            "app.worker.stage_visual_breakdown.apply_async",
+            side_effect=RuntimeError("broker unavailable"),
+        ) as mock_apply:
+            response = client.post(
+                f"/api/v1/meetings/{meeting_id}/visual-breakdown",
+                headers=normal_user_token_headers,
+            )
+
+        assert response.status_code == 503
+        mock_apply.assert_called_once()
+        with Session(engine) as session:
+            meeting = session.get(Meeting, meeting_id)
+            run = session.get(MeetingProcessingRun, meeting.current_processing_run_id)
+            assert meeting.status == "completed"
+            assert meeting.visual_breakdown_status == "failed"
+            assert run.status == "failed"
+    finally:
+        _delete_meeting(meeting_id)
 
 
 # ---------------------------------------------------------------------------

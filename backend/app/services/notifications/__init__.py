@@ -89,13 +89,26 @@ def notify(
     meeting_title: str | None = None,
     meeting_id: int | None = None,
     extra: dict[str, str] | None = None,
+    *,
+    processing_run_id: int | None = None,
+    dispatch_attempt_id: str | None = None,
 ) -> None:
     """Fire a notification event via Celery task. Silently no-ops if unconfigured."""
+    if (processing_run_id is None) != (dispatch_attempt_id is None):
+        return
     if not _enabled:
         return
     emoji, label = _EVENTS.get(event_type, ("\u2139\ufe0f", event_type))
     try:
         from app.worker import send_notification
-        send_notification.delay(emoji, label, user_email, meeting_title, meeting_id, extra or {})
+        task_args = (emoji, label, user_email, meeting_title, meeting_id, extra or {})
+        if processing_run_id is None:
+            send_notification.delay(*task_args)
+        else:
+            send_notification.delay(
+                *task_args,
+                processing_run_id=processing_run_id,
+                dispatch_attempt_id=dispatch_attempt_id,
+            )
     except Exception:
         logger.warning("Failed to dispatch notification task", exc_info=True)

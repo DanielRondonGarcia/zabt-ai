@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+from enum import Enum
 from typing import Optional, List
 from pydantic import BaseModel, Field
 from langfuse.openai import OpenAI
@@ -9,8 +10,14 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.engine import engine
 from app.models.meeting_intelligence import MeetingHighlight
+from app.services.meeting_processing_audit import meeting_processing_audit
 
 logger = get_logger(__name__)
+
+
+class HighlightSaveRejected(Enum):
+    STALE_OR_CANCELLED = "stale_or_cancelled"
+
 
 _client = OpenAI(
     base_url=settings.OPENAI_BASE_URL,
@@ -238,9 +245,30 @@ class MeetingIntelligenceService:
             return {"meeting_type": meeting_type}
         return parsed.model_dump()
 
-    def save_highlights(self, meeting_id: int, highlights_data: dict) -> list[MeetingHighlight]:
-        """Persist extracted highlights to DB, replacing any existing ones."""
+    def save_highlights(
+        self,
+        meeting_id: int,
+        highlights_data: dict,
+        *,
+        owner_id: int | None,
+        processing_run_id: int | None,
+        dispatch_attempt_id: str | None,
+    ) -> list[MeetingHighlight] | HighlightSaveRejected:
+        """Replace highlights only for the exact current meeting owner/attempt."""
+        if owner_id is None or processing_run_id is None or not dispatch_attempt_id:
+            return HighlightSaveRejected.STALE_OR_CANCELLED
         with Session(engine) as session:
+            meeting, run = meeting_processing_audit._locked_current_run(
+                session, processing_run_id, meeting_id, dispatch_attempt_id
+            )
+            if (
+                meeting is None
+                or run is None
+                or meeting.owner_id != owner_id
+                or run.owner_id != owner_id
+            ):
+                return HighlightSaveRejected.STALE_OR_CANCELLED
+
             # Delete existing highlights for this meeting
             existing = session.exec(
                 select(MeetingHighlight).where(MeetingHighlight.meeting_id == meeting_id)

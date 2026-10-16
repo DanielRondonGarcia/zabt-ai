@@ -20,7 +20,7 @@ def db() -> Generator[Session, None, None]:
     with Session(engine) as session:
         yield session
 
-@pytest.fixture(scope="function")
+@pytest.fixture(scope="session")
 def client() -> Generator[TestClient, None, None]:
     with TestClient(app) as c:
         yield c

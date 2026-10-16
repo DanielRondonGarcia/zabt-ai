@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import re
@@ -415,6 +416,7 @@ class DirectVisionService:
         file_path = str(payload.get("file_path") or "").strip()
         if not file_path:
             raise _SkipVisual("no_media_file")
+        artifact_namespace = self._artifact_namespace(payload)
 
         metrics: dict[str, dict[str, Any]] = {}
         fps = self._bounded_int("VISION_FPS", 2, minimum=1, maximum=5)
@@ -515,8 +517,7 @@ class DirectVisionService:
             result = self._run_stage(
                 "persist_artifacts",
                 self._persist_artifacts,
-                owner_id=payload.get("owner_id"),
-                meeting_id=payload.get("meeting_id"),
+                artifact_namespace=artifact_namespace,
                 built=built,
                 metrics=metrics,
                 fps=fps,
@@ -737,8 +738,7 @@ class DirectVisionService:
     def _persist_artifacts(
         self,
         *,
-        owner_id: Any,
-        meeting_id: Any,
+        artifact_namespace: str,
         built: list[_BuiltSegment],
         metrics: dict[str, dict[str, Any]],
         fps: int,
@@ -746,12 +746,10 @@ class DirectVisionService:
         candidate_count: int,
         duration_s: float,
     ) -> VisionWorkerResult:
-        owner = self._safe_component(owner_id)
-        meeting = self._safe_component(meeting_id)
         segments: list[VisualSegmentResponse] = []
         for sequence, item in enumerate(built):
             segment_id = uuid.uuid4().hex
-            key = f"users/{owner}/meetings/{meeting}/visual/{segment_id}.jpg"
+            key = f"{artifact_namespace}/{segment_id}.jpg"
             self._uploaded_keys.append(key)
             self._storage.upload_file(item.frame.image, key, "image/jpeg")
             next_start = (
@@ -771,7 +769,7 @@ class DirectVisionService:
                 )
             )
 
-        raw_key = f"users/{owner}/meetings/{meeting}/visual/raw_output.json"
+        raw_key = f"{artifact_namespace}/raw_output.json"
         raw_payload = {
             "segments": [segment.model_dump() for segment in segments],
             "stage_metrics": metrics,
@@ -890,6 +888,34 @@ class DirectVisionService:
             return max(minimum, min(int(_setting(self._config, name, default)), maximum))
         except (TypeError, ValueError):
             raise DirectVisionError(f"invalid visual setting {name}") from None
+
+    def _artifact_namespace(self, payload: dict[str, Any]) -> str:
+        owner_value = payload.get("owner_id")
+        meeting_value = payload.get("meeting_id")
+        owner = str(owner_value) if owner_value is not None and not isinstance(owner_value, bool) else ""
+        meeting = str(meeting_value) if meeting_value is not None and not isinstance(meeting_value, bool) else ""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", owner) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", meeting):
+            raise DirectVisionError("visual owner and meeting identifiers are invalid")
+        epoch_value = payload.get("visual_epoch")
+        epoch = str(epoch_value) if epoch_value is not None else ""
+        if not re.fullmatch(r"(?:[0-9]+|[0-9a-f]{32})", epoch):
+            raise DirectVisionError("visual epoch is required for artifact persistence")
+
+        namespace = f"users/{owner}/meetings/{meeting}/visual/epoch-{epoch}"
+        run_id = payload.get("processing_run_id")
+        attempt_id = payload.get("dispatch_attempt_id")
+        if run_id is not None or attempt_id is not None:
+            run_component = str(run_id or "")
+            if (
+                not re.fullmatch(r"[0-9]+", run_component)
+                or not isinstance(attempt_id, str)
+                or not attempt_id
+            ):
+                raise DirectVisionError("visual processing identity is incomplete")
+            attempt_hash = hashlib.sha256(str(attempt_id).encode("utf-8")).hexdigest()
+            return f"{namespace}/run-{run_component}/attempt-{attempt_hash}"
+
+        return f"{namespace}/standalone-{uuid.uuid4().hex}"
 
     @staticmethod
     def _media_kind(params: dict[str, Any], source_type: str) -> str | None:

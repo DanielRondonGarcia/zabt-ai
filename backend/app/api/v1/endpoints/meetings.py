@@ -593,25 +593,131 @@ def resummarize_meeting(
 ) -> Any:
     """Trigger re-summarization of a meeting using a specified (or default) template."""
     from celery import chain
-    from app.worker import stage_extract_intelligence, stage_summarize
-    meeting = _get_meeting_for_access(meeting_id, current_user.id)
-    if meeting.status in ("processing", "queued"):
-        raise HTTPException(
-            status_code=400,
-            detail="Meeting is currently being processed. Try again when processing is complete.",
-        )
-    meeting_service.update_sub_status_for_user(
-        meeting_id, current_user.id, "summarizing"
+    from app.worker import (
+        _audit_headers,
+        on_stage_failure,
+        stage_extract_intelligence,
+        stage_summarize,
     )
-    chain(
-        stage_summarize.s(template_id=body.template_id),
-        stage_extract_intelligence.s(),
-    ).apply_async(args=[meeting_id])
-    return {
+
+    meeting = _get_meeting_for_access(meeting_id, current_user.id)
+    admission = meeting_processing_audit.create_resummarize_run(meeting_id)
+    if admission is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Meeting already has active processing or could not admit re-summarization.",
+        )
+    run, prior_state = admission
+    attempt_id = getattr(run, "dispatch_attempt_id", None)
+    if (
+        run is None
+        or run.id is None
+        or not attempt_id
+        or run.trigger != "resummarize"
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Could not create a current processing run for re-summarization.",
+        )
+
+    summary_signature = stage_summarize.s(template_id=body.template_id).set(
+        headers=_audit_headers(run.id, meeting_id, "stage_summarize", attempt_id),
+        link_error=[on_stage_failure.s()],
+    )
+    intelligence_signature = stage_extract_intelligence.s().set(
+        headers=_audit_headers(
+            run.id, meeting_id, "stage_extract_intelligence", attempt_id
+        ),
+        link_error=[on_stage_failure.s()],
+    )
+    try:
+        result = chain(summary_signature, intelligence_signature).apply_async(
+            args=[meeting_id]
+        )
+    except Exception as exc:
+        try:
+            restored = meeting_processing_audit.update_meeting_state_for_attempt(
+                meeting_id=meeting_id,
+                run_id=run.id,
+                attempt_id=attempt_id,
+                status=prior_state[0],
+                sub_status=prior_state[1],
+                heartbeat_at=prior_state[2],
+            )
+        except Exception:
+            restored = False
+        try:
+            failure_recorded = meeting_processing_audit.run_failed(
+                run.id,
+                attempt_id=attempt_id,
+                error="Could not enqueue standalone re-summarization",
+            )
+        except Exception:
+            failure_recorded = False
+        if not failure_recorded:
+            detail = (
+                "Queueing failed; failure of the exact processing run could not be "
+                "confirmed in the audit."
+            )
+        elif not restored:
+            detail = (
+                "Queueing failed and the run was marked failed, but meeting-state "
+                "restoration could not be confirmed."
+            )
+        else:
+            detail = "Could not queue re-summarization; the run was marked failed."
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=detail,
+        ) from exc
+
+    root_task_id = getattr(result, "id", None)
+    root_task_recorded = meeting_processing_audit.set_root_task(
+        run.id, root_task_id, attempt_id=attempt_id
+    )
+    response = {
         "meeting_id": meeting_id,
         "status": "processing",
         "sub_status": "summarizing",
         "template_id": body.template_id,
+        "run_id": run.id,
+        "root_task_id": root_task_id,
+        "root_task_recorded": root_task_recorded,
+    }
+    if not root_task_recorded:
+        response["warning"] = (
+            "The task was queued, but its root task ID was not recorded; processing may continue."
+        )
+    return response
+
+
+@router.post("/{meeting_id}/processing-runs/{run_id}/cancel")
+def cancel_meeting_processing_run(
+    meeting_id: int,
+    run_id: int,
+    current_user: User = Depends(deps.get_current_active_user),
+) -> Any:
+    """Cancel the exact current run owned by the authenticated meeting owner."""
+    meeting = meeting_service.get(Meeting, meeting_id)
+    if meeting is None or meeting.owner_id != current_user.id:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    if not meeting_processing_audit.cancel_run(
+        meeting_id=meeting_id,
+        run_id=run_id,
+        owner_id=current_user.id,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The processing run is not current or is no longer active.",
+        )
+    return {
+        "meeting_id": meeting_id,
+        "run_id": run_id,
+        "status": "cancelled",
+        "message": (
+            "Cancellation is recorded. Committed work may remain, and an in-flight "
+            "provider call may finish; later writes from this run are rejected."
+        ),
     }
 
 
@@ -866,28 +972,69 @@ def request_visual_breakdown(
     meeting_id: int,
     current_user: User = Depends(deps.get_current_active_user),
 ) -> dict:
-    """Trigger the visual-breakdown pipeline for a meeting. Idempotent — re-running
-    overwrites prior segments. Requires the meeting's video file to still be in S3."""
-    from app.worker import stage_visual_breakdown
+    """Queue visual analysis without reopening a completed meeting."""
+    from app.worker import on_stage_failure, stage_visual_breakdown
 
-    meeting = _get_meeting_for_access(meeting_id, current_user.id)
+    meeting = meeting_service.require_editor_for_user(meeting_id, current_user.id)
     if not meeting.file_path:
         raise HTTPException(status_code=400, detail="Meeting has no video file")
-    if meeting.visual_breakdown_status in ("queued", "processing"):
+
+    admission = meeting_processing_audit.create_visual_breakdown_run(meeting_id)
+    if admission is None:
         raise HTTPException(
             status_code=409,
-            detail="Visual breakdown is already running for this meeting",
+            detail="Visual analysis requires a completed meeting with no active processing run",
         )
 
-    # Mark queued and persist a new run epoch in the same locked transaction.
-    # The Celery task transitions to "processing" once it picks up the job.
-    meeting_service.queue_visual_breakdown(meeting_id, user_id=current_user.id)
+    run, _run_epoch = admission
+    attempt_id = run.dispatch_attempt_id
+    if run.id is None or not attempt_id:
+        raise HTTPException(status_code=409, detail="Visual analysis could not be admitted")
+    headers = {
+        "meeting_id": str(meeting_id),
+        "stage": "stage_visual_breakdown",
+        "meeting_processing_run_id": str(run.id),
+        "dispatch_attempt_id": attempt_id,
+        "meeting_processing_terminal_success": "true",
+    }
+    try:
+        result = stage_visual_breakdown.apply_async(
+            args=[meeting_id],
+            headers=headers,
+            link_error=[on_stage_failure.s()],
+        )
+    except Exception as error:
+        failed_meeting = meeting_service.mark_failed(
+            meeting_id,
+            "Visual analysis could not be queued",
+            processing_run_id=run.id,
+            dispatch_attempt_id=attempt_id,
+        )
+        if failed_meeting is not None:
+            meeting_processing_audit.run_failed(
+                run.id, attempt_id=attempt_id, error=error
+            )
+        raise HTTPException(
+            status_code=503,
+            detail="Visual analysis could not be queued",
+        ) from error
 
-    stage_visual_breakdown.apply_async(args=[meeting_id])
-    return {
+    response = {
         "meeting_id": meeting_id,
+        "run_id": run.id,
         "visual_breakdown_status": "queued",
     }
+    try:
+        root_task_saved = meeting_processing_audit.set_root_task(
+            run.id, getattr(result, "id", None), attempt_id=attempt_id
+        )
+    except Exception:
+        root_task_saved = False
+    if not root_task_saved:
+        response["warning"] = (
+            "Visual analysis was queued, but its root task ID could not be saved."
+        )
+    return response
 
 
 from datetime import datetime as _datetime  # noqa: E402
