@@ -3,16 +3,19 @@
 """Regression coverage for video-only transcription pipeline behavior."""
 
 import json
+from pathlib import Path
 from subprocess import CompletedProcess, TimeoutExpired
 from unittest.mock import MagicMock, patch
 
 import pytest
-from sqlmodel import Session, select
+from sqlmodel import Session, delete, select
 
 import app.worker as worker
 from app.db.engine import engine
 from app.models import Group, Meeting, TranscriptSegment, VisualSegment
 from app.models.meeting_intelligence import MeetingHighlight
+from app.models.processing_audit import MeetingProcessingEvent, MeetingProcessingRun
+from app.services.meeting_processing_audit import meeting_processing_audit
 from app.services.transcription.types import ResultSegment, TranscriptionResult
 
 
@@ -28,16 +31,33 @@ def local_video_meeting(db: Session, tmp_path, monkeypatch: pytest.MonkeyPatch):
         title="Silent video",
         group_id=group.id,
         file_path="users/1/meetings/silent/video.mp4",
+        status="processing",
     )
     db.add(meeting)
     db.commit()
     db.refresh(meeting)
 
+    run = meeting_processing_audit.create_run(meeting.id, trigger="pipeline")
+    assert run is not None and run.id is not None and run.dispatch_attempt_id
+    with Session(engine) as session:
+        persisted_run = session.get(MeetingProcessingRun, run.id)
+        persisted_run.status = "running"
+        session.add(persisted_run)
+        session.commit()
+    db.expire_all()
+
     monkeypatch.setattr(worker, "TEMP_DIR", str(tmp_path))
-    media_path = tmp_path / f"zabt_meeting_{meeting.id}.mp4"
+    media_path = Path(
+        worker._temp_path_for(
+            meeting.id,
+            meeting.file_path,
+            run_id=run.id,
+            attempt_id=run.dispatch_attempt_id,
+        )
+    )
     media_path.write_bytes(b"synthetic media")
 
-    yield meeting.id, media_path, group.id
+    yield meeting.id, media_path, group.id, (run.id, run.dispatch_attempt_id)
 
     with Session(engine) as session:
         for model in (TranscriptSegment, MeetingHighlight, VisualSegment):
@@ -45,11 +65,33 @@ def local_video_meeting(db: Session, tmp_path, monkeypatch: pytest.MonkeyPatch):
                 session.delete(row)
         current = session.get(Meeting, meeting.id)
         if current is not None:
+            current.current_processing_run_id = None
+            session.add(current)
+            session.flush()
+        session.exec(
+            delete(MeetingProcessingEvent).where(MeetingProcessingEvent.meeting_id == meeting.id)
+        )
+        session.exec(
+            delete(MeetingProcessingRun).where(MeetingProcessingRun.meeting_id == meeting.id)
+        )
+        if current is not None:
             session.delete(current)
         current_group = session.get(Group, group.id)
         if current_group is not None:
             session.delete(current_group)
         session.commit()
+
+
+def _task_headers(run_id: int, attempt_id: str):
+    headers = {
+        "meeting_processing_run_id": str(run_id),
+        "dispatch_attempt_id": attempt_id,
+    }
+    return patch.object(
+        worker,
+        "_get_audit_header",
+        side_effect=lambda _task, key: headers.get(key),
+    )
 
 
 def _probe_result(*stream_types: str, duration: str = "42.5") -> CompletedProcess:
@@ -82,7 +124,7 @@ def test_video_without_audio_skips_provider_and_clears_stale_transcript(
     local_video_meeting,
     db: Session,
 ):
-    meeting_id, media_path, group_id = local_video_meeting
+    meeting_id, media_path, group_id, (run_id, attempt_id) = local_video_meeting
     meeting = db.get(Meeting, meeting_id)
     meeting.description = "Keep this description"
     meeting.requested_language = "en"
@@ -141,6 +183,7 @@ def test_video_without_audio_skips_provider_and_clears_stale_transcript(
         patch.object(worker, "notify", notify),
         patch.object(worker.meeting_service, "_publish_sub_status"),
         patch.object(worker, "_run_visual_breakdown", return_value=meeting_id) as run_visual,
+        _task_headers(run_id, attempt_id),
     ):
         assert worker.stage_transcribe.run(meeting_id) == meeting_id
         assert worker.stage_transliterate.run(meeting_id) == meeting_id
@@ -217,7 +260,7 @@ def test_probe_failures_are_fail_open(
 
 
 def test_video_with_audio_keeps_existing_provider_path(local_video_meeting):
-    meeting_id, media_path, _ = local_video_meeting
+    meeting_id, media_path, _, (run_id, attempt_id) = local_video_meeting
     provider = MagicMock()
     provider.provider_name = "openai-file"
     provider.__enter__.return_value = provider
@@ -232,6 +275,7 @@ def test_video_with_audio_keeps_existing_provider_path(local_video_meeting):
         patch.object(worker, "analytics"),
         patch.object(worker, "notify"),
         patch.object(worker.meeting_service, "_publish_sub_status"),
+        _task_headers(run_id, attempt_id),
     ):
         assert worker.stage_transcribe.run(meeting_id) == meeting_id
 
@@ -243,7 +287,7 @@ def test_video_with_audio_keeps_existing_provider_path(local_video_meeting):
 
 
 def test_runpod_without_local_file_keeps_storage_provider_path(local_video_meeting):
-    meeting_id, media_path, _ = local_video_meeting
+    meeting_id, media_path, _, (run_id, attempt_id) = local_video_meeting
     media_path.unlink()
     provider = MagicMock()
     provider.provider_name = "runpod"
@@ -259,6 +303,7 @@ def test_runpod_without_local_file_keeps_storage_provider_path(local_video_meeti
         patch.object(worker, "analytics"),
         patch.object(worker, "notify"),
         patch.object(worker.meeting_service, "_publish_sub_status"),
+        _task_headers(run_id, attempt_id),
     ):
         assert worker.stage_transcribe.run(meeting_id) == meeting_id
 
