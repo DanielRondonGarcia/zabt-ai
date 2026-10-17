@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 from math import ceil, isfinite
+from typing import Any
 
 from celery import Celery, chain
 from celery.exceptions import Ignore
@@ -51,6 +52,7 @@ from app.services import ai_agent
 from app.services.ai_agent import summarize_transcript
 from app.services.ai_provider import get_completion_client
 from app.services.template import template_service
+from app.services.storage_configuration import StorageConfigurationValidationError
 from app.services import analytics
 from app.services.notifications import notify
 from app.services.embeddings import get_embedding_provider
@@ -1431,22 +1433,41 @@ def dispatch_meeting_bots() -> None:
 
 @celery_app.task(name="cleanup_abandoned_uploads", ignore_result=True)
 def cleanup_abandoned_uploads() -> None:
-    """Abort S3 multipart uploads that were never completed (older than 24h)."""
-    from app.services.storage import storage
+    """Abort multipart uploads that were never completed (older than 24h).
 
+    MinIO is always attempted; AWS S3 is attempted only when it is configured.
+    Each provider gets its own cleanup pass, so a listing or abort failure on
+    one provider never skips the other provider's pass.
+    """
+    cleanup_targets: list[tuple[str, Any]] = [("minio", storage)]
     try:
-        pending = storage.list_pending_multipart_uploads(older_than_hours=24)
-        for entry in pending:
-            storage.abort_multipart_upload(
-                object_key=entry["Key"],
-                upload_id=entry["UploadId"],
-            )
-            logger.info(
-                "Aborted abandoned upload: key=%s upload_id=%s initiated=%s",
-                entry["Key"], entry["UploadId"], entry["Initiated"],
-            )
+        cleanup_targets.append(("aws_s3", get_storage_for_provider("aws_s3")))
+    except StorageConfigurationValidationError:
+        logger.info("cleanup_abandoned_uploads: AWS S3 is not configured")
     except Exception:
-        logger.warning("cleanup_abandoned_uploads failed", exc_info=True)
+        logger.warning(
+            "cleanup_abandoned_uploads: AWS S3 storage resolution failed",
+            exc_info=True,
+        )
+
+    for provider_name, provider_storage in cleanup_targets:
+        try:
+            pending = provider_storage.list_pending_multipart_uploads(older_than_hours=24)
+            for entry in pending:
+                provider_storage.abort_multipart_upload(
+                    object_key=entry["Key"],
+                    upload_id=entry["UploadId"],
+                )
+                logger.info(
+                    "Aborted abandoned upload: provider=%s key=%s upload_id=%s initiated=%s",
+                    provider_name, entry["Key"], entry["UploadId"], entry["Initiated"],
+                )
+        except Exception:
+            logger.warning(
+                "cleanup_abandoned_uploads failed provider=%s",
+                provider_name,
+                exc_info=True,
+            )
 
 
 # ── Stage 5: Optional Visual Breakdown ───────────────────────────────────────

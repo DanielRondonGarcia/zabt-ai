@@ -8,10 +8,15 @@ import pytest
 from app.models import Meeting
 
 
+def make_multipart_entry(key: str, upload_id: str) -> dict[str, Any]:
+    return {"Key": key, "UploadId": upload_id, "Initiated": "2026-01-01T00:00:00Z"}
+
+
 class FakeStorage:
     def __init__(self, name: str):
         self.name = name
         self.calls: list[tuple[str, Any]] = []
+        self.pending_uploads: list[dict[str, Any]] = []
 
     def get_presigned_download_url(self, object_key: str) -> str:
         self.calls.append(("download-url", object_key))
@@ -22,6 +27,24 @@ class FakeStorage:
 
     def delete_file(self, object_key: str) -> None:
         self.calls.append(("delete-file", object_key))
+
+    def list_pending_multipart_uploads(self, older_than_hours: int = 24) -> list[dict[str, Any]]:
+        self.calls.append(("list-pending", older_than_hours))
+        return list(self.pending_uploads)
+
+    def abort_multipart_upload(self, object_key: str, upload_id: str) -> None:
+        self.calls.append(("abort-multipart", (object_key, upload_id)))
+
+
+def fail_with_record(storage: FakeStorage, method: str, error: Exception) -> None:
+    """Make one FakeStorage method record its call, then raise the error."""
+    base = getattr(storage, method)
+
+    def failing(*args: Any, **kwargs: Any) -> None:
+        base(*args, **kwargs)
+        raise error
+
+    setattr(storage, method, failing)
 
 
 @pytest.fixture
@@ -404,3 +427,183 @@ def test_transcription_worker_passes_meeting_storage_provider_to_gpu_request(
     assert requests[0].source.storage_key == object_key
     assert requests[0].storage_provider == "aws_s3"
     assert not audio_path.exists()
+
+
+def _resolve_cleanup_storages(
+    worker_module,
+    monkeypatch: pytest.MonkeyPatch,
+    minio: FakeStorage,
+    aws: FakeStorage,
+    aws_error: Exception | None,
+) -> list[str]:
+    """Attach cleanup mocks for both providers and return the resolver calls."""
+    from app.services import storage as storage_module
+
+    worker = worker_module
+    resolver_calls: list[str] = []
+
+    def resolve_storage(provider: str) -> FakeStorage:
+        resolver_calls.append(provider)
+        if aws_error is not None:
+            raise aws_error
+        return aws
+
+    # The extra patch keeps RED runs on the pre-change implementation from
+    # reaching the real MinIO singleton via the function-local import.
+    monkeypatch.setattr(storage_module, "storage", minio)
+    monkeypatch.setattr(worker, "storage", minio)
+    monkeypatch.setattr(worker, "get_storage_for_provider", resolve_storage)
+    return resolver_calls
+
+
+def test_cleanup_aborts_pending_uploads_on_minio_and_configured_aws(
+    worker_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = worker_module
+    minio_entry = make_multipart_entry("users/91/meetings/audio.mp3", "minio-upload-1")
+    aws_entries = [
+        make_multipart_entry("users/91/meetings/storage-v1/aws_s3/a.mp3", "aws-upload-1"),
+        make_multipart_entry("users/91/meetings/storage-v1/aws_s3/b.mp3", "aws-upload-2"),
+    ]
+    minio = FakeStorage("minio")
+    minio.pending_uploads = [minio_entry]
+    aws = FakeStorage("s3")
+    aws.pending_uploads = aws_entries
+    resolver_calls = _resolve_cleanup_storages(
+        worker_module, monkeypatch, minio, aws, aws_error=None
+    )
+
+    worker.cleanup_abandoned_uploads.run()
+
+    assert resolver_calls == ["aws_s3"]
+    assert minio.calls == [
+        ("list-pending", 24),
+        ("abort-multipart", (minio_entry["Key"], minio_entry["UploadId"])),
+    ]
+    expected_aws_calls: list[tuple[str, Any]] = [("list-pending", 24)]
+    for entry in aws_entries:
+        expected_aws_calls.append(("abort-multipart", (entry["Key"], entry["UploadId"])))
+    assert aws.calls == expected_aws_calls
+
+
+def test_cleanup_without_aws_configuration_preserves_minio_only_behavior(
+    worker_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.services.storage_configuration import StorageConfigurationValidationError
+
+    worker = worker_module
+    minio_entry = make_multipart_entry("users/91/meetings/audio.mp3", "minio-upload-1")
+    minio = FakeStorage("minio")
+    minio.pending_uploads = [minio_entry]
+    aws = FakeStorage("s3")
+    aws.pending_uploads = [make_multipart_entry("k", "aws-upload-1")]
+    resolver_calls = _resolve_cleanup_storages(
+        worker_module,
+        monkeypatch,
+        minio,
+        aws,
+        aws_error=StorageConfigurationValidationError("AWS S3 configuration is incomplete."),
+    )
+
+    worker.cleanup_abandoned_uploads.run()
+
+    assert resolver_calls == ["aws_s3"]
+    assert minio.calls == [
+        ("list-pending", 24),
+        ("abort-multipart", (minio_entry["Key"], minio_entry["UploadId"])),
+    ]
+    assert aws.calls == []
+
+
+def test_cleanup_aws_resolution_failure_does_not_skip_minio(
+    worker_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = worker_module
+    minio_entry = make_multipart_entry("users/91/meetings/audio.mp3", "minio-upload-1")
+    minio = FakeStorage("minio")
+    minio.pending_uploads = [minio_entry]
+    aws = FakeStorage("s3")
+    aws.pending_uploads = [make_multipart_entry("k", "aws-upload-1")]
+    resolver_calls = _resolve_cleanup_storages(
+        worker_module, monkeypatch, minio, aws, aws_error=RuntimeError("boom")
+    )
+
+    worker.cleanup_abandoned_uploads.run()
+
+    assert resolver_calls == ["aws_s3"]
+    assert minio.calls == [
+        ("list-pending", 24),
+        ("abort-multipart", (minio_entry["Key"], minio_entry["UploadId"])),
+    ]
+    assert aws.calls == []
+
+
+@pytest.mark.parametrize(
+    "failing_method",
+    ["list_pending_multipart_uploads", "abort_multipart_upload"],
+)
+def test_cleanup_minio_failure_does_not_skip_aws(
+    worker_module,
+    monkeypatch: pytest.MonkeyPatch,
+    failing_method: str,
+) -> None:
+    worker = worker_module
+    minio_entries = [
+        make_multipart_entry("users/91/meetings/a.mp3", "minio-upload-1"),
+        make_multipart_entry("users/91/meetings/b.mp3", "minio-upload-2"),
+    ]
+    aws_entry = make_multipart_entry(
+        "users/91/meetings/storage-v1/aws_s3/x.mp3", "aws-upload-1"
+    )
+    minio = FakeStorage("minio")
+    minio.pending_uploads = minio_entries
+    fail_with_record(minio, failing_method, RuntimeError("minio down"))
+    aws = FakeStorage("s3")
+    aws.pending_uploads = [aws_entry]
+    resolver_calls = _resolve_cleanup_storages(
+        worker_module, monkeypatch, minio, aws, aws_error=None
+    )
+
+    worker.cleanup_abandoned_uploads.run()
+
+    assert resolver_calls == ["aws_s3"]
+    assert ("abort-multipart", (aws_entry["Key"], aws_entry["UploadId"])) in aws.calls
+    if failing_method == "abort_multipart_upload":
+        # The failing abort is recorded; the remaining MinIO abort is not retried.
+        assert minio.calls == [
+            ("list-pending", 24),
+            ("abort-multipart", (minio_entries[0]["Key"], minio_entries[0]["UploadId"])),
+        ]
+    else:
+        assert minio.calls == [("list-pending", 24)]
+
+
+def test_cleanup_aws_failure_does_not_skip_minio(
+    worker_module,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worker = worker_module
+    minio_entry = make_multipart_entry("users/91/meetings/audio.mp3", "minio-upload-1")
+    aws_entry = make_multipart_entry(
+        "users/91/meetings/storage-v1/aws_s3/x.mp3", "aws-upload-1"
+    )
+    minio = FakeStorage("minio")
+    minio.pending_uploads = [minio_entry]
+    aws = FakeStorage("s3")
+    aws.pending_uploads = [aws_entry]
+    fail_with_record(aws, "list_pending_multipart_uploads", RuntimeError("aws down"))
+    resolver_calls = _resolve_cleanup_storages(
+        worker_module, monkeypatch, minio, aws, aws_error=None
+    )
+
+    worker.cleanup_abandoned_uploads.run()
+
+    assert resolver_calls == ["aws_s3"]
+    assert minio.calls == [
+        ("list-pending", 24),
+        ("abort-multipart", (minio_entry["Key"], minio_entry["UploadId"])),
+    ]
+    assert aws.calls == [("list-pending", 24)]
