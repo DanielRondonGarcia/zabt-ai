@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional, List, Literal
 from enum import Enum
 from sqlmodel import Field, SQLModel, Relationship
-from sqlalchemy import Column, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import CheckConstraint, Column, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 
 if TYPE_CHECKING:
@@ -259,7 +259,18 @@ class MeetingBase(SQLModel):
     duration_seconds: Optional[int] = None
 
 class Meeting(MeetingBase, table=True):
+    __table_args__ = (
+        CheckConstraint(
+            "storage_provider IN ('minio', 'aws_s3')",
+            name="ck_meeting_storage_provider",
+        ),
+    )
+
     id: Optional[int] = Field(default=None, primary_key=True)
+    storage_provider: str = Field(
+        default="minio",
+        sa_column=Column(String(length=32), nullable=False, server_default="minio"),
+    )
     owner_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
     owner: Optional[User] = Relationship(back_populates="meetings")
     # Group assignment - nullable FK to Group

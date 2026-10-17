@@ -92,3 +92,37 @@ def test_empty_secret_cannot_enable_s3_without_a_stored_secret(storage_service_d
                 ),
             )
         assert service.get(session).provider == StorageProvider.MINIO
+
+
+def test_existing_aws_meetings_can_resolve_aws_config_when_minio_is_active(
+    storage_service_db,
+):
+    service, db_engine = storage_service_db
+    from app.models.storage_configuration import StorageConfigurationUpdate, StorageProvider
+
+    with Session(db_engine) as session:
+        service.update(
+            session,
+            StorageConfigurationUpdate(
+                provider=StorageProvider.AWS_S3,
+                aws_region="us-west-2",
+                aws_bucket="existing-meetings",
+                aws_access_key_id="AKIAEXAMPLE",
+                aws_secret_access_key="stored-secret",
+            ),
+        )
+        service.update(
+            session,
+            StorageConfigurationUpdate(provider=StorageProvider.MINIO),
+        )
+        runtime = service.get_runtime_configuration(
+            session, provider=StorageProvider.AWS_S3
+        )
+        selected = service.get(session).provider
+
+    assert runtime.provider == StorageProvider.AWS_S3
+    assert runtime.aws_region == "us-west-2"
+    assert runtime.aws_bucket == "existing-meetings"
+    assert runtime.aws_access_key_id == "AKIAEXAMPLE"
+    assert runtime.aws_secret_access_key == "stored-secret"
+    assert selected == StorageProvider.MINIO

@@ -139,7 +139,7 @@ def test_make_object_key_uses_user_meeting_prefix_and_uuid(monkeypatch: pytest.M
     module = load_storage(monkeypatch, [FakeS3Client(), FakeS3Client()])
     monkeypatch.setattr(module.uuid, "uuid4", lambda: type("UUID", (), {"hex": "abc123"})())
 
-    assert module._make_object_key(42, "visit.mp3") == "users/42/meetings/abc123_visit.mp3"
+    assert module._make_object_key(42, "visit.mp3") == "users/42/meetings/storage-v1/minio/abc123_visit.mp3"
 
 
 def test_minio_constructs_internal_and_public_clients_and_creates_missing_bucket(
@@ -176,8 +176,8 @@ def test_presigned_urls_use_expected_clients_params_and_are_fresh(monkeypatch: p
     fresh_url_1 = storage.get_fresh_presigned_download_url("k2", 77)
     fresh_url_2 = storage.get_fresh_presigned_download_url("k2", 77)
 
-    assert key == "users/7/meetings/fixed_chart.png"
-    assert upload_url.startswith("url-1:put_object:users/7/meetings/fixed_chart.png:99")
+    assert key == "users/7/meetings/storage-v1/minio/fixed_chart.png"
+    assert upload_url.startswith("url-1:put_object:users/7/meetings/storage-v1/minio/fixed_chart.png:99")
     assert download_url == "url-1:get_object:k1:88"
     assert public_url == "url-2:get_object:k2:77"
     assert fresh_url_1 != fresh_url_2
@@ -238,7 +238,7 @@ def test_multipart_lifecycle_and_pending_cutoff(monkeypatch: pytest.MonkeyPatch)
     pending = storage.list_pending_multipart_uploads(older_than_hours=24)
 
     assert upload_id == "upload-123"
-    assert key == "users/5/meetings/mp_scan.mov"
+    assert key == "users/5/meetings/storage-v1/minio/mp_scan.mov"
     assert part_url == f"url-1:upload_part:{key}:123"
     assert pending == [{"Key": "old-key", "UploadId": "old-upload", "Initiated": old}]
     assert ("create_multipart_upload", {"Bucket": "minio-bucket", "Key": key, "ContentType": "video/quicktime"}) in internal.calls
@@ -290,3 +290,80 @@ def test_factory_selects_provider_and_instances_match_protocol(monkeypatch: pyte
     assert minio_storage.provider_name == "minio"
     assert isinstance(s3_storage, module.StorageProvider)
     assert isinstance(minio_storage, module.StorageProvider)
+
+
+def test_new_upload_keys_mark_provider_and_legacy_keys_default_to_minio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models.storage_configuration import StorageProvider as StorageKind
+
+    module, minio_storage, _internal, _public = construct_minio(monkeypatch)
+    _url, key = minio_storage.generate_presigned_upload_url(
+        user_id=7, filename="recording.wav", content_type="audio/wav"
+    )
+
+    assert key.startswith("users/7/meetings/storage-v1/minio/")
+    assert module.storage_provider_from_object_key(key) == StorageKind.MINIO
+    assert module.storage_provider_from_object_key(
+        "users/7/meetings/legacy-recording.wav"
+    ) == StorageKind.MINIO
+
+
+def test_runtime_storage_factory_uses_admin_aws_settings_not_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models.storage_configuration import StorageProvider as StorageKind
+    from app.services.storage_configuration import StorageRuntimeConfiguration
+
+    clients = [FakeS3Client() for _ in range(4)]
+    module = load_storage(monkeypatch, clients, STORAGE_PROVIDER="minio")
+    runtime = StorageRuntimeConfiguration(
+        provider=StorageKind.AWS_S3,
+        aws_region="eu-west-1",
+        aws_bucket="admin-configured-bucket",
+        aws_access_key_id="ADMINACCESS",
+        aws_secret_access_key="admin-secret",
+    )
+
+    aws_storage = module.create_storage_from_runtime(runtime)
+    _url, key = aws_storage.generate_presigned_upload_url(
+        user_id=7, filename="recording.wav", content_type="audio/wav"
+    )
+
+    assert aws_storage.bucket == "admin-configured-bucket"
+    assert key.startswith("users/7/meetings/storage-v1/aws_s3/")
+    assert module._created_boto3_clients[-2]["kwargs"]["aws_access_key_id"] == "ADMINACCESS"
+    assert module._created_boto3_clients[-2]["kwargs"]["aws_secret_access_key"] == "admin-secret"
+    assert module._created_boto3_clients[-2]["kwargs"]["region_name"] == "eu-west-1"
+
+
+def test_storage_for_meeting_provider_uses_configured_aws_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_API_KEY", "test-embedding-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    from app.models.storage_configuration import StorageProvider as StorageKind
+    from app.services.storage_configuration import (
+        StorageRuntimeConfiguration,
+        storage_configuration_service,
+    )
+
+    clients = [FakeS3Client() for _ in range(4)]
+    module = load_storage(monkeypatch, clients, STORAGE_PROVIDER="minio")
+    runtime = StorageRuntimeConfiguration(
+        provider=StorageKind.AWS_S3,
+        aws_region="eu-west-1",
+        aws_bucket="meeting-media",
+        aws_access_key_id="MEETINGACCESS",
+        aws_secret_access_key="meeting-secret",
+    )
+    monkeypatch.setattr(
+        storage_configuration_service,
+        "get_runtime_configuration",
+        lambda session, *, provider: runtime,
+    )
+
+    resolved = module.get_storage_for_provider(StorageKind.AWS_S3, session=object())
+
+    assert resolved.bucket == "meeting-media"
+    assert resolved.provider_name == "s3"

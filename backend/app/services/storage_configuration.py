@@ -88,10 +88,20 @@ class StorageConfigurationService:
         session.refresh(configuration)
         return configuration
 
-    def get_runtime_configuration(self, session: Session) -> StorageRuntimeConfiguration:
+    def get_runtime_configuration(
+        self,
+        session: Session,
+        *,
+        provider: StorageProvider | None = None,
+    ) -> StorageRuntimeConfiguration:
         configuration = self.get(session)
-        if configuration.provider == StorageProvider.MINIO:
+        requested_provider = provider or configuration.provider
+        if requested_provider == StorageProvider.MINIO:
             return StorageRuntimeConfiguration(provider=StorageProvider.MINIO)
+        if requested_provider != StorageProvider.AWS_S3:
+            raise StorageConfigurationValidationError(
+                f"Unsupported storage provider: {requested_provider}."
+            )
 
         if not all(
             (
@@ -114,7 +124,7 @@ class StorageConfigurationService:
             ) from None
 
         return StorageRuntimeConfiguration(
-            provider=configuration.provider,
+            provider=requested_provider,
             aws_region=configuration.aws_region,
             aws_bucket=configuration.aws_bucket,
             aws_access_key_id=configuration.aws_access_key_id,

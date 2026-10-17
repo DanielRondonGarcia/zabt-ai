@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
+import hashlib
+from threading import RLock
 import uuid
 
 import boto3
@@ -65,15 +67,33 @@ class StorageProvider(Protocol):
         ...
 
 
-def _make_object_key(user_id: int, filename: str) -> str:
+def _make_object_key(
+    user_id: int, filename: str, storage_kind: str = "minio"
+) -> str:
+    if storage_kind not in {"minio", "aws_s3"}:
+        raise ValueError("Unsupported storage provider for object key.")
     safe_name = f"{uuid.uuid4().hex}_{filename}"
-    return f"users/{user_id}/meetings/{safe_name}"
+    return f"users/{user_id}/meetings/storage-v1/{storage_kind}/{safe_name}"
+
+
+def storage_provider_from_object_key(object_key: str):
+    """Resolve versioned upload keys; legacy keys belong to MinIO."""
+    from app.models.storage_configuration import StorageProvider as StorageKind
+
+    parts = object_key.split("/")
+    if len(parts) >= 6 and parts[0] == "users" and parts[2] == "meetings" and parts[3] == "storage-v1":
+        try:
+            return StorageKind(parts[4])
+        except ValueError:
+            raise ValueError("Unsupported storage provider marker in object key.") from None
+    return StorageKind.MINIO
 
 
 class MinioStorage:
     """Storage backend using MinIO (local development)."""
 
     provider_name = "minio"
+    storage_kind = "minio"
 
     def __init__(self) -> None:
         self.bucket = settings.MINIO_BUCKET_NAME
@@ -113,7 +133,7 @@ class MinioStorage:
     def generate_presigned_upload_url(
         self, user_id: int, filename: str, content_type: str, expiration: int = 3600
     ) -> tuple[str, str]:
-        object_key = _make_object_key(user_id, filename)
+        object_key = _make_object_key(user_id, filename, self.storage_kind)
         response = self._public_client.generate_presigned_url(
             "put_object",
             Params={"Bucket": self.bucket, "Key": object_key, "ContentType": content_type},
@@ -236,24 +256,44 @@ class S3Storage:
     """Storage backend using S3-compatible cloud providers (R2, AWS S3, etc.)."""
 
     provider_name = "s3"
+    storage_kind = "aws_s3"
 
-    def __init__(self) -> None:
-        if not settings.S3_ENDPOINT_URL:
-            raise RuntimeError(
-                "STORAGE_PROVIDER is set to 's3' but S3_ENDPOINT_URL is empty. "
-                "Set S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY."
-            )
+    def __init__(self, runtime_configuration: Any | None = None) -> None:
+        if runtime_configuration is None:
+            endpoint_url = settings.S3_ENDPOINT_URL
+            if not endpoint_url:
+                raise RuntimeError(
+                    "STORAGE_PROVIDER is set to 's3' but S3_ENDPOINT_URL is empty. "
+                    "Set S3_ENDPOINT_URL, S3_ACCESS_KEY_ID, and S3_SECRET_ACCESS_KEY."
+                )
+            bucket = settings.S3_BUCKET_NAME
+            region = settings.S3_REGION
+            access_key_id = settings.S3_ACCESS_KEY_ID
+            secret_access_key = settings.S3_SECRET_ACCESS_KEY
+            public_url = settings.S3_PUBLIC_URL or endpoint_url
+        else:
+            from app.models.storage_configuration import StorageProvider as StorageKind
 
-        self.bucket = settings.S3_BUCKET_NAME
-        public_url = settings.S3_PUBLIC_URL or settings.S3_ENDPOINT_URL
+            if runtime_configuration.provider != StorageKind.AWS_S3:
+                raise ValueError("S3Storage requires an AWS S3 runtime configuration.")
+            bucket = runtime_configuration.aws_bucket
+            region = runtime_configuration.aws_region
+            access_key_id = runtime_configuration.aws_access_key_id
+            secret_access_key = runtime_configuration.aws_secret_access_key
+            endpoint_url = None
+            public_url = None
+            if not all((bucket, region, access_key_id, secret_access_key)):
+                raise RuntimeError("AWS S3 runtime configuration is incomplete.")
+
+        self.bucket = bucket
 
         # Internal client — server-to-server operations
         self.s3_client = boto3.client(
             "s3",
-            endpoint_url=settings.S3_ENDPOINT_URL,
-            aws_access_key_id=settings.S3_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.S3_SECRET_ACCESS_KEY,
-            region_name=settings.S3_REGION,
+            endpoint_url=endpoint_url,
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
+            region_name=region,
             config=Config(signature_version="s3v4"),
         )
 
@@ -261,9 +301,9 @@ class S3Storage:
         self._public_client = boto3.client(
             "s3",
             endpoint_url=public_url,
-            aws_access_key_id=settings.S3_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.S3_SECRET_ACCESS_KEY,
-            region_name=settings.S3_REGION,
+            aws_access_key_id=access_key_id,
+            aws_secret_access_key=secret_access_key,
+            region_name=region,
             config=Config(signature_version="s3v4"),
         )
 
@@ -279,7 +319,7 @@ class S3Storage:
     def generate_presigned_upload_url(
         self, user_id: int, filename: str, content_type: str, expiration: int = 3600
     ) -> tuple[str, str]:
-        object_key = _make_object_key(user_id, filename)
+        object_key = _make_object_key(user_id, filename, self.storage_kind)
         response = self._public_client.generate_presigned_url(
             "put_object",
             Params={"Bucket": self.bucket, "Key": object_key, "ContentType": content_type},
@@ -407,3 +447,91 @@ def create_storage() -> StorageProvider:
 
 
 storage: StorageProvider = create_storage()
+
+_storage_cache_lock = RLock()
+_minio_storage_cache: MinioStorage | None = None
+_runtime_s3_cache_key: tuple[str, ...] | None = None
+_runtime_s3_storage_cache: S3Storage | None = None
+
+
+def _get_minio_storage() -> MinioStorage:
+    global _minio_storage_cache
+    with _storage_cache_lock:
+        if _minio_storage_cache is None:
+            current_storage = globals().get("storage")
+            _minio_storage_cache = (
+                current_storage
+                if isinstance(current_storage, MinioStorage)
+                else MinioStorage()
+            )
+        return _minio_storage_cache
+
+
+def create_storage_from_runtime(runtime_configuration: Any) -> StorageProvider:
+    """Build or reuse a storage client from persisted admin settings."""
+    from app.models.storage_configuration import StorageProvider as StorageKind
+
+    if runtime_configuration.provider == StorageKind.MINIO:
+        return _get_minio_storage()
+    if runtime_configuration.provider != StorageKind.AWS_S3:
+        raise ValueError("Unsupported runtime storage provider.")
+
+    bucket = runtime_configuration.aws_bucket
+    region = runtime_configuration.aws_region
+    access_key_id = runtime_configuration.aws_access_key_id
+    secret_access_key = runtime_configuration.aws_secret_access_key
+    if not all((bucket, region, access_key_id, secret_access_key)):
+        raise RuntimeError("AWS S3 runtime configuration is incomplete.")
+
+    secret_digest = hashlib.sha256(secret_access_key.encode("utf-8")).hexdigest()
+    cache_key = ("aws_s3", bucket, region, access_key_id, secret_digest)
+    global _runtime_s3_cache_key, _runtime_s3_storage_cache
+    with _storage_cache_lock:
+        if cache_key != _runtime_s3_cache_key:
+            _runtime_s3_storage_cache = S3Storage(runtime_configuration)
+            _runtime_s3_cache_key = cache_key
+        return _runtime_s3_storage_cache
+
+
+def get_storage_for_provider(provider: str, session: Any | None = None) -> StorageProvider:
+    """Resolve a meeting's storage backend without using the active provider."""
+    from app.models.storage_configuration import StorageProvider as StorageKind
+
+    requested_provider = StorageKind(provider)
+    if requested_provider == StorageKind.MINIO:
+        return _get_minio_storage()
+
+    from app.services.storage_configuration import storage_configuration_service
+
+    if session is not None:
+        runtime_configuration = storage_configuration_service.get_runtime_configuration(
+            session, provider=requested_provider
+        )
+    else:
+        from sqlmodel import Session
+
+        from app.db.engine import engine
+
+        with Session(engine) as database_session:
+            runtime_configuration = storage_configuration_service.get_runtime_configuration(
+                database_session, provider=requested_provider
+            )
+    return create_storage_from_runtime(runtime_configuration)
+
+
+def get_current_storage(session: Any | None = None) -> StorageProvider:
+    """Resolve the globally selected provider for a new upload."""
+    from app.services.storage_configuration import storage_configuration_service
+
+    if session is not None:
+        runtime_configuration = storage_configuration_service.get_runtime_configuration(session)
+    else:
+        from sqlmodel import Session
+
+        from app.db.engine import engine
+
+        with Session(engine) as database_session:
+            runtime_configuration = storage_configuration_service.get_runtime_configuration(
+                database_session
+            )
+    return create_storage_from_runtime(runtime_configuration)
