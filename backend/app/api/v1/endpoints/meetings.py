@@ -29,6 +29,7 @@ from app.services.notifications import notify
 from app.services.pdf_export import pdf_export_service
 from app.services.storage import (
     get_current_storage,
+    get_current_storage_provider,
     get_storage_for_provider,
     storage_provider_from_object_key,
 )
@@ -558,6 +559,7 @@ class YouTubeIngestRequest(BaseModel):
 def ingest_youtube_url(
     body: YouTubeIngestRequest,
     current_user: User = Depends(deps.get_current_active_user),
+    db: Session = Depends(deps.get_db),
 ) -> Any:
     """Submit a YouTube URL to create a meeting and dispatch background processing."""
     from app.services.youtube import validate_youtube_url, is_playlist_url
@@ -584,7 +586,12 @@ def ingest_youtube_url(
             detail="You have reached the maximum of 3 concurrent YouTube ingestions. Please wait for an existing one to complete.",
         )
 
-    meeting = meeting_service.create_from_youtube(url, owner_id=current_user.id)
+    storage_provider = get_current_storage_provider(db)
+    meeting = meeting_service.create_from_youtube(
+        url,
+        owner_id=current_user.id,
+        storage_provider=storage_provider,
+    )
     if body.transcription_type != TranscriptionType.GENERAL:
         meeting_service.update_transcription_type(meeting.id, body.transcription_type)
     dispatch_youtube_pipeline(meeting.id)

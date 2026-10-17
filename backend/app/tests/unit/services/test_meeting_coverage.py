@@ -1000,8 +1000,21 @@ def test_create_and_count_active_youtube(service: MeetingService, store: Meeting
     assert meeting.source_type == "youtube"
     assert meeting.source_url == "https://youtu.be/abc"
     assert meeting.status == "queued"
+    assert meeting.storage_provider == "minio"
     assert meeting.processing_heartbeat_at is not None
     assert service.count_active_youtube(owner_id=4) == 2
+
+
+def test_create_from_youtube_persists_selected_storage_provider(
+    service: MeetingService,
+    store: MeetingStore,
+) -> None:
+    meeting = service.create_from_youtube(
+        "https://youtu.be/abc", owner_id=4, storage_provider="aws_s3"
+    )
+
+    assert meeting.storage_provider == "aws_s3"
+    assert store.get(Meeting, meeting.id).storage_provider == "aws_s3"
 
 
 def test_update_field_persists_value_and_reindexes_text_fields_for_grouped_meeting(

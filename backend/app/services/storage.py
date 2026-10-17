@@ -535,3 +535,21 @@ def get_current_storage(session: Any | None = None) -> StorageProvider:
                 database_session
             )
     return create_storage_from_runtime(runtime_configuration)
+
+
+def get_current_storage_provider(session: Any | None = None) -> str:
+    """Return the validated globally selected provider for a new meeting."""
+    from app.services.storage_configuration import storage_configuration_service
+
+    if session is not None:
+        runtime_configuration = storage_configuration_service.get_runtime_configuration(session)
+    else:
+        from sqlmodel import Session
+
+        from app.db.engine import engine
+
+        with Session(engine) as database_session:
+            runtime_configuration = storage_configuration_service.get_runtime_configuration(
+                database_session
+            )
+    return runtime_configuration.provider.value

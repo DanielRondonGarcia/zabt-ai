@@ -1130,10 +1130,16 @@ class MeetingService(BaseService):
                 exc_info=True,
             )
 
-    def create_from_youtube(self, url: str, owner_id: int) -> Meeting:
+    def create_from_youtube(
+        self,
+        url: str,
+        owner_id: int,
+        storage_provider: str = "minio",
+    ) -> Meeting:
         """Create a meeting record for YouTube ingestion.
 
         Starts at 'queued' status (skips 'pending_upload' since there's no file upload step).
+        The caller snapshots the selected storage provider before dispatching work.
         """
         meeting = Meeting(
             title="YouTube Video",
@@ -1141,6 +1147,7 @@ class MeetingService(BaseService):
             source_url=url,
             status="queued",
             owner_id=owner_id,
+            storage_provider=storage_provider,
             processing_heartbeat_at=datetime.utcnow(),
         )
         return self.save(meeting)

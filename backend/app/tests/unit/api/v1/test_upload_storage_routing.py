@@ -635,3 +635,59 @@ def test_meeting_deletion_uses_meeting_storage_provider_for_audio_and_visuals(
         ("delete-prefix", {"prefix": visual_prefix}),
     ]
     assert minio.calls == []
+
+
+def test_youtube_ingestion_snapshots_current_storage_provider(
+    upload_client: TestClient,
+    project_modules,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import sys
+    from types import ModuleType
+
+    meetings = project_modules["meetings"]
+    youtube_url = "https://www.youtube.com/watch?v=video-123"
+    created: dict[str, Any] = {}
+    dispatched: list[int] = []
+
+    def create_from_youtube(
+        url: str, *, owner_id: int, storage_provider: str
+    ):
+        created.update(
+            url=url, owner_id=owner_id, storage_provider=storage_provider
+        )
+        return project_modules["Meeting"](
+            id=303,
+            title="YouTube Video",
+            owner_id=owner_id,
+            source_type="youtube",
+            source_url=url,
+            status="queued",
+            storage_provider=storage_provider,
+        )
+
+    monkeypatch.setattr(meetings, "get_current_storage_provider", lambda _db: "aws_s3", raising=False)
+    monkeypatch.setattr(meetings.meeting_service, "count_active_youtube", lambda _owner_id: 0)
+    monkeypatch.setattr(meetings.meeting_service, "create_from_youtube", create_from_youtube)
+    monkeypatch.setattr(
+        "app.services.youtube.is_playlist_url", lambda _url: False
+    )
+    monkeypatch.setattr(
+        "app.services.youtube.validate_youtube_url", lambda _url: True
+    )
+    worker_stub = ModuleType("app.worker")
+    worker_stub.dispatch_youtube_pipeline = lambda meeting_id: dispatched.append(meeting_id)
+    monkeypatch.setitem(sys.modules, "app.worker", worker_stub)
+
+    response = upload_client.post(
+        "/api/v1/meetings/youtube", json={"url": youtube_url}
+    )
+
+    assert response.status_code == 201, response.text
+    assert created == {
+        "url": youtube_url,
+        "owner_id": 101,
+        "storage_provider": "aws_s3",
+    }
+    assert response.json()["source_type"] == "youtube"
+    assert dispatched == [303]

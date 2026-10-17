@@ -164,6 +164,7 @@ def _cleanup_youtube_attempt_artifacts(
     meeting_id: int,
     run_id: int,
     attempt_id: str,
+    storage_client=None,
 ) -> None:
     if work_dir and os.path.isdir(work_dir):
         try:
@@ -181,7 +182,8 @@ def _cleanup_youtube_attempt_artifacts(
         if not meeting_processing_audit.youtube_audio_was_promoted(
             run_id=run_id, attempt_id=attempt_id, meeting_id=meeting_id
         ):
-            storage.delete_file(file_key)
+            artifact_storage = storage if storage_client is None else storage_client
+            artifact_storage.delete_file(file_key)
     except Exception:
         logger.warning("Could not remove unpromoted YouTube attempt object", exc_info=True)
 
@@ -2461,6 +2463,7 @@ def stage_youtube_download(meeting_id: int) -> int:
     file_key: str | None = None
     object_write_started = False
     promoted = False
+    storage_client = None
     try:
         if not _update_sub_status_for_attempt(
             meeting_id, run_id, attempt_id, "downloading_youtube"
@@ -2473,6 +2476,7 @@ def stage_youtube_download(meeting_id: int) -> int:
             raise ValueError("No YouTube URL associated with meeting.")
         if meeting.owner_id is None:
             raise ValueError("YouTube meeting has no owner.")
+        storage_client = get_storage_for_provider(meeting.storage_provider)
         source_url = meeting.source_url
         owner_id = meeting.owner_id
 
@@ -2520,7 +2524,7 @@ def stage_youtube_download(meeting_id: int) -> int:
             raise Ignore()
         object_write_started = True
         with open(audio_path, "rb") as f:
-            storage.upload_file(f.read(), file_key, "audio/mpeg")
+            storage_client.upload_file(f.read(), file_key, "audio/mpeg")
         if not _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, None):
             raise Ignore()
 
@@ -2576,6 +2580,7 @@ def stage_youtube_download(meeting_id: int) -> int:
             meeting_id=meeting_id,
             run_id=run_id,
             attempt_id=attempt_id,
+            storage_client=storage_client,
         )
 
     return meeting_id

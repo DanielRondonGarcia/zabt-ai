@@ -393,3 +393,32 @@ def test_storage_for_meeting_provider_uses_configured_aws_client(
 
     assert resolved.bucket == "meeting-media"
     assert resolved.provider_name == "s3"
+
+
+def test_current_storage_provider_reports_the_persisted_admin_selection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_API_KEY", "test-embedding-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    from app.models.storage_configuration import StorageProvider as StorageKind
+    from app.services.storage_configuration import (
+        StorageRuntimeConfiguration,
+        storage_configuration_service,
+    )
+
+    runtime = StorageRuntimeConfiguration(
+        provider=StorageKind.AWS_S3,
+        aws_region="eu-west-1",
+        aws_bucket="meeting-media",
+        aws_access_key_id="MEETINGACCESS",
+        aws_secret_access_key="meeting-secret",
+    )
+    clients = [FakeS3Client() for _ in range(4)]
+    module = load_storage(monkeypatch, clients, STORAGE_PROVIDER="minio")
+    monkeypatch.setattr(
+        storage_configuration_service,
+        "get_runtime_configuration",
+        lambda _session: runtime,
+    )
+
+    assert module.get_current_storage_provider(session=object()) == "aws_s3"
