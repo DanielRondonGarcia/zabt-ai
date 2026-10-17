@@ -361,15 +361,11 @@ export function UploadModal({ isOpen, onOpenChange }: UploadModalProps) {
                     )}
                 </div>
 
-                {/* Footer */}
-                <div className="px-6 py-4 bg-muted/50 border-t border-border flex items-center justify-between flex-shrink-0">
-                    <span className="text-xs font-medium text-muted-foreground">3 of 3 imports left</span>
-                    {uploads.some(u => u.status === "uploading") ? (
+                {uploads.some(u => u.status === "uploading") && (
+                    <div className="px-6 py-4 bg-muted/50 border-t border-border flex justify-end flex-shrink-0">
                         <Button variant="ghost" size="sm" onClick={cancelAll}>Cancel all</Button>
-                    ) : (
-                        <Button variant="secondary" size="sm">Upgrade to Business</Button>
-                    )}
-                </div>
+                    </div>
+                )}
             </DialogContent>
         </Dialog>
     );
