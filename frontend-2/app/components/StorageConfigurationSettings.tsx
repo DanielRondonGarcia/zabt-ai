@@ -5,9 +5,11 @@ import {
   getApiErrorMessage,
   getApiErrorStatus,
   getStorageConfiguration,
+  listStorageObjects,
   updateStorageConfiguration,
   type StorageConfigurationRead,
   type StorageConfigurationUpdate,
+  type StorageObjectEntry,
   type StorageProvider,
 } from "@/app/lib/api";
 import { Badge } from "@/app/components/ui/badge";
@@ -309,6 +311,203 @@ export function StorageConfigurationSettings() {
           </div>
         </form>
       ) : null}
+
+      {configuration?.provider === "aws_s3" && (
+        <div className="mt-5 border-t border-border pt-5">
+          <S3ObjectExplorer
+            key={`${configuration.s3_endpoint_url ?? ""}:${configuration.aws_bucket ?? ""}:${configuration.aws_access_key_id ?? ""}`}
+            bucket={configuration.aws_bucket ?? ""}
+          />
+        </div>
+      )}
     </section>
+  );
+}
+
+function S3ObjectExplorer({ bucket }: { bucket: string }) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [prefix, setPrefix] = useState("");
+  const [objects, setObjects] = useState<StorageObjectEntry[]>([]);
+  const [prefixes, setPrefixes] = useState<string[]>([]);
+  const [nextToken, setNextToken] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadPage = useCallback(
+    async (targetPrefix: string, token: string | null, append: boolean) => {
+      setLoading(true);
+      setError(null);
+      if (!append) {
+        setObjects([]);
+        setPrefixes([]);
+        setNextToken(null);
+      }
+      try {
+        const page = await listStorageObjects(targetPrefix, token);
+        setObjects((current) => (append ? [...current, ...page.objects] : page.objects));
+        setPrefixes((current) =>
+          append ? Array.from(new Set([...current, ...page.prefixes])) : page.prefixes,
+        );
+        setNextToken(page.next_continuation_token);
+        setPrefix(targetPrefix);
+      } catch (loadError) {
+        setError(
+          getApiErrorMessage(loadError) ??
+            "Could not list the configured S3 bucket. Check its endpoint and ListBucket permission.",
+        );
+      } finally {
+        setLoading(false);
+      }
+    },
+    [],
+  );
+
+  const toggleExplorer = () => {
+    if (isOpen) {
+      setIsOpen(false);
+      return;
+    }
+    setIsOpen(true);
+    void loadPage("", null, false);
+  };
+
+  const goToParent = () => {
+    const withoutTrailingSlash = prefix.endsWith("/") ? prefix.slice(0, -1) : prefix;
+    const lastSlash = withoutTrailingSlash.lastIndexOf("/");
+    const parent = lastSlash < 0 ? "" : withoutTrailingSlash.slice(0, lastSlash + 1);
+    void loadPage(parent, null, false);
+  };
+
+  const formatSize = (size: number) => {
+    if (size < 1024) return `${size} B`;
+    const units = ["KB", "MB", "GB", "TB"];
+    let value = size / 1024;
+    let unitIndex = 0;
+    while (value >= 1024 && unitIndex < units.length - 1) {
+      value /= 1024;
+      unitIndex += 1;
+    }
+    return `${value.toFixed(1)} ${units[unitIndex]}`;
+  };
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">S3 bucket explorer</h3>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Read-only browsing requires S3 ListBucket permission. This does not test uploads or processing.
+          </p>
+        </div>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={toggleExplorer}
+          disabled={loading}
+        >
+          {isOpen ? "Close explorer" : "Browse bucket"}
+        </Button>
+      </div>
+
+      {isOpen && (
+        <div className="space-y-3" aria-busy={loading}>
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-muted-foreground">Bucket</span>
+            <code className="rounded-md bg-muted px-2 py-1 text-foreground">{bucket || "—"}</code>
+            <span className="text-muted-foreground">Prefix</span>
+            <code className="min-w-0 break-all rounded-md bg-muted px-2 py-1 text-foreground">
+              {prefix || "/"}
+            </code>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={goToParent}
+              disabled={loading || !prefix}
+            >
+              Up one level
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => void loadPage(prefix, null, false)}
+              disabled={loading}
+            >
+              Refresh
+            </Button>
+          </div>
+
+          {loading && (
+            <p className="text-sm text-muted-foreground" role="status" aria-live="polite">
+              Loading bucket contents…
+            </p>
+          )}
+          {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+
+          {!loading && !error && prefixes.length === 0 && objects.length === 0 && (
+            <p className="text-sm text-muted-foreground" role="status">
+              This prefix is empty.
+            </p>
+          )}
+
+          {(prefixes.length > 0 || objects.length > 0) && (
+            <div className="overflow-hidden rounded-lg border border-border">
+              <div className="grid grid-cols-[minmax(0,1fr)_5rem] gap-3 border-b border-border bg-muted/50 px-3 py-2 text-sm font-medium text-muted-foreground sm:grid-cols-[minmax(0,1fr)_6rem_12rem]">
+                <span>Name</span>
+                <span>Size</span>
+                <span className="hidden sm:block">Last modified</span>
+              </div>
+              {prefixes.map((folderPrefix) => (
+                <div
+                  key={`prefix:${folderPrefix}`}
+                  className="grid grid-cols-[minmax(0,1fr)_5rem] items-center gap-3 border-b border-border px-3 py-2 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_6rem_12rem]"
+                >
+                  <button
+                    type="button"
+                    className="min-w-0 break-all text-left text-sm text-foreground hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                    onClick={() => void loadPage(folderPrefix, null, false)}
+                    disabled={loading}
+                    aria-label={`Open folder ${folderPrefix}`}
+                  >
+                    {folderPrefix.slice(prefix.length).replace(/\/$/, "") || folderPrefix}
+                  </button>
+                  <span className="text-sm text-muted-foreground">Folder</span>
+                  <span className="hidden text-sm text-muted-foreground sm:block">—</span>
+                </div>
+              ))}
+              {objects.map((object) => (
+                <div
+                  key={object.key}
+                  className="grid grid-cols-[minmax(0,1fr)_5rem] items-center gap-3 border-b border-border px-3 py-2 last:border-b-0 sm:grid-cols-[minmax(0,1fr)_6rem_12rem]"
+                >
+                  <code className="min-w-0 break-all text-sm text-foreground">
+                    {object.key.slice(prefix.length)}
+                  </code>
+                  <span className="text-sm text-muted-foreground">{formatSize(object.size)}</span>
+                  <span className="hidden text-sm text-muted-foreground sm:block">
+                    {object.last_modified ? new Date(object.last_modified).toLocaleString() : "—"}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {nextToken && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              loading={loading}
+              disabled={loading}
+              onClick={() => void loadPage(prefix, nextToken, true)}
+            >
+              Load more
+            </Button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

@@ -298,6 +298,18 @@ export interface StorageConfigurationUpdate {
   aws_secret_access_key?: string;
 }
 
+export interface StorageObjectEntry {
+  key: string;
+  size: number;
+  last_modified: string | null;
+}
+
+export interface StorageObjectPage {
+  objects: StorageObjectEntry[];
+  prefixes: string[];
+  next_continuation_token: string | null;
+}
+
 export const getStorageConfiguration = async (): Promise<StorageConfigurationRead> => {
   const { data } = await apiClient.get<StorageConfigurationRead>("/storage/configuration");
   return data;
@@ -310,6 +322,19 @@ export const updateStorageConfiguration = async (
     "/storage/configuration",
     configuration,
   );
+  return data;
+};
+
+export const listStorageObjects = async (
+  prefix: string,
+  continuationToken?: string | null,
+): Promise<StorageObjectPage> => {
+  const { data } = await apiClient.get<StorageObjectPage>("/storage/objects", {
+    params: {
+      ...(prefix ? { prefix } : {}),
+      ...(continuationToken ? { continuation_token: continuationToken } : {}),
+    },
+  });
   return data;
 };
 

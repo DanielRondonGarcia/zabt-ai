@@ -144,6 +144,12 @@ key ID, and secret access key. Custom endpoints use SigV4 and path-style address
 the bucket is configured separately. Existing meetings continue using their recorded
 provider; changing the selection does not copy or move existing files.
 
+When S3-compatible storage is selected, a system superuser can use **Browse bucket** to
+list prefixes and object names, sizes, and modification times in the configured bucket. The
+explorer is read-only and requires the credentials to have `ListBucket` permission. A successful
+listing verifies endpoint access and listing permission only; it does not test uploads or worker
+processing. Validate those paths with a controlled test meeting and a disposable test object.
+
 For Oracle OCI, use the S3 Compatibility API endpoint, for example
 `https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, and credentials
 from an OCI Customer Secret Key. See [Oracle's S3 Compatibility API documentation](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/s3compatibleapi.htm).
