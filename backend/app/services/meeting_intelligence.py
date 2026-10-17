@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.core.logging import get_logger
 from app.db.engine import engine
 from app.models.meeting_intelligence import MeetingHighlight
+from app.services.ai_provider import build_openai_client
 from app.services.meeting_processing_audit import meeting_processing_audit
 
 logger = get_logger(__name__)
@@ -19,10 +20,15 @@ class HighlightSaveRejected(Enum):
     STALE_OR_CANCELLED = "stale_or_cancelled"
 
 
-_client = OpenAI(
-    base_url=settings.OPENAI_BASE_URL,
-    api_key=settings.OPENAI_API_KEY,
-)
+def _build_openai_client():
+    return build_openai_client(
+        base_url=settings.OPENAI_BASE_URL,
+        api_key=settings.OPENAI_API_KEY,
+        client_factory=OpenAI,
+    )
+
+
+_client = _build_openai_client()
 
 
 # ── Pydantic models for structured output (enforced by OpenAI beta.parse) ────
