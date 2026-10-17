@@ -262,6 +262,88 @@ def test_multipart_upload_routes_each_step_by_the_server_generated_key_marker(
     assert minio.calls == []
 
 
+def test_legacy_multipart_flow_routes_to_minio_when_aws_is_active(
+    upload_client: TestClient,
+    project_modules,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uploads = project_modules["uploads"]
+    legacy_key = "users/101/meetings/legacy-audio.m4a"
+    minio = FakeStorage("minio", "unused", "unused")
+    aws = FakeStorage("aws_s3", "unused", "unused")
+    resolved_providers: list[str] = []
+
+    def resolve_storage(provider: str, _db: Any) -> FakeStorage:
+        resolved_providers.append(provider)
+        return minio if provider == "minio" else aws
+
+    monkeypatch.setattr(
+        uploads, "get_storage_for_provider", resolve_storage, raising=False
+    )
+    monkeypatch.setattr(
+        uploads,
+        "storage_provider_from_object_key",
+        project_modules["storage_service"].storage_provider_from_object_key,
+        raising=False,
+    )
+
+    part_url = upload_client.post(
+        "/api/v1/uploads/part-url",
+        json={"s3_key": legacy_key, "upload_id": "legacy-upload", "part_number": 3},
+    )
+    assert part_url.status_code == 200, part_url.text
+    assert part_url.json() == {"url": "https://minio/part/3"}
+
+    completed = upload_client.post(
+        "/api/v1/uploads/complete",
+        json={
+            "s3_key": legacy_key,
+            "upload_id": "legacy-upload",
+            "parts": [
+                {"part_number": 2, "etag": "etag-2"},
+                {"part_number": 1, "etag": "etag-1"},
+            ],
+        },
+    )
+    assert completed.status_code == 200, completed.text
+    assert completed.json() == {"s3_key": legacy_key}
+    assert resolved_providers == ["minio", "minio"]
+    assert [name for name, _kwargs in minio.calls] == ["part-url", "complete"]
+    assert minio.calls[-1][1]["parts"] == [
+        {"PartNumber": 1, "ETag": "etag-1"},
+        {"PartNumber": 2, "ETag": "etag-2"},
+    ]
+    assert aws.calls == []
+
+
+def test_empty_multipart_completion_returns_400_without_resolving_storage(
+    upload_client: TestClient,
+    project_modules,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uploads = project_modules["uploads"]
+    resolved_providers: list[str] = []
+    monkeypatch.setattr(
+        uploads,
+        "get_storage_for_provider",
+        lambda provider, _db: resolved_providers.append(provider),
+        raising=False,
+    )
+
+    response = upload_client.post(
+        "/api/v1/uploads/complete",
+        json={
+            "s3_key": "users/101/meetings/storage-v1/aws_s3/audio.m4a",
+            "upload_id": "upload-1",
+            "parts": [],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "at least one part required"}
+    assert resolved_providers == []
+
+
 def test_unknown_provider_marker_is_a_client_error_without_side_effects(
     upload_client: TestClient,
     project_modules,
