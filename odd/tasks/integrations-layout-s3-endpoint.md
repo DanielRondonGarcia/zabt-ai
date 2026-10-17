@@ -7,7 +7,7 @@ Status: in progress
 2. **S2** — “segundo, haz la integración s3 generica, que se pueda poner el endpoint completo con dominio, por ejemplo usar uno de oracle storage”
 
 ## Tasks
-- T1 — S1 — Reorganize Integrations into role-aware My integrations and Instance settings tabs; keep non-superuser account integrations and current access rules intact — inline — done; frontend build passed; targeted lint timed out (not retried), and no frontend test runner is configured.
+- T1 — S1 — Reorganize Integrations into role-aware My integrations and Instance settings tabs; keep non-superuser account integrations and current access rules intact — inline — done, commit: `b591296`; frontend build passed; targeted lint timed out (not retried), and no frontend test runner is configured.
 - T2 — S2 — Add a validated optional full S3-compatible endpoint URL to admin-managed storage, use it for internal and browser-presigned clients, retain AWS-default behavior when blank, and update UI/docs — inline — pending.
 - T3 — S2 — Independently verify the custom endpoint boundary, storage client routing, credential handling, migration, and compatibility with endpoint-omitted AWS settings — gentle-ai-verify — pending.
 
@@ -21,3 +21,4 @@ Status: in progress
 - L7 — Engram task-mirror save was attempted immediately after planning but failed with `unable to open database file (14)`. Local task document and visible todo remain current; do not retry automatically.
 - L8 — T1 refined after reviewing the screenshot and page structure: the primary split is personal integrations versus instance-wide settings. Keep sign-in, storage, and Entra controls together in the instance-settings view rather than adding nested tabs; this keeps the navigation shallow and preserves the existing settings cards.
 - L9 — T1 outcome: added role-aware My integrations / Instance settings tabs; superusers default to instance settings, non-superusers retain account integrations only, and Graph deployment readiness now lives with instance settings. `npm run build` passed (job-8, exit 0); `git diff --check` passed. Targeted ESLint timed out at 30 seconds and was not retried; the frontend package has no test script, and no browser interaction test was available. Risk: none; only the route's presentation and grouping changed, with handlers and authorization gates preserved.
+- L10 — T1 work-unit commit: `b591296` (`feat(integrations): separate account and instance settings`). Committed-range assessment from `origin/main`: medium tier, under budget, no native review due; no high-risk item was escalated.
