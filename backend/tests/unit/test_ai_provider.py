@@ -360,6 +360,126 @@ class _FakeOpenAIClient:
         self.chat = SimpleNamespace(completions=_FakeCompletions())
 
 
+def test_build_openai_client_uses_configured_actsis_ca_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ca_bundle = "/etc/ssl/certs/actsis-root-ca.crt"
+    ssl_context_args: list[dict] = []
+    ssl_contexts: list[FakeSSLContext] = []
+    http_client_args: list[dict] = []
+    http_clients: list[FakeHTTPClient] = []
+    factory_args: list[dict] = []
+
+    class FakeSSLContext:
+        def load_verify_locations(self, **kwargs):
+            ssl_context_args.append(kwargs)
+
+    class FakeHTTPClient:
+        def __init__(self, **kwargs):
+            http_client_args.append(kwargs)
+            http_clients.append(self)
+
+    class FakeOpenAIFactory:
+        def __init__(self, **kwargs):
+            factory_args.append(kwargs)
+
+    def create_default_context():
+        context = FakeSSLContext()
+        ssl_contexts.append(context)
+        return context
+
+    monkeypatch.setattr(ai_provider.settings, "ACTSIS_CA_BUNDLE", ca_bundle)
+    monkeypatch.setattr(ai_provider.ssl, "create_default_context", create_default_context)
+    monkeypatch.setattr(ai_provider.httpx, "Client", FakeHTTPClient)
+
+    ai_provider.build_openai_client(
+        base_url="https://ai.example.test/v1",
+        api_key="test-key",
+        client_factory=FakeOpenAIFactory,
+    )
+
+    assert ssl_context_args == [{"cafile": ca_bundle}]
+    assert http_client_args == [{
+        "verify": ssl_contexts[0],
+        "timeout": ai_provider.PROVIDER_TIMEOUT_SECONDS,
+    }]
+    assert factory_args == [{
+        "base_url": "https://ai.example.test/v1",
+        "api_key": "test-key",
+        "timeout": ai_provider.PROVIDER_TIMEOUT_SECONDS,
+        "max_retries": ai_provider.MAX_PROVIDER_RETRIES,
+        "http_client": http_clients[0],
+    }]
+
+
+def test_build_openai_client_keeps_default_tls_when_ca_bundle_file_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    factory_args: list[dict] = []
+
+    class FakeSSLContext:
+        def load_verify_locations(self, **kwargs):
+            raise FileNotFoundError(kwargs["cafile"])
+
+    class FakeOpenAIFactory:
+        def __init__(self, **kwargs):
+            factory_args.append(kwargs)
+
+    monkeypatch.setattr(ai_provider.settings, "ACTSIS_CA_BUNDLE", "/missing/actsis-root-ca.crt")
+    monkeypatch.setattr(ai_provider.ssl, "create_default_context", FakeSSLContext)
+    monkeypatch.setattr(
+        ai_provider.httpx,
+        "Client",
+        lambda **kwargs: pytest.fail("must not create a custom client without the CA"),
+    )
+
+    ai_provider.build_openai_client(
+        base_url="https://ai.example.test/v1",
+        api_key="test-key",
+        client_factory=FakeOpenAIFactory,
+    )
+
+    assert factory_args == [{
+        "base_url": "https://ai.example.test/v1",
+        "api_key": "test-key",
+        "timeout": ai_provider.PROVIDER_TIMEOUT_SECONDS,
+        "max_retries": ai_provider.MAX_PROVIDER_RETRIES,
+    }]
+    assert "ACTSIS_CA_BUNDLE" in caplog.text
+    assert "default TLS certificate verification enabled" in caplog.text
+
+
+def test_build_openai_client_keeps_default_tls_when_no_ca_bundle_is_configured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    factory_args: list[dict] = []
+
+    class FakeOpenAIFactory:
+        def __init__(self, **kwargs):
+            factory_args.append(kwargs)
+
+    monkeypatch.setattr(ai_provider.settings, "ACTSIS_CA_BUNDLE", "")
+    monkeypatch.setattr(
+        ai_provider.ssl,
+        "create_default_context",
+        lambda: pytest.fail("unexpected custom SSL context without a CA bundle"),
+    )
+
+    ai_provider.build_openai_client(
+        base_url="https://api.openai.com/v1",
+        api_key="test-key",
+        client_factory=FakeOpenAIFactory,
+    )
+
+    assert factory_args == [{
+        "base_url": "https://api.openai.com/v1",
+        "api_key": "test-key",
+        "timeout": ai_provider.PROVIDER_TIMEOUT_SECONDS,
+        "max_retries": ai_provider.MAX_PROVIDER_RETRIES,
+    }]
+
+
 def test_disabled_or_unselected_provider_uses_the_application_default() -> None:
     fallback = _FakeOpenAIClient()
     original = ai_provider.ai_provider_configuration_service.get_for_user

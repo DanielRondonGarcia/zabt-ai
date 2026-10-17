@@ -2,7 +2,9 @@
 # Copyright (C) 2025-2026 Afeef Janjua
 """Provider-neutral completion clients for summaries and AI Chat."""
 
+import logging
 import re
+import ssl
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol
@@ -103,12 +105,29 @@ def build_openai_client(
 ) -> Any:
     """Build an application OpenAI-compatible client with bounded defaults."""
     factory = client_factory if client_factory is not None else OpenAI
-    return factory(
-        base_url=base_url,
-        api_key=api_key,
-        timeout=PROVIDER_TIMEOUT_SECONDS,
-        max_retries=MAX_PROVIDER_RETRIES,
-    )
+    client_kwargs: dict[str, Any] = {
+        "base_url": base_url,
+        "api_key": api_key,
+        "timeout": PROVIDER_TIMEOUT_SECONDS,
+        "max_retries": MAX_PROVIDER_RETRIES,
+    }
+    ca_bundle = str(settings.ACTSIS_CA_BUNDLE or "").strip()
+    if ca_bundle:
+        ssl_context = ssl.create_default_context()
+        try:
+            ssl_context.load_verify_locations(cafile=ca_bundle)
+        except OSError as exc:
+            logging.getLogger(__name__).warning(
+                "Could not load ACTSIS_CA_BUNDLE; keeping default TLS certificate "
+                "verification enabled (%s)",
+                type(exc).__name__,
+            )
+        else:
+            client_kwargs["http_client"] = httpx.Client(
+                verify=ssl_context,
+                timeout=PROVIDER_TIMEOUT_SECONDS,
+            )
+    return factory(**client_kwargs)
 
 
 @dataclass(frozen=True)
