@@ -36,6 +36,16 @@ def _transcription_config(storage_key: str, transcription_type: str = "general")
         language=None,
         allowed_languages=None,
         transcription_type=SimpleNamespace(value=transcription_type),
+        storage_provider=None,
+    )
+
+
+def _mock_storage_module(storage: MagicMock) -> SimpleNamespace:
+    return SimpleNamespace(
+        storage=storage,
+        get_storage_for_provider=MagicMock(
+            side_effect=AssertionError("legacy GPU config should use global storage")
+        ),
     )
 
 
@@ -90,7 +100,7 @@ def test_local_backend_uses_internal_presigned_download_url():
 
     with patch.dict(
         sys.modules,
-        {"app.services.storage": SimpleNamespace(storage=storage)},
+        {"app.services.storage": _mock_storage_module(storage)},
     ):
         client.process_audio(
             "/tmp/audio.mp4",
@@ -125,7 +135,7 @@ def test_runpod_backend_uses_public_presigned_download_url():
 
     with patch.dict(
         sys.modules,
-        {"app.services.storage": SimpleNamespace(storage=storage)},
+        {"app.services.storage": _mock_storage_module(storage)},
     ):
         client.process_audio(
             "/tmp/audio.mp4",
@@ -158,7 +168,7 @@ def test_runpod_medical_request_preserves_mediasr_wire_type():
 
     with patch.dict(
         sys.modules,
-        {"app.services.storage": SimpleNamespace(storage=storage)},
+        {"app.services.storage": _mock_storage_module(storage)},
     ):
         client.process_audio(
             "/tmp/audio.wav",
@@ -199,7 +209,7 @@ def test_local_long_job_times_out_with_local_setting_and_preserves_polling():
     with (
         patch.dict(
             sys.modules,
-            {"app.services.storage": SimpleNamespace(storage=storage)},
+            {"app.services.storage": _mock_storage_module(storage)},
         ),
         patch.object(
             gpu_client_module,
@@ -245,7 +255,7 @@ def test_long_running_polling_refreshes_the_processing_heartbeat():
     with (
         patch.dict(
             sys.modules,
-            {"app.services.storage": SimpleNamespace(storage=storage)},
+            {"app.services.storage": _mock_storage_module(storage)},
         ),
         patch.object(
             gpu_client_module,

@@ -6,6 +6,15 @@ from unittest.mock import MagicMock, patch
 from app.services.transcription.types import TranscriptionConfig
 
 
+def _mock_storage_module(storage):
+    return SimpleNamespace(
+        storage=storage,
+        get_storage_for_provider=MagicMock(
+            side_effect=AssertionError("legacy GPU config should use global storage")
+        ),
+    )
+
+
 def test_job_input_includes_language_and_allowed_languages():
     from app.services.transcription.gpu_client import GpuTranscriptionClient
     from app.models import TranscriptionBackend
@@ -33,7 +42,7 @@ def test_job_input_includes_language_and_allowed_languages():
     storage = MagicMock()
     with patch.dict(
         sys.modules,
-        {"app.services.storage": SimpleNamespace(storage=storage)},
+        {"app.services.storage": _mock_storage_module(storage)},
     ):
         storage.get_public_presigned_download_url.return_value = "https://x"
         cfg = TranscriptionConfig(
