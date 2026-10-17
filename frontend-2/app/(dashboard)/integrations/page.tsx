@@ -40,6 +40,7 @@ import { CalendarEventList } from "@/app/components/calendar-event-list";
 import { Badge } from "@/app/components/ui/badge";
 import { Button } from "@/app/components/ui/button";
 import { Input } from "@/app/components/ui/input";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/app/components/ui/tabs";
 
 const SUPPORTED_PROVIDERS = ["microsoft"];
 const PASSWORDLESS_UNLINKED_REMEDIATION =
@@ -263,11 +264,25 @@ export default function IntegrationsPage() {
       <div className="mb-8">
         <h1 className="text-2xl font-bold text-foreground">Integrations</h1>
         <p className="mt-1 text-sm text-muted-foreground">
-          Configure instance sign-in and connect delegated services for your account.
+          {canManage
+            ? "Manage instance-wide sign-in and storage, or connect services to your account."
+            : "Connect delegated services to your account."}
         </p>
       </div>
 
-      {canManage && modeConfiguration && (
+      <Tabs
+        key={canManage ? "system" : "account"}
+        defaultValue={canManage ? "instance" : "connections"}
+        className="w-full"
+      >
+        <TabsList className="mb-6 w-full justify-start" aria-label="Integrations sections">
+          <TabsTrigger value="connections">My integrations</TabsTrigger>
+          {canManage && <TabsTrigger value="instance">Instance settings</TabsTrigger>}
+        </TabsList>
+
+        {canManage && (
+          <TabsContent value="instance">
+            {modeConfiguration && (
         <section className="mb-10 rounded-lg border border-border bg-muted/30 p-5">
           <h2 className="text-lg font-semibold text-foreground">Authentication method</h2>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -357,11 +372,10 @@ export default function IntegrationsPage() {
             )}
           </div>
         </section>
-      )}
+            )}
 
-      {canManage && <StorageConfigurationSettings />}
+            <StorageConfigurationSettings />
 
-      {canManage && (
       <section className="mb-10 rounded-lg border border-border bg-muted/30 p-5">
         <div className="flex items-start justify-between gap-4">
           <div>
@@ -556,8 +570,26 @@ export default function IntegrationsPage() {
           </>
         )}
       </section>
-      )}
+            <div className="rounded-lg border border-border bg-muted/30 px-3 py-3 text-sm text-muted-foreground">
+              <p>
+                Graph OAuth readiness: {microsoftStatus?.graph_configured ? "Configured" : "Not configured"}
+              </p>
+              <p>
+                Token storage: {microsoftStatus?.token_storage_configured ? "Configured" : "Not configured"}
+              </p>
+              <p className="mt-2">
+                Graph uses deployment-managed <code className="font-mono text-foreground">MICROSOFT_CLIENT_ID</code>,{" "}
+                <code className="font-mono text-foreground">MICROSOFT_CLIENT_SECRET</code>,{" "}
+                <code className="font-mono text-foreground">MICROSOFT_TENANT_ID</code>,{" "}
+                <code className="font-mono text-foreground">MICROSOFT_REDIRECT_URI</code>, and{" "}
+                <code className="font-mono text-foreground">TOKEN_ENCRYPTION_KEY</code>. OIDC above never needs a client
+                secret, and these Graph settings do not control OIDC sign-in.
+              </p>
+            </div>
+          </TabsContent>
+        )}
 
+        <TabsContent value="connections">
       {!configurationLoading && !canManage && oidcConfigured && authenticationMode === "local" && (
         <section className="mb-10 rounded-lg border border-border bg-muted/30 p-5">
           <h2 className="text-lg font-semibold text-foreground">Connect your Microsoft account</h2>
@@ -602,24 +634,6 @@ export default function IntegrationsPage() {
         <p className="mb-4 text-sm text-muted-foreground">
           Connect delegated Microsoft Graph separately to sync Calendar events and send email from Zabt.
         </p>
-        {canManage && (
-          <div className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-3 text-sm text-muted-foreground">
-            <p>
-              Graph OAuth readiness: {microsoftStatus?.graph_configured ? "Configured" : "Not configured"}
-            </p>
-            <p>
-              Token storage: {microsoftStatus?.token_storage_configured ? "Configured" : "Not configured"}
-            </p>
-            <p className="mt-2">
-              Graph uses deployment-managed <code className="font-mono text-foreground">MICROSOFT_CLIENT_ID</code>,{" "}
-              <code className="font-mono text-foreground">MICROSOFT_CLIENT_SECRET</code>,{" "}
-              <code className="font-mono text-foreground">MICROSOFT_TENANT_ID</code>,{" "}
-              <code className="font-mono text-foreground">MICROSOFT_REDIRECT_URI</code>, and{" "}
-              <code className="font-mono text-foreground">TOKEN_ENCRYPTION_KEY</code>. OIDC above never needs a client
-              secret, and these Graph settings do not control OIDC sign-in.
-            </p>
-          </div>
-        )}
         {microsoftGraphErrorMessage && (
           <p
             className="mb-4 rounded-lg border border-border bg-muted/30 px-3 py-2 text-sm text-foreground"
@@ -655,6 +669,8 @@ export default function IntegrationsPage() {
           </div>
         )}
       </section>
+        </TabsContent>
+      </Tabs>
     </div>
   );
 }
