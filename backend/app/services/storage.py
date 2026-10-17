@@ -444,6 +444,44 @@ class S3Storage:
                     })
         return pending
 
+    def list_objects_page(
+        self,
+        *,
+        prefix: str = "",
+        continuation_token: str | None = None,
+        max_keys: int = 50,
+    ) -> dict[str, Any]:
+        """List one read-only page of objects and virtual folders in this bucket."""
+        params: dict[str, Any] = {
+            "Bucket": self.bucket,
+            "Prefix": prefix,
+            "Delimiter": "/",
+            "MaxKeys": max_keys,
+        }
+        if continuation_token:
+            params["ContinuationToken"] = continuation_token
+
+        response = self.s3_client.list_objects_v2(**params)
+        return {
+            "objects": [
+                {
+                    "key": item["Key"],
+                    "size": item.get("Size", 0),
+                    "last_modified": item.get("LastModified"),
+                }
+                for item in response.get("Contents", []) or []
+            ],
+            "prefixes": [
+                item["Prefix"]
+                for item in response.get("CommonPrefixes", []) or []
+            ],
+            "next_continuation_token": (
+                response.get("NextContinuationToken")
+                if response.get("IsTruncated")
+                else None
+            ),
+        }
+
 
 def create_storage() -> StorageProvider:
     """Factory: returns MinioStorage or S3Storage based on STORAGE_PROVIDER setting."""

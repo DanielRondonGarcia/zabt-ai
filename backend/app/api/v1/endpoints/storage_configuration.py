@@ -2,7 +2,12 @@
 # Copyright (C) 2025-2026 Afeef Janjua
 """System-superuser API for global object-storage settings."""
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from datetime import datetime
+from typing import cast
+
+from botocore.exceptions import BotoCoreError, ClientError
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel
 from sqlmodel import Session
 
 from app.api.deps import get_current_active_user, get_db
@@ -12,7 +17,9 @@ from app.models.storage_configuration import (
     StorageConfiguration,
     StorageConfigurationRead,
     StorageConfigurationUpdate,
+    StorageProvider,
 )
+from app.services.storage import S3Storage, get_storage_for_provider
 from app.services.storage_configuration import (
     StorageConfigurationSecretStorageError,
     StorageConfigurationValidationError,
@@ -20,6 +27,19 @@ from app.services.storage_configuration import (
 )
 
 router = APIRouter()
+S3_EXPLORER_PAGE_SIZE = 50
+
+
+class S3ObjectEntry(BaseModel):
+    key: str
+    size: int
+    last_modified: datetime | None = None
+
+
+class S3ObjectPage(BaseModel):
+    objects: list[S3ObjectEntry]
+    prefixes: list[str]
+    next_continuation_token: str | None = None
 
 
 def _require_system_superuser(current_user: User) -> None:
@@ -55,6 +75,45 @@ def read_storage_configuration(
     _require_system_superuser(current_user)
     configuration = storage_configuration_service.get(db)
     return _public_configuration(configuration)
+
+
+@router.get("/objects", response_model=S3ObjectPage)
+def list_s3_objects(
+    response: Response,
+    prefix: str = Query(default="", max_length=1024),
+    continuation_token: str | None = Query(default=None, max_length=4096),
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+) -> S3ObjectPage:
+    response.headers["Cache-Control"] = "no-store"
+    _require_system_superuser(current_user)
+
+    try:
+        storage = cast(
+            S3Storage,
+            get_storage_for_provider(StorageProvider.AWS_S3.value, session=db),
+        )
+        page = storage.list_objects_page(
+            prefix=prefix,
+            continuation_token=continuation_token,
+            max_keys=S3_EXPLORER_PAGE_SIZE,
+        )
+    except (BotoCoreError, ClientError):
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Configured S3 storage could not be listed.",
+        ) from None
+    except (
+        StorageConfigurationSecretStorageError,
+        StorageConfigurationValidationError,
+        RuntimeError,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Configured S3 storage is unavailable.",
+        ) from None
+
+    return S3ObjectPage.model_validate(page)
 
 
 @router.put("/configuration", response_model=StorageConfigurationRead)

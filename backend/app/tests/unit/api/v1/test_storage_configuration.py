@@ -3,8 +3,10 @@
 """Public API checks for administrator-managed storage configuration."""
 
 from collections.abc import Generator
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
+from botocore.exceptions import ClientError
 import pytest
 from cryptography.fernet import Fernet
 from fastapi import FastAPI
@@ -190,3 +192,152 @@ def test_invalid_s3_endpoint_is_rejected_without_leaking_or_changing_configurati
     unchanged = client.get("/api/v1/storage/configuration")
     assert unchanged.status_code == 200
     assert unchanged.json() == baseline.json()
+
+
+def test_s3_object_listing_is_superuser_only_and_never_resolves_storage_for_regular_user(
+    storage_client, monkeypatch: pytest.MonkeyPatch
+):
+    client, user = storage_client
+    from app.api.v1.endpoints import storage_configuration as endpoint
+
+    called = False
+
+    def fail_if_storage_is_resolved(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("storage must not be resolved for a non-superuser")
+
+    monkeypatch.setattr(
+        endpoint,
+        "get_storage_for_provider",
+        fail_if_storage_is_resolved,
+        raising=False,
+    )
+
+    response = client.get("/api/v1/storage/objects")
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "System superuser access is required"}
+    assert called is False
+
+
+def test_superuser_can_read_only_list_the_configured_s3_bucket(storage_client, monkeypatch):
+    client, user = storage_client
+    user.is_superuser = True
+    saved = client.put(
+        "/api/v1/storage/configuration",
+        headers={"Origin": "http://localhost:3000"},
+        json={
+            "provider": "aws_s3",
+            "aws_region": "us-ashburn-1",
+            "s3_endpoint_url": "https://namespace.compat.objectstorage.us-ashburn-1.oraclecloud.com",
+            "aws_bucket": "admin-configured-bucket",
+            "aws_access_key_id": "ADMINACCESS",
+            "aws_secret_access_key": "admin-secret",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    timestamp = datetime(2025, 2, 3, 4, 5, tzinfo=timezone.utc)
+    calls = []
+    fake_storage = SimpleNamespace(
+        list_objects_page=lambda **kwargs: calls.append(kwargs)
+        or {
+            "objects": [
+                {
+                    "key": "users/7/test.wav",
+                    "size": 123,
+                    "last_modified": timestamp,
+                }
+            ],
+            "prefixes": ["users/7/meetings/"],
+            "next_continuation_token": "next-cursor",
+        }
+    )
+
+    from app.api.v1.endpoints import storage_configuration as endpoint
+
+    resolved = []
+
+    def resolve_storage(provider, session):
+        resolved.append((provider, session))
+        return fake_storage
+
+    monkeypatch.setattr(endpoint, "get_storage_for_provider", resolve_storage, raising=False)
+
+    response = client.get(
+        "/api/v1/storage/objects",
+        params={
+            "prefix": "users/7/",
+            "continuation_token": "incoming-cursor",
+            "bucket": "attacker-selected-bucket",
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["objects"] == [
+        {
+            "key": "users/7/test.wav",
+            "size": 123,
+            "last_modified": "2025-02-03T04:05:00Z",
+        }
+    ]
+    assert result["prefixes"] == ["users/7/meetings/"]
+    assert result["next_continuation_token"] == "next-cursor"
+    assert calls == [
+        {
+            "prefix": "users/7/",
+            "continuation_token": "incoming-cursor",
+            "max_keys": 50,
+        }
+    ]
+    assert len(resolved) == 1 and resolved[0][0] == "aws_s3" and resolved[0][1] is not None
+    assert "admin-secret" not in response.text
+    assert "namespace.compat.objectstorage" not in response.text
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_s3_object_listing_hides_upstream_error_details(storage_client, monkeypatch):
+    client, user = storage_client
+    user.is_superuser = True
+    saved = client.put(
+        "/api/v1/storage/configuration",
+        headers={"Origin": "http://localhost:3000"},
+        json={
+            "provider": "aws_s3",
+            "aws_region": "us-ashburn-1",
+            "aws_bucket": "admin-configured-bucket",
+            "aws_access_key_id": "ADMINACCESS",
+            "aws_secret_access_key": "admin-secret",
+        },
+    )
+    assert saved.status_code == 200, saved.text
+
+    def fail_with_sensitive_error(**_kwargs):
+        raise ClientError(
+            {
+                "Error": {
+                    "Code": "AccessDenied",
+                    "Message": "private-endpoint and admin-secret must not be returned",
+                }
+            },
+            "ListObjectsV2",
+        )
+
+    fake_storage = SimpleNamespace(list_objects_page=fail_with_sensitive_error)
+    from app.api.v1.endpoints import storage_configuration as endpoint
+
+    monkeypatch.setattr(
+        endpoint,
+        "get_storage_for_provider",
+        lambda *_args, **_kwargs: fake_storage,
+        raising=False,
+    )
+
+    response = client.get("/api/v1/storage/objects")
+
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Configured S3 storage could not be listed."}
+    assert "private-endpoint" not in response.text
+    assert "admin-secret" not in response.text

@@ -28,6 +28,7 @@ class FakeS3Client:
         self.head_error = head_error
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.paginators: dict[str, FakePaginator] = {}
+        self.list_response: dict[str, Any] = {}
         self.presign_count = 0
 
     def head_bucket(self, **kwargs: Any) -> None:
@@ -53,6 +54,10 @@ class FakeS3Client:
 
     def delete_objects(self, **kwargs: Any) -> None:
         self.calls.append(("delete_objects", kwargs))
+
+    def list_objects_v2(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(("list_objects_v2", kwargs))
+        return self.list_response
 
     def get_paginator(self, name: str) -> FakePaginator:
         self.calls.append(("get_paginator", {"name": name}))
@@ -374,6 +379,52 @@ def test_runtime_storage_factory_uses_custom_s3_endpoint_for_internal_and_public
     )
     assert upload_url.startswith("url-1:put_object:")
     assert module._created_boto3_clients[-1]["args"] == ("s3",)
+
+
+def test_s3_lists_one_read_only_page_from_the_configured_bucket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_API_KEY", "test-embedding-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    _module, storage, internal, _public = construct_s3(monkeypatch)
+    last_modified = datetime(2025, 2, 3, 4, 5, tzinfo=timezone.utc)
+    internal.list_response = {
+        "Contents": [{"Key": "users/7/test.wav", "Size": 123, "LastModified": last_modified}],
+        "CommonPrefixes": [{"Prefix": "users/7/meetings/"}],
+        "IsTruncated": True,
+        "NextContinuationToken": "next-cursor",
+    }
+
+    page = storage.list_objects_page(
+        prefix="users/7/",
+        continuation_token="incoming-cursor",
+        max_keys=50,
+    )
+
+    assert page == {
+        "objects": [
+            {"key": "users/7/test.wav", "size": 123, "last_modified": last_modified}
+        ],
+        "prefixes": ["users/7/meetings/"],
+        "next_continuation_token": "next-cursor",
+    }
+    assert internal.calls == [
+        ("head_bucket", {"Bucket": "s3-bucket"}),
+        (
+            "list_objects_v2",
+            {
+                "Bucket": "s3-bucket",
+                "Prefix": "users/7/",
+                "Delimiter": "/",
+                "MaxKeys": 50,
+                "ContinuationToken": "incoming-cursor",
+            },
+        ),
+    ]
+    assert not any(
+        operation in {"put_object", "delete_object", "delete_objects", "get_object"}
+        for operation, _kwargs in internal.calls
+    )
 
 
 def test_s3_multipart_upload_keys_mark_aws_provider(
