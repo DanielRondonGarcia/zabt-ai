@@ -245,8 +245,12 @@ def test_get_visual_segments_returns_aligned_segments(
             ))
             session.commit()
 
-        with patch("app.services.storage.storage.get_presigned_download_url",
-                   side_effect=lambda key, expiration: f"https://signed/{key}"):
+        with patch(
+            "app.api.v1.endpoints.meetings.get_storage_for_provider"
+        ) as resolve_storage:
+            resolve_storage.return_value.get_presigned_download_url.side_effect = (
+                lambda key, expiration: f"https://signed/{key}"
+            )
             r = client.get(
                 f"/api/v1/meetings/{meeting_id}/visual-segments",
                 headers=normal_user_token_headers,

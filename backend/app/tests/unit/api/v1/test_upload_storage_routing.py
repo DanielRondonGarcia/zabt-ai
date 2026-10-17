@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-"""Isolated API tests for binding uploads to their storage provider."""
+"""Isolated API tests for routing meeting storage by provider."""
 
 from collections.abc import Iterator
 from typing import Any
@@ -54,6 +54,36 @@ class FakeStorage:
                 {"object_key": object_key, "upload_id": upload_id, "parts": parts},
             )
         )
+
+    def get_presigned_download_url(
+        self, object_key: str, expiration: int | None = None
+    ) -> str:
+        self.calls.append(
+            ("download-url", {"object_key": object_key, "expiration": expiration})
+        )
+        return f"https://{self.provider_name}/download/{object_key}"
+
+    def get_public_presigned_download_url(
+        self, object_key: str, expiration: int | None = None
+    ) -> str:
+        self.calls.append(
+            ("public-download-url", {"object_key": object_key, "expiration": expiration})
+        )
+        return f"https://{self.provider_name}/public/{object_key}"
+
+    def get_fresh_presigned_download_url(
+        self, object_key: str, expiration: int | None = None
+    ) -> str:
+        self.calls.append(
+            ("fresh-download-url", {"object_key": object_key, "expiration": expiration})
+        )
+        return f"https://{self.provider_name}/fresh/{object_key}"
+
+    def delete_file(self, object_key: str) -> None:
+        self.calls.append(("delete-file", {"object_key": object_key}))
+
+    def delete_prefix(self, prefix: str) -> None:
+        self.calls.append(("delete-prefix", {"prefix": prefix}))
 
 
 @pytest.fixture
@@ -129,7 +159,6 @@ def test_direct_upload_and_meeting_creation_keep_the_server_selected_provider(
         "users/101/meetings/storage-v1/aws_s3/aws-audio.mp3",
         "users/101/meetings/storage-v1/aws_s3/aws-chunks.m4a",
     )
-    monkeypatch.setattr(meetings, "storage", minio)
     monkeypatch.setattr(meetings, "get_current_storage", lambda _db: aws, raising=False)
 
     saved_providers: list[str] = []
@@ -176,6 +205,7 @@ def test_direct_upload_and_meeting_creation_keep_the_server_selected_provider(
     )
     assert legacy.status_code == 200, legacy.text
     assert saved_providers == ["aws_s3", "minio"]
+    assert minio.calls == []
 
 
 def test_multipart_upload_routes_each_step_by_the_server_generated_key_marker(
@@ -419,3 +449,189 @@ def test_meeting_service_persists_explicit_provider_and_defaults_to_minio(
 
     assert aws_meeting.storage_provider == "aws_s3"
     assert minio_meeting.storage_provider == "minio"
+
+
+def test_meeting_detail_audio_url_uses_meeting_storage_provider(
+    upload_client: TestClient,
+    project_modules,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meetings = project_modules["meetings"]
+    object_key = "users/101/meetings/storage-v1/aws_s3/audio.mp3"
+    meeting = project_modules["Meeting"](
+        id=202,
+        title="AWS meeting",
+        owner_id=101,
+        file_path=object_key,
+        storage_provider="aws_s3",
+        status="completed",
+    )
+    minio = FakeStorage("minio", "unused", "unused")
+    aws = FakeStorage("aws_s3", "unused", "unused")
+    resolved_providers: list[str] = []
+
+    def resolve_storage(provider: str, _db: Any = None) -> FakeStorage:
+        resolved_providers.append(provider)
+        return aws if provider == "aws_s3" else minio
+
+    monkeypatch.setattr(
+        meetings, "get_storage_for_provider", resolve_storage, raising=False
+    )
+    monkeypatch.setattr(meetings, "_get_meeting_for_access", lambda *_args: meeting)
+    monkeypatch.setattr(
+        meetings.intelligence_service, "get_highlights", lambda *_args: []
+    )
+    monkeypatch.setattr(
+        meetings.intelligence_service, "get_layout_hint", lambda *_args: None
+    )
+
+    response = upload_client.get("/api/v1/meetings/202")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["audio_url"] == f"https://s3/public/{object_key}"
+    assert resolved_providers == ["aws_s3"]
+    assert [name for name, _kwargs in aws.calls] == ["public-download-url"]
+    assert minio.calls == []
+
+
+def test_meeting_detail_preserves_signed_url_method_fallback(
+    upload_client: TestClient,
+    project_modules,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meetings = project_modules["meetings"]
+    object_key = "users/101/meetings/storage-v1/aws_s3/audio.mp3"
+    meeting = project_modules["Meeting"](
+        id=202,
+        title="AWS meeting",
+        owner_id=101,
+        file_path=object_key,
+        storage_provider="aws_s3",
+        status="completed",
+    )
+    fallback = FakeStorage("aws_s3", "unused", "unused")
+
+    def unavailable_public_url(*_args, **_kwargs):
+        fallback.calls.append(("public-download-error", {"object_key": object_key}))
+        raise RuntimeError("public endpoint unavailable")
+
+    monkeypatch.setattr(fallback, "get_public_presigned_download_url", unavailable_public_url)
+    monkeypatch.setattr(
+        meetings, "get_storage_for_provider", lambda _provider: fallback, raising=False
+    )
+    monkeypatch.setattr(meetings, "_get_meeting_for_access", lambda *_args: meeting)
+    monkeypatch.setattr(
+        meetings.intelligence_service, "get_highlights", lambda *_args: []
+    )
+    monkeypatch.setattr(
+        meetings.intelligence_service, "get_layout_hint", lambda *_args: None
+    )
+
+    response = upload_client.get("/api/v1/meetings/202")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["audio_url"] == f"https://s3/fresh/{object_key}"
+    assert [name for name, _kwargs in fallback.calls] == [
+        "public-download-error",
+        "fresh-download-url",
+    ]
+
+
+def test_visual_segment_screenshot_url_uses_meeting_storage_provider(
+    upload_client: TestClient,
+    project_modules,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.services.visual_segments import VisualSegmentService
+
+    meetings = project_modules["meetings"]
+    object_key = "users/101/meetings/202/visual/frame.jpg"
+    meeting = project_modules["Meeting"](
+        id=202,
+        title="AWS meeting",
+        owner_id=101,
+        storage_provider="aws_s3",
+        visual_breakdown_status="completed",
+    )
+    segment = SimpleNamespace(
+        id=1,
+        sequence=0,
+        start_time=0.0,
+        end_time=1.0,
+        screenshot_s3_key=object_key,
+        caption="Frame",
+        confidence=0.95,
+        transcript_lines=[],
+    )
+    minio = FakeStorage("minio", "unused", "unused")
+    aws = FakeStorage("aws_s3", "unused", "unused")
+    resolved_providers: list[str] = []
+
+    def resolve_storage(provider: str, _db: Any = None) -> FakeStorage:
+        resolved_providers.append(provider)
+        return aws if provider == "aws_s3" else minio
+
+    monkeypatch.setattr(
+        meetings, "get_storage_for_provider", resolve_storage, raising=False
+    )
+    monkeypatch.setattr(meetings, "_get_meeting_for_access", lambda *_args: meeting)
+    monkeypatch.setattr(
+        VisualSegmentService,
+        "get_with_transcript_alignment",
+        lambda *_args: [segment],
+    )
+
+    response = upload_client.get("/api/v1/meetings/202/visual-segments")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["visual_segments"][0]["screenshot_url"] == (
+        f"https://s3/download/{object_key}"
+    )
+    assert resolved_providers == ["aws_s3"]
+    assert [name for name, _kwargs in aws.calls] == ["download-url"]
+    assert minio.calls == []
+
+
+def test_meeting_deletion_uses_meeting_storage_provider_for_audio_and_visuals(
+    upload_client: TestClient,
+    project_modules,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    meetings = project_modules["meetings"]
+    object_key = "users/101/meetings/202/audio.mp3"
+    visual_prefix = "users/101/meetings/202/visual/"
+    meeting = project_modules["Meeting"](
+        id=202,
+        title="AWS meeting",
+        owner_id=101,
+        file_path=object_key,
+        storage_provider="aws_s3",
+        status="completed",
+    )
+    minio = FakeStorage("minio", "unused", "unused")
+    aws = FakeStorage("aws_s3", "unused", "unused")
+    resolved_providers: list[str] = []
+
+    def resolve_storage(provider: str, _db: Any = None) -> FakeStorage:
+        resolved_providers.append(provider)
+        return aws if provider == "aws_s3" else minio
+
+    monkeypatch.setattr(
+        meetings, "get_storage_for_provider", resolve_storage, raising=False
+    )
+    monkeypatch.setattr(
+        meetings.meeting_service, "get_meeting_for_owner", lambda *_args: meeting
+    )
+    monkeypatch.setattr(meetings.meeting_service, "delete_meeting", lambda *_args: True)
+
+    response = upload_client.delete("/api/v1/meetings/202")
+
+    assert response.status_code == 204, response.text
+    assert resolved_providers == ["aws_s3"]
+    assert aws.calls == [
+        ("delete-file", {"object_key": object_key}),
+        ("delete-prefix", {"prefix": visual_prefix}),
+    ]
+    assert minio.calls == []

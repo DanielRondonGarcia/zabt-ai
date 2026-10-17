@@ -29,7 +29,7 @@ from app.services.notifications import notify
 from app.services.pdf_export import pdf_export_service
 from app.services.storage import (
     get_current_storage,
-    storage,
+    get_storage_for_provider,
     storage_provider_from_object_key,
 )
 from app.services.email_share import email_share_service
@@ -68,9 +68,14 @@ def dispatch_transcription_job(meeting_id: int) -> None:
 
 
 def _signed_download_url(
-    object_key: str, *, public: bool = False, expiration: int | None = None
+    object_key: str,
+    *,
+    storage_provider: str,
+    public: bool = False,
+    expiration: int | None = None,
 ) -> str:
-    """Keep existing signed-URL behavior while tolerating provider fallbacks."""
+    """Keep existing signed-URL behavior while tolerating provider method fallbacks."""
+    provider_storage = get_storage_for_provider(storage_provider)
     methods = (
         ("get_public_presigned_download_url", "get_fresh_presigned_download_url", "get_presigned_download_url")
         if public
@@ -78,7 +83,7 @@ def _signed_download_url(
     )
     last_error: Exception | None = None
     for method_name in methods:
-        method = getattr(storage, method_name, None)
+        method = getattr(provider_storage, method_name, None)
         if method is None:
             continue
         try:
@@ -166,7 +171,11 @@ def _build_meeting_response(meeting: Meeting, user_id: int | None = None) -> Mee
     audio_url = None
     if meeting.file_path:
         try:
-            audio_url = _signed_download_url(meeting.file_path, public=True)
+            audio_url = _signed_download_url(
+                meeting.file_path,
+                storage_provider=meeting.storage_provider,
+                public=True,
+            )
         except Exception:
             # Preserve the response contract even when the public endpoint is
             # unavailable; the internal signed URL remains usable by callers
@@ -456,20 +465,30 @@ def delete_meeting(
             detail="Cannot delete a meeting while it is processing."
         )
 
-    # Attempt to delete the physical file first
-    if meeting.file_path:
+    # Resolve once so audio and derived visual artifacts use the meeting's provider.
+    try:
+        meeting_storage = get_storage_for_provider(meeting.storage_provider)
+    except Exception as e:
+        meeting_storage = None
+        print(
+            f"Warning: Failed to resolve storage provider {meeting.storage_provider}. "
+            f"Error: {e}"
+        )
+
+    # Attempt to delete the physical file first. Preserve the existing behavior of
+    # deleting the DB record even when the object store is unavailable.
+    if meeting_storage is not None and meeting.file_path:
         try:
-            storage.delete_file(meeting.file_path)
+            meeting_storage.delete_file(meeting.file_path)
         except Exception as e:
-            # We log it but proceed to delete the record to avoid infinite orphaned records
             print(f"Warning: Failed to delete file at {meeting.file_path}. Error: {e}")
 
     # Visual breakdown artifacts (keyframes + raw_output.json) live under a per-meeting
-    # S3 prefix. Wipe the entire prefix so we don't leave orphaned screenshots.
-    if meeting.owner_id is not None:
+    # prefix. Wipe the prefix in that same provider to avoid orphaned screenshots.
+    if meeting_storage is not None and meeting.owner_id is not None:
         visual_prefix = f"users/{meeting.owner_id}/meetings/{meeting_id}/visual/"
         try:
-            storage.delete_prefix(visual_prefix)
+            meeting_storage.delete_prefix(visual_prefix)
         except Exception as e:
             print(f"Warning: Failed to delete visual prefix {visual_prefix}. Error: {e}")
 
@@ -1104,7 +1123,11 @@ def get_visual_segments(
                 sequence=seg.sequence,
                 start_time=seg.start_time,
                 end_time=seg.end_time,
-                screenshot_url=_signed_download_url(seg.screenshot_s3_key, expiration=3600),
+                screenshot_url=_signed_download_url(
+                    seg.screenshot_s3_key,
+                    storage_provider=meeting.storage_provider,
+                    expiration=3600,
+                ),
                 caption=seg.caption,
                 confidence=seg.confidence,
                 transcript_lines=[
