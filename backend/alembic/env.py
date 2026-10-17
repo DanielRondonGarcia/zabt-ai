@@ -21,6 +21,7 @@ from app.models import (  # Import models to register them
     GroupMembership,
     Integration,
     MicrosoftOidcConfiguration,
+    StorageConfiguration,
     MCPAccessToken,
     MCPClientRegistration,
     MCPGrant,

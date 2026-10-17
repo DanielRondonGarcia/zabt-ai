@@ -126,6 +126,13 @@ from app.models.ai_provider import (
     CustomAIProvider,
 )
 
+from app.models.storage_configuration import (
+    StorageConfiguration,
+    StorageConfigurationRead,
+    StorageConfigurationUpdate,
+    StorageProvider,
+)
+
 __all__ = [
     # base
     "TranscriptionType",
@@ -218,4 +225,9 @@ __all__ = [
     # per-user AI provider
     "AIProviderConfiguration",
     "CustomAIProvider",
+    # global storage configuration
+    "StorageProvider",
+    "StorageConfiguration",
+    "StorageConfigurationUpdate",
+    "StorageConfigurationRead",
 ]

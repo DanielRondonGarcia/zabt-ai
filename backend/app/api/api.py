@@ -12,6 +12,7 @@ from app.api.v1.endpoints import (
     languages,
     meetings,
     styles,
+    storage_configuration,
     templates,
     transcriptions,
     uploads,
@@ -35,6 +36,7 @@ api_router.include_router(templates.router, prefix="/templates", tags=["template
 api_router.include_router(groups.router, prefix="/groups", tags=["groups"])
 api_router.include_router(ai_chat.router, prefix="/ai-chat", tags=["ai-chat"])
 api_router.include_router(integrations.router, prefix="/integrations", tags=["integrations"])
+api_router.include_router(storage_configuration.router, prefix="/storage", tags=["storage"])
 api_router.include_router(highlights.router, tags=["highlights"])
 api_router.include_router(devices.router, prefix="/devices", tags=["devices"])
 api_router.include_router(uploads.router, tags=["uploads"])
