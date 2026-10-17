@@ -335,6 +335,45 @@ def test_runtime_storage_factory_uses_admin_aws_settings_not_environment(
     assert module._created_boto3_clients[-2]["kwargs"]["aws_access_key_id"] == "ADMINACCESS"
     assert module._created_boto3_clients[-2]["kwargs"]["aws_secret_access_key"] == "admin-secret"
     assert module._created_boto3_clients[-2]["kwargs"]["region_name"] == "eu-west-1"
+    assert module._created_boto3_clients[-2]["kwargs"]["endpoint_url"] is None
+    assert module._created_boto3_clients[-1]["kwargs"]["endpoint_url"] is None
+    assert module._created_boto3_clients[-2]["kwargs"]["config"].s3 is None
+    assert module._created_boto3_clients[-1]["kwargs"]["config"].s3 is None
+
+
+def test_runtime_storage_factory_uses_custom_s3_endpoint_for_internal_and_public_clients(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.models.storage_configuration import StorageProvider as StorageKind
+    from app.services.storage_configuration import StorageRuntimeConfiguration
+
+    clients = [FakeS3Client() for _ in range(4)]
+    module = load_storage(monkeypatch, clients, STORAGE_PROVIDER="minio")
+    endpoint = "https://my-namespace.compat.objectstorage.us-ashburn-1.oraclecloud.com"
+    runtime = StorageRuntimeConfiguration(
+        provider=StorageKind.AWS_S3,
+        aws_region="us-ashburn-1",
+        aws_bucket="oci-recordings",
+        aws_access_key_id="OCIACCESS",
+        aws_secret_access_key="oci-secret",
+        s3_endpoint_url=endpoint,
+    )
+
+    storage = module.create_storage_from_runtime(runtime)
+    internal_kwargs = module._created_boto3_clients[-2]["kwargs"]
+    public_kwargs = module._created_boto3_clients[-1]["kwargs"]
+
+    assert internal_kwargs["endpoint_url"] == endpoint
+    assert public_kwargs["endpoint_url"] == endpoint
+    for client_kwargs in (internal_kwargs, public_kwargs):
+        assert client_kwargs["config"].signature_version == "s3v4"
+        assert client_kwargs["config"].s3 == {"addressing_style": "path"}
+
+    upload_url, _key = storage.generate_presigned_upload_url(
+        user_id=7, filename="recording.wav", content_type="audio/wav"
+    )
+    assert upload_url.startswith("url-1:put_object:")
+    assert module._created_boto3_clients[-1]["args"] == ("s3",)
 
 
 def test_s3_multipart_upload_keys_mark_aws_provider(

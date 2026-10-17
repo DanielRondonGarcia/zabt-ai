@@ -35,6 +35,7 @@ def _public_configuration(
 ) -> StorageConfigurationRead:
     return StorageConfigurationRead(
         provider=configuration.provider,
+        s3_endpoint_url=configuration.s3_endpoint_url,
         aws_region=configuration.aws_region,
         aws_bucket=configuration.aws_bucket,
         aws_access_key_id=configuration.aws_access_key_id,

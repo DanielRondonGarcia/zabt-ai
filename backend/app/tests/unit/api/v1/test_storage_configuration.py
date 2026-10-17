@@ -85,6 +85,7 @@ def test_superuser_can_configure_s3_without_secret_in_api_response(storage_clien
     client, user = storage_client
     user.is_superuser = True
     secret = "test-secret-value"
+    endpoint = "https://my-namespace.compat.objectstorage.us-ashburn-1.oraclecloud.com"
 
     saved = client.put(
         "/api/v1/storage/configuration",
@@ -92,6 +93,7 @@ def test_superuser_can_configure_s3_without_secret_in_api_response(storage_clien
         json={
             "provider": "aws_s3",
             "aws_region": "us-east-1",
+            "s3_endpoint_url": endpoint,
             "aws_bucket": "zabt-recordings",
             "aws_access_key_id": "AKIAEXAMPLE",
             "aws_secret_access_key": secret,
@@ -102,6 +104,7 @@ def test_superuser_can_configure_s3_without_secret_in_api_response(storage_clien
     assert saved.json() == {
         "provider": "aws_s3",
         "aws_region": "us-east-1",
+        "s3_endpoint_url": endpoint,
         "aws_bucket": "zabt-recordings",
         "aws_access_key_id": "AKIAEXAMPLE",
         "aws_secret_access_key_configured": True,
@@ -135,3 +138,55 @@ def test_incomplete_s3_configuration_is_rejected_without_switching_provider(stor
     assert unchanged.status_code == 200
     assert unchanged.json()["provider"] == "minio"
     assert unchanged.json()["aws_secret_access_key_configured"] is False
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "http://s3.example.com",
+        "https://secret-user:secret-password@s3.example.com",
+        "https://s3.example.com?token=secret-token",
+        "https://s3.example.com#fragment",
+    ],
+)
+def test_invalid_s3_endpoint_is_rejected_without_leaking_or_changing_configuration(
+    storage_client, endpoint: str
+):
+    client, user = storage_client
+    user.is_superuser = True
+    baseline = client.put(
+        "/api/v1/storage/configuration",
+        headers={"Origin": "http://localhost:3000"},
+        json={
+            "provider": "aws_s3",
+            "aws_region": "us-east-1",
+            "aws_bucket": "baseline-bucket",
+            "aws_access_key_id": "BASELINEKEY",
+            "aws_secret_access_key": "baseline-secret",
+        },
+    )
+    assert baseline.status_code == 200, baseline.text
+
+    rejected = client.put(
+        "/api/v1/storage/configuration",
+        headers={"Origin": "http://localhost:3000"},
+        json={
+            "provider": "aws_s3",
+            "aws_region": "us-east-1",
+            "s3_endpoint_url": endpoint,
+            "aws_bucket": "replacement-bucket",
+            "aws_access_key_id": "REPLACEMENTKEY",
+            "aws_secret_access_key": "replacement-secret",
+        },
+    )
+
+    assert rejected.status_code == 422
+    assert rejected.json() == {
+        "detail": "S3 endpoint URL must be an absolute HTTPS URL without credentials, query, or fragment."
+    }
+    assert "secret-password" not in rejected.text
+    assert "secret-token" not in rejected.text
+    assert "replacement-secret" not in rejected.text
+    unchanged = client.get("/api/v1/storage/configuration")
+    assert unchanged.status_code == 200
+    assert unchanged.json() == baseline.json()

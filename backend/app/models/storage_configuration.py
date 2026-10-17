@@ -36,6 +36,10 @@ class StorageConfiguration(SQLModel, table=True):
         default=StorageProvider.MINIO,
         sa_column=Column(String(length=32), nullable=False, server_default="minio"),
     )
+    s3_endpoint_url: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(length=2048), nullable=True),
+    )
     aws_region: Optional[str] = Field(
         default=None,
         sa_column=Column(String(length=64), nullable=True),
@@ -66,12 +70,13 @@ class StorageConfigurationUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: StorageProvider
+    s3_endpoint_url: Optional[str] = None
     aws_region: Optional[str] = Field(default=None, max_length=64)
     aws_bucket: Optional[str] = Field(default=None, max_length=255)
     aws_access_key_id: Optional[str] = Field(default=None, max_length=256)
     aws_secret_access_key: Optional[SecretStr] = None
 
-    @field_validator("aws_region", "aws_bucket", "aws_access_key_id")
+    @field_validator("aws_region", "aws_bucket", "aws_access_key_id", "s3_endpoint_url")
     @classmethod
     def trim_optional_values(cls, value: Optional[str]) -> Optional[str]:
         if value is None:
@@ -88,6 +93,7 @@ class StorageConfigurationUpdate(BaseModel):
 
 class StorageConfigurationRead(BaseModel):
     provider: StorageProvider
+    s3_endpoint_url: Optional[str] = None
     aws_region: Optional[str] = None
     aws_bucket: Optional[str] = None
     aws_access_key_id: Optional[str] = None

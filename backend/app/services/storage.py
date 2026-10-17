@@ -271,6 +271,7 @@ class S3Storage:
             access_key_id = settings.S3_ACCESS_KEY_ID
             secret_access_key = settings.S3_SECRET_ACCESS_KEY
             public_url = settings.S3_PUBLIC_URL or endpoint_url
+            use_path_style = False
         else:
             from app.models.storage_configuration import StorageProvider as StorageKind
 
@@ -280,12 +281,18 @@ class S3Storage:
             region = runtime_configuration.aws_region
             access_key_id = runtime_configuration.aws_access_key_id
             secret_access_key = runtime_configuration.aws_secret_access_key
-            endpoint_url = None
-            public_url = None
+            endpoint_url = runtime_configuration.s3_endpoint_url
+            public_url = endpoint_url
+            use_path_style = bool(endpoint_url)
             if not all((bucket, region, access_key_id, secret_access_key)):
                 raise RuntimeError("AWS S3 runtime configuration is incomplete.")
 
         self.bucket = bucket
+        client_config = (
+            Config(signature_version="s3v4", s3={"addressing_style": "path"})
+            if use_path_style
+            else Config(signature_version="s3v4")
+        )
 
         # Internal client — server-to-server operations
         self.s3_client = boto3.client(
@@ -294,7 +301,7 @@ class S3Storage:
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
             region_name=region,
-            config=Config(signature_version="s3v4"),
+            config=client_config,
         )
 
         # Public client — presigned URLs for the browser
@@ -304,7 +311,7 @@ class S3Storage:
             aws_access_key_id=access_key_id,
             aws_secret_access_key=secret_access_key,
             region_name=region,
-            config=Config(signature_version="s3v4"),
+            config=client_config,
         )
 
         try:
@@ -484,7 +491,8 @@ def create_storage_from_runtime(runtime_configuration: Any) -> StorageProvider:
         raise RuntimeError("AWS S3 runtime configuration is incomplete.")
 
     secret_digest = hashlib.sha256(secret_access_key.encode("utf-8")).hexdigest()
-    cache_key = ("aws_s3", bucket, region, access_key_id, secret_digest)
+    endpoint_url = runtime_configuration.s3_endpoint_url
+    cache_key = ("aws_s3", bucket, region, access_key_id, secret_digest, endpoint_url)
     global _runtime_s3_cache_key, _runtime_s3_storage_cache
     with _storage_cache_lock:
         if cache_key != _runtime_s3_cache_key:

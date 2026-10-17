@@ -136,16 +136,24 @@ variable name.
 
 ## Object storage
 
-New meeting uploads use the provider selected by a system superuser under
-**Integrations → Global storage**. Choose MinIO or AWS S3. For AWS, provide the
-region, bucket, access key ID, and secret access key. Existing meetings continue
-using their recorded provider; changing the selection does not copy or move
-existing files.
+New meeting uploads use the storage provider selected by a system superuser under
+**Integrations → Instance settings → Storage**. Choose MinIO or S3-compatible storage.
+For AWS S3, leave **S3 endpoint URL** blank. For Oracle OCI or another compatible
+service, enter its full HTTPS endpoint URL, then provide the region, bucket, access
+key ID, and secret access key. Custom endpoints use SigV4 and path-style addressing;
+the bucket is configured separately. Existing meetings continue using their recorded
+provider; changing the selection does not copy or move existing files.
 
-The AWS secret is encrypted at rest and never returned to the browser. Configure
-a stable `TOKEN_ENCRYPTION_KEY` for both the API and worker before saving AWS
-credentials; see the Integrations & notifications section below for key setup.
-Leave the secret field blank to keep the current saved secret.
+For Oracle OCI, use the S3 Compatibility API endpoint, for example
+`https://<namespace>.compat.objectstorage.<region>.oraclecloud.com`, and credentials
+from an OCI Customer Secret Key. See [Oracle's S3 Compatibility API documentation](https://docs.oracle.com/en-us/iaas/Content/Object/Tasks/s3compatibleapi.htm).
+Configure bucket CORS to allow the Zabt web origin for browser uploads.
+
+The S3 secret is encrypted at rest and never returned to the browser. Configure a
+stable `TOKEN_ENCRYPTION_KEY` for both the API and worker before saving S3 credentials;
+see the Integrations & notifications section below for key setup. Leave the secret
+field blank to keep the current saved secret. Custom endpoints must use HTTPS and must
+not contain embedded credentials, a query string, or a fragment.
 
 The environment variables below continue to configure environment-backed
 storage clients and the vision worker; they do not override the provider stored

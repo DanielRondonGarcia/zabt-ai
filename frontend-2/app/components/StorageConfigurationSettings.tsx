@@ -29,6 +29,7 @@ type Feedback = {
 export function StorageConfigurationSettings() {
   const [configuration, setConfiguration] = useState<StorageConfigurationRead | null>(null);
   const [provider, setProvider] = useState<StorageProvider>("minio");
+  const [endpointUrl, setEndpointUrl] = useState("");
   const [region, setRegion] = useState("");
   const [bucket, setBucket] = useState("");
   const [accessKeyId, setAccessKeyId] = useState("");
@@ -46,6 +47,7 @@ export function StorageConfigurationSettings() {
       const saved = await getStorageConfiguration();
       setConfiguration(saved);
       setProvider(saved.provider);
+      setEndpointUrl(saved.s3_endpoint_url ?? "");
       setRegion(saved.aws_region ?? "");
       setBucket(saved.aws_bucket ?? "");
       setAccessKeyId(saved.aws_access_key_id ?? "");
@@ -79,13 +81,14 @@ export function StorageConfigurationSettings() {
       setFeedback({
         kind: "error",
         message:
-          "Enter the AWS region, bucket, access key ID, and secret access key before saving AWS S3 settings.",
+          "Enter the region, bucket, access key ID, and secret access key before saving S3-compatible storage settings.",
       });
       return;
     }
 
     const payload: StorageConfigurationUpdate = {
       provider,
+      s3_endpoint_url: endpointUrl.trim() || null,
       aws_region: region.trim() || null,
       aws_bucket: bucket.trim() || null,
       aws_access_key_id: accessKeyId.trim() || null,
@@ -99,6 +102,7 @@ export function StorageConfigurationSettings() {
       const saved = await updateStorageConfiguration(payload);
       setConfiguration(saved);
       setProvider(saved.provider);
+      setEndpointUrl(saved.s3_endpoint_url ?? "");
       setRegion(saved.aws_region ?? "");
       setBucket(saved.aws_bucket ?? "");
       setAccessKeyId(saved.aws_access_key_id ?? "");
@@ -116,7 +120,7 @@ export function StorageConfigurationSettings() {
         kind: "error",
         message:
           getApiErrorMessage(error) ??
-          "Storage settings could not be saved. Check the AWS values and try again.",
+          "Storage settings could not be saved. Check the S3-compatible storage values and try again.",
       });
     } finally {
       setSaving(false);
@@ -137,7 +141,7 @@ export function StorageConfigurationSettings() {
         </div>
         {configuration && (
           <Badge variant="outline">
-            {configuration.provider === "aws_s3" ? "AWS S3" : "MinIO"}
+            {configuration.provider === "aws_s3" ? "S3-compatible" : "MinIO"}
           </Badge>
         )}
       </div>
@@ -185,20 +189,40 @@ export function StorageConfigurationSettings() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="minio">MinIO</SelectItem>
-                <SelectItem value="aws_s3">AWS S3</SelectItem>
+                <SelectItem value="aws_s3">S3-compatible storage</SelectItem>
               </SelectContent>
             </Select>
           </div>
 
           {provider === "aws_s3" && (
             <div className="space-y-4">
+              <div>
+                <label
+                  htmlFor="global-storage-endpoint"
+                  className="mb-1 block text-sm font-medium text-foreground"
+                >
+                  S3 endpoint URL (optional)
+                </label>
+                <Input
+                  id="global-storage-endpoint"
+                  type="url"
+                  value={endpointUrl}
+                  onChange={(event) => setEndpointUrl(event.target.value)}
+                  placeholder="https://<namespace>.compat.objectstorage.<region>.oraclecloud.com"
+                  autoComplete="url"
+                  disabled={saving}
+                />
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Leave blank for AWS S3. For Oracle OCI or another S3-compatible service, enter its full HTTPS endpoint; configure the bucket separately.
+                </p>
+              </div>
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
                   <label
                     htmlFor="global-storage-region"
                     className="mb-1 block text-sm font-medium text-foreground"
                   >
-                    AWS region
+                    Region
                   </label>
                   <Input
                     id="global-storage-region"

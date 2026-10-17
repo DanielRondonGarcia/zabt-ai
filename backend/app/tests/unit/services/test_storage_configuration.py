@@ -126,3 +126,37 @@ def test_existing_aws_meetings_can_resolve_aws_config_when_minio_is_active(
     assert runtime.aws_access_key_id == "AKIAEXAMPLE"
     assert runtime.aws_secret_access_key == "stored-secret"
     assert selected == StorageProvider.MINIO
+
+
+def test_s3_endpoint_persists_when_omitted_and_blank_resets_to_aws_default(
+    storage_service_db,
+):
+    service, db_engine = storage_service_db
+    from app.models.storage_configuration import StorageConfigurationUpdate, StorageProvider
+
+    endpoint = "https://my-namespace.compat.objectstorage.us-ashburn-1.oraclecloud.com"
+    with Session(db_engine) as session:
+        service.update(
+            session,
+            StorageConfigurationUpdate(
+                provider=StorageProvider.AWS_S3,
+                aws_region="us-ashburn-1",
+                aws_bucket="oci-recordings",
+                aws_access_key_id="OCIACCESS",
+                aws_secret_access_key="oci-secret",
+                s3_endpoint_url=endpoint,
+            ),
+        )
+        service.update(session, StorageConfigurationUpdate(provider=StorageProvider.AWS_S3))
+        preserved = service.get_runtime_configuration(session)
+        service.update(
+            session,
+            StorageConfigurationUpdate(
+                provider=StorageProvider.AWS_S3,
+                s3_endpoint_url="",
+            ),
+        )
+        cleared = service.get_runtime_configuration(session)
+
+    assert preserved.s3_endpoint_url == endpoint
+    assert cleared.s3_endpoint_url is None

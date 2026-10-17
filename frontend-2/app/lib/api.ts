@@ -282,6 +282,7 @@ export type StorageProvider = "minio" | "aws_s3";
 
 export interface StorageConfigurationRead {
   provider: StorageProvider;
+  s3_endpoint_url: string | null;
   aws_region: string | null;
   aws_bucket: string | null;
   aws_access_key_id: string | null;
@@ -290,6 +291,7 @@ export interface StorageConfigurationRead {
 
 export interface StorageConfigurationUpdate {
   provider: StorageProvider;
+  s3_endpoint_url?: string | null;
   aws_region?: string | null;
   aws_bucket?: string | null;
   aws_access_key_id?: string | null;
