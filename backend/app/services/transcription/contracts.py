@@ -128,6 +128,7 @@ class BatchTranscriptionRequest:
     model: str | None = None
     chunking_strategy: str | None = None
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    storage_provider: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.timestamp_mode, TimestampMode):

@@ -90,6 +90,7 @@ class TranscriptionConfig:
     speaker_required: bool = False
     model: str | None = None
     chunking_strategy: str | None = None
+    storage_provider: str | None = None
 
 
 _CONTRACT_EXPORTS = {

@@ -66,7 +66,7 @@ class GpuTranscriptionClient:
         on_heartbeat: Callable[[], None] | None = None,
     ) -> TranscriptionResult:
         """Submit transcription job and poll until complete."""
-        from app.services.storage import storage
+        from app.services.storage import get_storage_for_provider, storage
 
         config = config or TranscriptionConfig()
 
@@ -75,12 +75,17 @@ class GpuTranscriptionClient:
                 "GpuTranscriptionClient requires config.storage_key to generate a presigned URL."
             )
 
+        storage_client = (
+            get_storage_for_provider(config.storage_provider)
+            if config.storage_provider is not None
+            else storage
+        )
         if self._backend == TranscriptionBackend.GPU_LOCAL:
-            download_url = storage.get_presigned_download_url(
+            download_url = storage_client.get_presigned_download_url(
                 config.storage_key, expiration=3600
             )
         else:
-            download_url = storage.get_public_presigned_download_url(
+            download_url = storage_client.get_public_presigned_download_url(
                 config.storage_key, expiration=3600
             )
 

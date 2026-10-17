@@ -325,3 +325,82 @@ def test_youtube_worker_upload_and_cleanup_use_meeting_storage(
         assert Path(handoff_path).is_file()
     assert selected_storage.calls == expected_calls
     assert other_storage.calls == []
+
+
+@pytest.mark.parametrize("backend", ["gpu-local", "runpod"])
+def test_transcription_worker_passes_meeting_storage_provider_to_gpu_request(
+    worker_module,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    backend: str,
+) -> None:
+    worker = worker_module
+    meeting_id = 41
+    object_key = "users/91/meetings/storage-v1/aws_s3/audio.mp3"
+    meeting = Meeting(
+        id=meeting_id,
+        owner_id=None,
+        title="AWS meeting",
+        file_path=object_key,
+        storage_provider="aws_s3",
+    )
+    audio_path = tmp_path / "audio.mp3"
+    audio_path.write_bytes(b"audio")
+    requests: list[Any] = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, model, _obj_id):
+            return meeting if model is Meeting else None
+
+        def add(self, _obj) -> None:
+            pass
+
+        def commit(self) -> None:
+            pass
+
+    class FakeProvider:
+        provider_name = backend
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def transcribe(self, request, **_callbacks):
+            requests.append(request)
+            return SimpleNamespace(audio_duration_seconds=None, language="en")
+
+    monkeypatch.setattr(worker, "Session", lambda *_args, **_kwargs: FakeSession())
+    monkeypatch.setattr(
+        worker.meeting_processing_audit,
+        "_locked_current_run",
+        lambda *_args: (meeting, SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        worker, "_required_processing_identity", lambda _task: (7, "attempt-1")
+    )
+    monkeypatch.setattr(worker, "_configured_transcription_provider", lambda: backend)
+    monkeypatch.setattr(worker, "_temp_path_for", lambda *_args, **_kwargs: str(audio_path))
+    monkeypatch.setattr(worker.meeting_service, "_publish_sub_status", lambda *_args: None)
+    monkeypatch.setattr(worker, "_probe_local_media", lambda _path: None)
+    monkeypatch.setattr(
+        worker, "_resolve_meeting_language_for_transcription", lambda *_args: (None, [])
+    )
+    monkeypatch.setattr(worker, "_update_sub_status_for_attempt", lambda *_args: True)
+    monkeypatch.setattr(worker, "get_provider", lambda **_kwargs: FakeProvider())
+    monkeypatch.setattr(worker, "_save_transcription_for_attempt", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(worker.analytics, "capture", lambda *_args, **_kwargs: None)
+
+    assert worker.stage_transcribe.run(meeting_id) == meeting_id
+
+    assert len(requests) == 1
+    assert requests[0].source.storage_key == object_key
+    assert requests[0].storage_provider == "aws_s3"
+    assert not audio_path.exists()

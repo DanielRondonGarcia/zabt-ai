@@ -808,6 +808,7 @@ def stage_transcribe(meeting_id: int) -> int:
 
             owner_id = meeting.owner_id
             file_key = meeting.file_path
+            storage_provider = meeting.storage_provider
             transcription_type = meeting.transcription_type
             user: User | None = session.get(User, owner_id) if owner_id else None
             user_tier = user.tier if user else None
@@ -851,6 +852,7 @@ def stage_transcribe(meeting_id: int) -> int:
             language=forced_lang,
             allowed_languages=allowed_langs or None,
         )
+        config.storage_provider = storage_provider
         config.transcription_type = transcription_type or TranscriptionType.GENERAL
 
         if not _update_sub_status_for_attempt(meeting_id, run_id, attempt_id, None):
@@ -871,6 +873,7 @@ def stage_transcribe(meeting_id: int) -> int:
                 response_format=config.response_format,
                 model=config.model,
                 chunking_strategy=config.chunking_strategy,
+                storage_provider=config.storage_provider,
             )
             result = provider.transcribe(
                 request,
