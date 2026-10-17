@@ -2,7 +2,7 @@
 # Copyright (C) 2025-2026 Afeef Janjua
 from enum import Enum
 from typing import Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from langfuse.openai import OpenAI
 from sqlmodel import Session, select, col
 
@@ -212,15 +212,22 @@ class MeetingIntelligenceService:
 
     def extract_highlights(self, transcript_text: str) -> dict:
         """Call 1: Extract action items, key questions, and chapters from transcript."""
-        response = _client.beta.chat.completions.parse(
-            model=settings.OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": HIGHLIGHT_EXTRACTION_PROMPT},
-                {"role": "user", "content": transcript_text},
-            ],
-            temperature=0.2,
-            response_format=HighlightsExtraction,
-        )
+        try:
+            response = _client.beta.chat.completions.parse(
+                model=settings.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": HIGHLIGHT_EXTRACTION_PROMPT},
+                    {"role": "user", "content": transcript_text},
+                ],
+                temperature=0.2,
+                response_format=HighlightsExtraction,
+            )
+        except ValidationError:
+            logger.warning(
+                "extract_highlights: response did not match the structured schema; "
+                "falling back to empty highlights"
+            )
+            return {"chapters": [], "action_items": [], "key_questions": []}
         parsed = response.choices[0].message.parsed
         if parsed is None:
             logger.warning("extract_highlights: parse returned None, falling back to empty")
@@ -233,18 +240,28 @@ class MeetingIntelligenceService:
         pydantic_model = type_config["model"]
         transcript_only_prompt = (
             "The input is transcript-only. Use only explicitly supported spoken evidence; "
-            "do not infer visual facts or expose hidden reasoning.\n\n"
+            "do not infer visual facts or expose hidden reasoning. "
+            "Return valid JSON only, matching the supplied response schema. "
+            "Do not include Markdown, headings, or commentary.\n\n"
         )
 
-        response = _client.beta.chat.completions.parse(
-            model=settings.OPENAI_MODEL,
-            messages=[
-                {"role": "system", "content": transcript_only_prompt + type_config["prompt"]},
-                {"role": "user", "content": transcript_text},
-            ],
-            temperature=0.2,
-            response_format=pydantic_model,
-        )
+        try:
+            response = _client.beta.chat.completions.parse(
+                model=settings.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": transcript_only_prompt + type_config["prompt"]},
+                    {"role": "user", "content": transcript_text},
+                ],
+                temperature=0.2,
+                response_format=pydantic_model,
+            )
+        except ValidationError:
+            logger.warning(
+                "extract_structured_output: response did not match the structured schema "
+                "for type=%s; falling back to minimal output",
+                meeting_type,
+            )
+            return {"meeting_type": meeting_type}
         parsed = response.choices[0].message.parsed
         if parsed is None:
             logger.warning("extract_structured_output: parse returned None for type=%s", meeting_type)
