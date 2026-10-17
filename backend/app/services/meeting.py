@@ -50,9 +50,15 @@ class MeetingService(BaseService):
         """
         print(f"AUDIT [MEETING] [AFTER]: Finished '{action}' on Meeting with result type: {type(result)}")
 
-    def create_meeting(self, meeting_in: MeetingCreate, owner_id: int) -> Meeting:
+    def create_meeting(
+        self,
+        meeting_in: MeetingCreate,
+        owner_id: int,
+        storage_provider: str = "minio",
+    ) -> Meeting:
         meeting = Meeting.from_orm(meeting_in)
         meeting.owner_id = owner_id
+        meeting.storage_provider = storage_provider
         return self.save(meeting)
 
     def get_meeting(self, meeting_id: int) -> Optional[Meeting]:

@@ -337,6 +337,32 @@ def test_runtime_storage_factory_uses_admin_aws_settings_not_environment(
     assert module._created_boto3_clients[-2]["kwargs"]["region_name"] == "eu-west-1"
 
 
+def test_s3_multipart_upload_keys_mark_aws_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMBEDDING_API_KEY", "test-embedding-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    module, storage, internal, _public = construct_s3(monkeypatch)
+    monkeypatch.setattr(module.uuid, "uuid4", lambda: type("UUID", (), {"hex": "fixed"})())
+
+    upload_id, key = storage.create_multipart_upload(
+        user_id=7,
+        filename="large.mov",
+        content_type="video/quicktime",
+    )
+
+    assert upload_id == "upload-123"
+    assert key == "users/7/meetings/storage-v1/aws_s3/fixed_large.mov"
+    assert internal.calls[-1] == (
+        "create_multipart_upload",
+        {
+            "Bucket": storage.bucket,
+            "Key": key,
+            "ContentType": "video/quicktime",
+        },
+    )
+
+
 def test_storage_for_meeting_provider_uses_configured_aws_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

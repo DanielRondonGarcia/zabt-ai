@@ -27,7 +27,11 @@ from app.services.meeting_intelligence import intelligence_service
 from app.services.meeting_processing_audit import meeting_processing_audit
 from app.services.notifications import notify
 from app.services.pdf_export import pdf_export_service
-from app.services.storage import storage
+from app.services.storage import (
+    get_current_storage,
+    storage,
+    storage_provider_from_object_key,
+)
 from app.services.email_share import email_share_service
 from app.services.integration import integration_service
 from app.services.group import group_service
@@ -251,7 +255,18 @@ def create_meeting(
         description=meeting_in.description,
         file_path=meeting_in.file_key
     )
-    meeting = meeting_service.create_meeting(meeting_data, owner_id=current_user.id)
+    try:
+        storage_provider = storage_provider_from_object_key(meeting_in.file_key)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+    meeting = meeting_service.create_meeting(
+        meeting_data,
+        owner_id=current_user.id,
+        storage_provider=storage_provider.value,
+    )
     if meeting_in.transcription_type != TranscriptionType.GENERAL:
         meeting_service.update_transcription_type(meeting.id, meeting_in.transcription_type)
     if meeting_in.meeting_type != "generic":
@@ -853,12 +868,14 @@ class PresignedUploadResponse(BaseModel):
 def request_presigned_upload_url(
     req: PresignedUploadRequest,
     current_user: User = Depends(deps.get_current_active_user),
+    db: Session = Depends(deps.get_db),
 ) -> Any:
     """
     Request a Presigned S3/MinIO URL for direct media upload.
     Returns the storage_provider so the frontend knows whether to call confirm-upload.
     """
-    upload_url, file_key = storage.generate_presigned_upload_url(
+    current_storage = get_current_storage(db)
+    upload_url, file_key = current_storage.generate_presigned_upload_url(
         user_id=current_user.id,
         filename=req.filename,
         content_type=req.content_type
@@ -867,7 +884,7 @@ def request_presigned_upload_url(
     return PresignedUploadResponse(
         upload_url=upload_url,
         file_key=file_key,
-        storage_provider=storage.provider_name,
+        storage_provider=current_storage.provider_name,
     )
 
 

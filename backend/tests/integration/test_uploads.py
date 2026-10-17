@@ -5,13 +5,13 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 
-@patch("app.api.v1.endpoints.meetings.storage")
+@patch("app.api.v1.endpoints.meetings.get_current_storage")
 def test_upload_meeting_file(
     mock_storage, client: TestClient, normal_user_token_headers
 ):
     """Validate the presign-then-register contract used by the upload client."""
     filename = "test_audio.mp3"
-    file_key = "users/1/meetings/test_audio.mp3"
+    file_key = "users/1/meetings/storage-v1/minio/test_audio.mp3"
     mock_storage.generate_presigned_upload_url.return_value = (
         "https://storage.example/upload",
         file_key,

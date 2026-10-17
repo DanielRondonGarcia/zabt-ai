@@ -383,7 +383,7 @@ class S3Storage:
     def create_multipart_upload(
         self, user_id: int, filename: str, content_type: str
     ) -> tuple[str, str]:
-        object_key = _make_object_key(user_id, filename)
+        object_key = _make_object_key(user_id, filename, self.storage_kind)
         response = self.s3_client.create_multipart_upload(
             Bucket=self.bucket,
             Key=object_key,
