@@ -154,7 +154,9 @@ def test_happy_path_completes_meeting_and_persists_segments(meeting_with_file):
         out = stage_visual_breakdown(meeting_id)
 
     assert out == meeting_id
-    mock_cls.assert_called_once_with()
+    mock_cls.assert_called_once_with(
+        storage_provider=worker.get_storage_for_provider("minio")
+    )
     request = mock_cls.return_value.submit_and_wait.call_args.args[0]
     assert request["file_path"] == "users/1/meetings/X/audio.mp4"
     assert "video_url" not in request
@@ -709,7 +711,9 @@ def test_worker_does_not_construct_the_legacy_external_vision_client(meeting_wit
         )
         assert stage_visual_breakdown(meeting_with_file) == meeting_with_file
 
-    direct_service.assert_called_once_with()
+    direct_service.assert_called_once_with(
+        storage_provider=worker.get_storage_for_provider("minio")
+    )
     legacy_client.assert_not_called()
 
 

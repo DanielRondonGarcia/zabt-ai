@@ -37,7 +37,7 @@ from app.models import (
 )
 from app.models.meeting_intelligence import MeetingHighlight
 from app.services.meeting import meeting_service
-from app.services.storage import storage
+from app.services.storage import get_storage_for_provider, storage
 from app.services.transcription import (
     BatchTranscriptionRequest,
     TimestampMode,
@@ -643,7 +643,9 @@ def stage_download(meeting_id: int) -> int:
         if _configured_transcription_provider() == ProviderName.RUNPOD.value:
             logger.info("stage_download skipped (RunPod mode) meeting_id=%s", meeting_id)
         else:
-            download_url = storage.get_presigned_download_url(meeting.file_path)
+            download_url = get_storage_for_provider(
+                meeting.storage_provider
+            ).get_presigned_download_url(meeting.file_path)
             temp_audio_path = _temp_path_for(
                 meeting_id, meeting.file_path, run_id=run_id, attempt_id=attempt_id
             )
@@ -1584,6 +1586,7 @@ def _cleanup_visual_result_artifacts(
     visual_epoch: str | int,
     processing_run_id: int | None,
     dispatch_attempt_id: str | None,
+    storage_client=None,
 ) -> None:
     """Delete only artifacts in the namespace returned by this rejected run."""
     if (
@@ -1638,9 +1641,10 @@ def _cleanup_visual_result_artifacts(
             re.escape(namespace) + r"/[0-9a-f]{32}\.jpg", key
         ):
             keys.add(key)
+    artifact_storage = storage if storage_client is None else storage_client
     for key in keys:
         try:
-            storage.delete_file(key)
+            artifact_storage.delete_file(key)
         except Exception:
             logger.warning("rejected visual artifact cleanup failed", exc_info=True)
 
@@ -1652,6 +1656,7 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
     )
     pipeline_mode = processing_run_id is not None
     visual_only_run = not optional and pipeline_mode
+    storage_client = None
 
     logger.info(
         "%s started meeting_id=%s",
@@ -1706,6 +1711,7 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
             visual_epoch=run_epoch,
             processing_run_id=processing_run_id,
             dispatch_attempt_id=dispatch_attempt_id,
+            storage_client=storage_client,
         )
 
     def finalize_result(result, **kwargs) -> dict:
@@ -1725,6 +1731,7 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
         owner_id = meeting.owner_id
         file_path = meeting.file_path
         source_type = meeting.source_type
+        storage_provider = meeting.storage_provider
         stored_visual_params = dict(meeting.visual_breakdown_params or {})
         transcript = session.exec(
             select(TranscriptSegment)
@@ -1768,6 +1775,7 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
         _emit_visual_side_effects(finalization)
         return meeting_id
 
+    storage_client = get_storage_for_provider(storage_provider)
     update_progress("analyzing_video")
     attempts = meeting_service.increment_visual_breakdown_attempt(
         meeting_id,
@@ -1780,7 +1788,7 @@ def _run_visual_breakdown(meeting_id: int, *, optional: bool) -> int:
 
     try:
         update_progress()
-        result = DirectVisionService().submit_and_wait(
+        result = DirectVisionService(storage_provider=storage_client).submit_and_wait(
             {
                 "file_path": file_path,
                 "owner_id": str(owner_id) if owner_id is not None else "unknown",
