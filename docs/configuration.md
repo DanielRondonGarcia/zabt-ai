@@ -136,16 +136,31 @@ variable name.
 
 ## Object storage
 
+New meeting uploads use the provider selected by a system superuser under
+**Integrations → Global storage**. Choose MinIO or AWS S3. For AWS, provide the
+region, bucket, access key ID, and secret access key. Existing meetings continue
+using their recorded provider; changing the selection does not copy or move
+existing files.
+
+The AWS secret is encrypted at rest and never returned to the browser. Configure
+a stable `TOKEN_ENCRYPTION_KEY` for both the API and worker before saving AWS
+credentials; see the Integrations & notifications section below for key setup.
+Leave the secret field blank to keep the current saved secret.
+
+The environment variables below continue to configure environment-backed
+storage clients and the vision worker; they do not override the provider stored
+for new meetings.
+
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `STORAGE_PROVIDER` | `minio` | `minio` (bundled) or `s3`. |
+| `STORAGE_PROVIDER` | `minio` | `minio` (bundled) or `s3` for environment-backed clients without per-meeting storage context. |
 | `MINIO_ENDPOINT` | `minio:9000` | In-cluster endpoint. |
 | `MINIO_PUBLIC_ENDPOINT` | `http://localhost:9000` | Browser-reachable endpoint for presigned URLs. |
 | `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | `minioadmin` | Change for anything internet-facing. |
 | `MINIO_BUCKET_NAME` | `zabt-ai-bucket` | |
 | `MINIO_SECURE` | `false` | `true` if MinIO is served over HTTPS. |
 | `MINIO_WEBHOOK_SECRET` | `change-me-in-production` | Shared secret for the MinIO→API upload webhook. |
-| `S3_ENDPOINT_URL` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_BUCKET_NAME` / `S3_PUBLIC_URL` / `S3_REGION` | — | Used when `STORAGE_PROVIDER=s3`; explicit values also override the vision worker's bundled-MinIO fallbacks. |
+| `S3_ENDPOINT_URL` / `S3_ACCESS_KEY_ID` / `S3_SECRET_ACCESS_KEY` / `S3_BUCKET_NAME` / `S3_PUBLIC_URL` / `S3_REGION` | — | Used by environment-backed S3 clients and the vision worker. The admin-managed meeting provider is configured separately in the web UI. |
 
 ## Transcription
 

@@ -72,7 +72,9 @@ not silently migrated; create a local account instead.
 
 ### Can I use S3 / Cloudflare R2 instead of MinIO?
 
-Yes — set `STORAGE_PROVIDER=s3` and the `S3_*` variables. See
+For new meeting uploads, a system superuser can select AWS S3 under **Integrations → Global storage**.
+Existing environment-backed S3-compatible clients (including Cloudflare R2) can still use
+`STORAGE_PROVIDER=s3` and the `S3_*` variables. See
 [configuration](configuration.md#object-storage).
 
 ## Contributing

@@ -278,6 +278,39 @@ export const updateMicrosoftOidcConfiguration = async (
   return data;
 };
 
+export type StorageProvider = "minio" | "aws_s3";
+
+export interface StorageConfigurationRead {
+  provider: StorageProvider;
+  aws_region: string | null;
+  aws_bucket: string | null;
+  aws_access_key_id: string | null;
+  aws_secret_access_key_configured: boolean;
+}
+
+export interface StorageConfigurationUpdate {
+  provider: StorageProvider;
+  aws_region?: string | null;
+  aws_bucket?: string | null;
+  aws_access_key_id?: string | null;
+  aws_secret_access_key?: string;
+}
+
+export const getStorageConfiguration = async (): Promise<StorageConfigurationRead> => {
+  const { data } = await apiClient.get<StorageConfigurationRead>("/storage/configuration");
+  return data;
+};
+
+export const updateStorageConfiguration = async (
+  configuration: StorageConfigurationUpdate,
+): Promise<StorageConfigurationRead> => {
+  const { data } = await apiClient.put<StorageConfigurationRead>(
+    "/storage/configuration",
+    configuration,
+  );
+  return data;
+};
+
 export const exchangeMicrosoftOidcToken = async (
   idToken: string,
   challengeId: string,

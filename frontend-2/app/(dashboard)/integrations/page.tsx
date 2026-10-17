@@ -35,6 +35,7 @@ import {
   MICROSOFT_OIDC_SPA_REDIRECT_FALLBACK,
 } from "@/app/lib/microsoft-oidc";
 import { IntegrationCard } from "@/app/components/integration-card";
+import { StorageConfigurationSettings } from "@/app/components/StorageConfigurationSettings";
 import { CalendarEventList } from "@/app/components/calendar-event-list";
 import { Badge } from "@/app/components/ui/badge";
 import { Button } from "@/app/components/ui/button";
@@ -357,6 +358,8 @@ export default function IntegrationsPage() {
           </div>
         </section>
       )}
+
+      {canManage && <StorageConfigurationSettings />}
 
       {canManage && (
       <section className="mb-10 rounded-lg border border-border bg-muted/30 p-5">
