@@ -2499,21 +2499,41 @@ def delete_meeting_vectors(meeting_id: int) -> int:
     retry_backoff=True,
 )
 def reindex_meeting(meeting_id: int) -> int:
-    """Delete a meeting's vectors, then index its current group assignment."""
-    if not settings.INDEXING_ENABLED:
+    """Admit a standalone audited run and dispatch indexing for any group state."""
+    run = meeting_processing_audit.create_reindex_run(meeting_id)
+    run_id = getattr(run, "id", None)
+    attempt_id = getattr(run, "dispatch_attempt_id", None)
+    if run_id is None or not attempt_id:
+        logger.info("reindex_meeting skipped active or missing meeting_id=%s", meeting_id)
         return meeting_id
 
-    # Keep deletion and indexing in one task so an old assignment cleanup can
-    # never be delivered after the new assignment's upsert.
-    delete_meeting_vectors.run(meeting_id)
-    meeting = meeting_service.get(Meeting, meeting_id)
-    if meeting and meeting.group_id:
-        stage_embedding.run(meeting_id)
-    logger.info(
-        "reindex_meeting complete meeting_id=%s grouped=%s",
-        meeting_id,
-        bool(meeting and meeting.group_id),
-    )
+    try:
+        stage_embedding.apply_async(
+            args=(meeting_id,),
+            headers=_audit_headers(run_id, meeting_id, "stage_embedding", attempt_id),
+            link_error=[on_stage_failure.s()],
+        )
+    except Exception as exc:
+        logger.exception("reindex_meeting dispatch failed meeting_id=%s run_id=%s", meeting_id, run_id)
+        meeting_service.mark_failed(
+            meeting_id,
+            str(exc),
+            processing_run_id=run_id,
+            dispatch_attempt_id=attempt_id,
+            preserve_existing_summary=True,
+        )
+        meeting_processing_audit.stage_failed(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            meeting_id=meeting_id,
+            stage="stage_embedding",
+            error=exc,
+            metadata={"dispatch_failed": True},
+        )
+        meeting_processing_audit.run_failed(run_id, attempt_id=attempt_id, error=exc)
+        raise
+
+    logger.info("reindex_meeting queued meeting_id=%s run_id=%s", meeting_id, run_id)
     return meeting_id
 
 

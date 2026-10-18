@@ -798,6 +798,191 @@ def test_reindex_meeting_runs_delete_before_index(monkeypatch):
     assert events == [("delete", 10), ("index", 10)]
 
 
+def test_audit_reindex_admission_does_not_reuse_active_reindex_run(monkeypatch):
+    worker = _worker()
+    import app.services.meeting_processing_audit as audit_module
+
+    meeting = SimpleNamespace(current_processing_run_id=456, status="processing")
+    active_run = SimpleNamespace(status="running", trigger="reindex")
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def exec(self, statement):
+            return SimpleNamespace(first=lambda: meeting)
+
+        def get(self, model, run_id):
+            return active_run if run_id == 456 else None
+
+    monkeypatch.setattr(audit_module, "Session", lambda engine: FakeSession())
+
+    assert worker.meeting_processing_audit.create_reindex_run(10) is None
+
+def test_audit_reindex_admission_creates_processing_run_for_ungrouped_meeting(monkeypatch):
+    worker = _worker()
+    import app.services.meeting_processing_audit as audit_module
+
+    meeting = SimpleNamespace(
+        id=10,
+        current_processing_run_id=None,
+        status="completed",
+        sub_status=None,
+        processing_heartbeat_at=None,
+        group_id=None,
+    )
+    run = SimpleNamespace(id=789, dispatch_attempt_id="attempt-789")
+    committed = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def exec(self, statement):
+            return SimpleNamespace(first=lambda: meeting)
+
+        def get(self, model, run_id):
+            return None
+
+        def add(self, item):
+            committed.append(item)
+
+        def commit(self):
+            committed.append("commit")
+
+        def refresh(self, item):
+            pass
+
+    def create_run(session, locked_meeting, *, trigger):
+        assert session is not None
+        assert locked_meeting is meeting
+        run.trigger = trigger
+        meeting.current_processing_run_id = run.id
+        return run
+
+    monkeypatch.setattr(audit_module, "Session", lambda engine: FakeSession())
+    monkeypatch.setattr(worker.meeting_processing_audit, "create_run_in_session", create_run)
+
+    admitted = worker.meeting_processing_audit.create_reindex_run(10)
+
+    assert admitted is run
+    assert run.trigger == "reindex"
+    assert meeting.status == "processing"
+    assert meeting.sub_status == "indexing_embeddings"
+    assert committed[-1] == "commit"
+
+def test_reindex_meeting_dispatches_audited_embedding_for_ungrouped_meeting(monkeypatch):
+    worker = _worker()
+    run = SimpleNamespace(id=789, dispatch_attempt_id="attempt-789")
+    dispatched = []
+    monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
+    monkeypatch.setattr(worker.meeting_processing_audit, "create_reindex_run", lambda meeting_id: run)
+    monkeypatch.setattr(
+        worker.stage_embedding,
+        "apply_async",
+        lambda **kwargs: dispatched.append(kwargs),
+    )
+
+    assert worker.reindex_meeting.run(10) == 10
+
+    assert len(dispatched) == 1
+    assert dispatched[0]["args"] == (10,)
+    assert dispatched[0]["headers"]["meeting_processing_run_id"] == "789"
+    assert dispatched[0]["headers"]["dispatch_attempt_id"] == "attempt-789"
+    assert dispatched[0]["link_error"][0].task == "on_stage_failure"
+
+def test_reindex_dispatch_failure_preserves_existing_summary(monkeypatch):
+    worker = _worker()
+    run = SimpleNamespace(id=789, dispatch_attempt_id="attempt-789")
+    mark_failed_calls = []
+    monkeypatch.setattr(worker.meeting_processing_audit, "create_reindex_run", lambda meeting_id: run)
+    monkeypatch.setattr(
+        worker.stage_embedding,
+        "apply_async",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("broker unavailable")),
+    )
+    monkeypatch.setattr(
+        worker.meeting_service,
+        "mark_failed",
+        lambda meeting_id, error, **kwargs: mark_failed_calls.append(kwargs),
+    )
+    monkeypatch.setattr(worker.meeting_processing_audit, "stage_failed", lambda **kwargs: None)
+    monkeypatch.setattr(worker.meeting_processing_audit, "run_failed", lambda *args, **kwargs: True)
+
+    with pytest.raises(RuntimeError, match="broker unavailable"):
+        worker.reindex_meeting.run(10)
+
+    assert mark_failed_calls == [
+        {
+            "processing_run_id": 789,
+            "dispatch_attempt_id": "attempt-789",
+            "preserve_existing_summary": True,
+        }
+    ]
+
+def test_create_reindex_run_claims_completed_meeting_and_skips_duplicate_delivery(monkeypatch):
+    worker = _worker()
+    from app.models import Meeting, MeetingProcessingRun
+
+    audit_module = sys.modules["app.services.meeting_processing_audit"]
+
+    meeting = Meeting(id=40, owner_id=50, status="completed")
+    runs = {}
+    events = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def exec(self, statement):
+            assert getattr(statement, "_for_update_arg", None) is not None
+            return SimpleNamespace(first=lambda: meeting)
+
+        def get(self, model, run_id):
+            return runs.get(run_id)
+
+        def add(self, item):
+            if isinstance(item, MeetingProcessingRun):
+                runs[item.id] = item
+                events.append("run-added")
+
+        def flush(self):
+            run = next(run for run in runs.values() if run.id is None)
+            run.id = 99
+            runs[run.id] = run
+            del runs[None]
+
+        def commit(self):
+            events.append("commit")
+
+        def refresh(self, item):
+            pass
+
+    monkeypatch.setattr(audit_module, "Session", lambda engine: FakeSession())
+
+    run = worker.meeting_processing_audit.create_reindex_run(40)
+
+    assert run is not None
+    assert run.id == 99
+    assert run.trigger == "reindex"
+    assert run.dispatch_attempt_id
+    assert meeting.current_processing_run_id == run.id
+    assert meeting.status == "processing"
+    assert meeting.sub_status == "indexing_embeddings"
+    assert "commit" in events
+
+    duplicate = worker.meeting_processing_audit.create_reindex_run(40)
+    assert duplicate is None
+
 def test_stage_embedding_retries_when_summary_changes_during_embedding(monkeypatch):
     worker = _worker()
 

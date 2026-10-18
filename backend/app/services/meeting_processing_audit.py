@@ -304,6 +304,47 @@ class MeetingProcessingAuditService:
             logger.warning("processing audit get_or_create_pending_run failed meeting_id=%s", meeting_id, exc_info=True)
             return None
 
+    def create_reindex_run(self, meeting_id: int) -> MeetingProcessingRun | None:
+        """Admit an audited reindex only when no processing pipeline owns the meeting."""
+        try:
+            with Session(engine) as session:
+                meeting = session.exec(
+                    select(Meeting).where(Meeting.id == meeting_id).with_for_update()
+                ).first()
+                if meeting is None:
+                    return None
+
+                current = (
+                    session.get(MeetingProcessingRun, meeting.current_processing_run_id)
+                    if meeting.current_processing_run_id is not None
+                    else None
+                )
+                if current is not None and current.status in _ACTIVE_RUN_STATUSES:
+                    # Active work already owns the meeting. Reusing an active
+                    # reindex run could dispatch concurrent delete/upsert batches.
+                    return None
+                if meeting.status in {"queued", "processing"}:
+                    return None
+
+                run = self.create_run_in_session(session, meeting, trigger="reindex")
+                if run is None or run.id is None or not run.dispatch_attempt_id:
+                    return None
+
+                meeting.status = "processing"
+                meeting.sub_status = "indexing_embeddings"
+                meeting.processing_heartbeat_at = datetime.utcnow()
+                session.add(meeting)
+                session.commit()
+                session.refresh(run)
+                return run
+        except Exception:
+            logger.warning(
+                "processing audit reindex admission failed meeting_id=%s",
+                meeting_id,
+                exc_info=True,
+            )
+            return None
+
     def cancel_run(self, *, meeting_id: int, run_id: int, owner_id: int) -> bool:
         """Cancel only the owner's exact active generation in one locked transaction."""
         now = datetime.utcnow()
