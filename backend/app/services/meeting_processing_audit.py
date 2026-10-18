@@ -915,6 +915,63 @@ class MeetingProcessingAuditService:
         except Exception:
             logger.warning("processing audit terminal event failed run_id=%s stage=%s", run_id, stage, exc_info=True)
 
+    def complete_embedding_in_session(
+        self,
+        session: Session,
+        *,
+        run: MeetingProcessingRun,
+        meeting_id: int,
+        attempt_id: str,
+        task_id: str | None,
+        point_count: int,
+    ) -> bool:
+        """Complete an embedding run in the caller's locked meeting transaction."""
+        if (
+            run.id is None
+            or run.meeting_id != meeting_id
+            or run.dispatch_attempt_id != attempt_id
+            or run.status not in _ACTIVE_RUN_STATUSES
+        ):
+            return False
+
+        now = datetime.utcnow()
+        safe_task_id = sanitize_message(task_id)[:255] if task_id else None
+        run.status = "completed"
+        run.started_at = run.started_at or now
+        run.completed_at = now
+        run.final_error = None
+        session.add(run)
+        session.add(
+            MeetingProcessingEvent(
+                run_id=run.id,
+                meeting_id=meeting_id,
+                dispatch_attempt_id=attempt_id,
+                stage="stage_embedding",
+                event_type="completed",
+                status="completed",
+                task_id=safe_task_id,
+                message="Meeting vectors persisted",
+                metadata_=sanitize_metadata({"point_count": point_count}),
+                created_at=now,
+                completed_at=now,
+            )
+        )
+        session.add(
+            MeetingProcessingEvent(
+                run_id=run.id,
+                meeting_id=meeting_id,
+                dispatch_attempt_id=attempt_id,
+                stage="run",
+                event_type="completed",
+                status="completed",
+                task_id=safe_task_id,
+                message="Processing completed after vector persistence",
+                created_at=now,
+                completed_at=now,
+            )
+        )
+        return True
+
     def run_completed(
         self,
         run_id: int | None,

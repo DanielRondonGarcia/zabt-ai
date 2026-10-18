@@ -124,7 +124,13 @@ class QdrantVectorStoreClient:
                     payload=payload,
                 )
             )
-        self.client.upsert(collection_name=self.active_collection, points=qdrant_points)
+        # Do not let the processing pipeline report completion before Qdrant has
+        # applied every point in the batch.
+        self.client.upsert(
+            collection_name=self.active_collection,
+            points=qdrant_points,
+            wait=True,
+        )
 
     def delete_by_filter(
         self,
@@ -140,6 +146,7 @@ class QdrantVectorStoreClient:
         self.client.delete(
             collection_name=self.active_collection,
             points_selector=qdrant_models.FilterSelector(filter=self._filter(owner_id, group_id, meeting_id)),
+            wait=True,
         )
 
     def search_filtered(

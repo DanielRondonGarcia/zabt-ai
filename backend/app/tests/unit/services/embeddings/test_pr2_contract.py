@@ -296,6 +296,8 @@ class _FakeQdrant:
         self.deletes = []
         self.searches = []
         self.indexes = []
+        self.upsert_wait_options = []
+        self.delete_wait_options = []
 
     def collection_exists(self, collection_name):
         return collection_name in self.collections
@@ -307,11 +309,13 @@ class _FakeQdrant:
     def create_payload_index(self, collection_name, field_name, field_schema):
         self.indexes.append((collection_name, field_name, field_schema))
 
-    def upsert(self, collection_name, points):
+    def upsert(self, collection_name, points, **kwargs):
         self.upserts.append((collection_name, points))
+        self.upsert_wait_options.append(kwargs)
 
-    def delete(self, collection_name, points_selector):
+    def delete(self, collection_name, points_selector, **kwargs):
         self.deletes.append((collection_name, points_selector))
+        self.delete_wait_options.append(kwargs)
 
     def search(self, collection_name, query_vector, query_filter, limit):
         self.searches.append((collection_name, query_vector, query_filter, limit))
@@ -346,6 +350,8 @@ def test_vector_store_filters_owner_group_and_uses_deterministic_ids(monkeypatch
 
     assert fake.upserts[0][0] == "meeting_embeddings_ollama_3"
     assert fake.upserts[0][1][0].id == point_id_for(7, "summary", 0)
+    assert fake.upsert_wait_options == [{"wait": True}]
+    assert fake.delete_wait_options == [{"wait": True}]
     assert result[0]["payload"] == {"meeting_id": 7}
     search_filter = fake.searches[0][2]
     rendered = repr(search_filter)

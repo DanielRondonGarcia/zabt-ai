@@ -2208,6 +2208,44 @@ def _get_locked_meeting(session: Session, meeting_id: int) -> Meeting | None:
     return session.exec(statement).first()
 
 
+def _visual_embedding_signature(segments: list) -> tuple:
+    return tuple(
+        sorted(
+            (
+                float(segment.start_time),
+                float(segment.end_time),
+                int(getattr(segment, "sequence", 0) or 0),
+                str(getattr(segment, "caption", "") or ""),
+            )
+            for segment in segments
+        )
+    )
+
+def _meeting_embedding_source_changed(
+    snapshot: Meeting,
+    current: Meeting,
+    snapshot_visual_segments: list,
+) -> bool:
+    """Detect edits to fields that contributed text to the pending vectors."""
+    source_fields = (
+        "transcript_text",
+        "transliterated_text",
+        "summary_text",
+        "original_summary_text",
+        "structured_output",
+        "structured_output_status",
+        "source_type",
+    )
+    if any(
+        getattr(snapshot, field, None) != getattr(current, field, None)
+        for field in source_fields
+    ):
+        return True
+    current_visual_segments = list(getattr(current, "visual_segments", []) or [])
+    return _visual_embedding_signature(snapshot_visual_segments) != _visual_embedding_signature(
+        current_visual_segments
+    )
+
 def _requeue_stale_meeting_index(
     meeting_id: int,
     snapshot: Meeting,
@@ -2228,20 +2266,32 @@ def _requeue_stale_meeting_index(
         "embedding_index_stale",
         {"meeting_id": meeting_id, "group_id": current.group_id},
     )
-    try:
-        # Reindex, rather than only stage_embedding, also removes vectors from a
-        # previous group when the current assignment is ungrouped or changed.
-        reindex_meeting.delay(meeting_id)
-    except Exception as exc:
-        logger.exception(
-            "fresh meeting reindex enqueue failed meeting_id=%s group_id=%s",
-            meeting_id,
-            current.group_id,
-        )
-        raise RuntimeError(
-            f"Fresh reindex could not be queued for meeting {meeting_id}."
-        ) from exc
+    # The current task already owns the active processing run. Retry it with
+    # the same run identity so it re-reads the new group assignment instead of
+    # letting a stale task report success or racing a second reindex task.
+    raise RuntimeError(
+        f"Meeting {meeting_id} assignment changed during embedding; retry current assignment."
+    )
 
+
+def _requeue_stale_meeting_content(
+    meeting_id: int,
+    snapshot: Meeting,
+    current: Meeting,
+) -> None:
+    logger.warning(
+        "discarding stale meeting embedding meeting_id=%s owner_id=%s",
+        meeting_id,
+        snapshot.owner_id,
+    )
+    _capture_embedding_event(
+        current.owner_id,
+        "embedding_index_stale",
+        {"meeting_id": meeting_id, "group_id": current.group_id, "reason": "content_changed"},
+    )
+    raise RuntimeError(
+        f"Meeting {meeting_id} content changed during embedding; retry current content."
+    )
 
 @celery_app.task(
     name="stage_embedding",
@@ -2250,10 +2300,11 @@ def _requeue_stale_meeting_index(
     retry_backoff=True,
 )
 def stage_embedding(meeting_id: int) -> int:
-    """Index available meeting content, whether or not it has a group yet."""
+    """Persist meeting vectors before allowing the processing run to complete."""
     if not settings.INDEXING_ENABLED:
-        logger.info("stage_embedding skipped disabled meeting_id=%s", meeting_id)
-        return meeting_id
+        raise RuntimeError(
+            "Vector indexing is disabled; meeting processing cannot complete without persisted vectors."
+        )
 
     run_id, attempt_id = _required_processing_identity(stage_embedding)
     with Session(engine) as session:
@@ -2267,9 +2318,8 @@ def stage_embedding(meeting_id: int) -> int:
         )
     if meeting is None:
         raise Ignore()
-    if not meeting.owner_id:
-        logger.warning("stage_embedding skipped missing owner meeting_id=%s", meeting_id)
-        return meeting_id
+    if meeting.owner_id is None:
+        raise RuntimeError(f"Meeting {meeting_id} has no owner for vector indexing.")
 
     logger.info(
         "stage_embedding started meeting_id=%s owner_id=%s group_id=%s",
@@ -2306,6 +2356,10 @@ def stage_embedding(meeting_id: int) -> int:
             vectors = provider.embed(
                 [chunk.embedding_text or chunk.text for chunk in chunks]
             )
+            if len(vectors) != len(chunks):
+                raise RuntimeError(
+                    f"Embedding count mismatch: expected {len(chunks)}, received {len(vectors)}."
+                )
             points = [
                 EmbeddingPoint(
                     id=chunk.id,
@@ -2322,35 +2376,58 @@ def stage_embedding(meeting_id: int) -> int:
                 )
                 for chunk, vector in zip(chunks, vectors)
             ]
-
         # Revalidate and hold Meeting-then-Run locks through vector mutation.
         # Embedding-provider calls above run without database locks.
         stale_assignment: Meeting | None = None
+        stale_content: Meeting | None = None
         with Session(engine) as session:
-            current, _run = meeting_processing_audit._locked_current_run(
+            current, current_run = meeting_processing_audit._locked_current_run(
                 session, run_id, meeting_id, attempt_id
             )
-            if current is None:
+            if current is None or current_run is None:
                 raise Ignore()
             if (
                 current.owner_id != meeting.owner_id
                 or current.group_id != meeting.group_id
             ):
                 stale_assignment = current
+            elif _meeting_embedding_source_changed(
+                meeting, current, visual_segments
+            ):
+                stale_content = current
+            elif not points:
+                raise RuntimeError(
+                    f"Meeting {meeting_id} has no indexable content; refusing to complete without vectors."
+                )
             else:
                 vector_store = get_vector_store()
                 delete_by_filter = getattr(vector_store, "delete_by_filter", None)
-                if delete_by_filter is not None:
-                    delete_by_filter(
-                        owner_id=current.owner_id,
-                        group_id=current.group_id,
-                        meeting_id=current.id,
+                if delete_by_filter is None:
+                    raise RuntimeError(
+                        "Vector store cannot replace all points for the current meeting."
                     )
-                if points:
-                    vector_store.upsert_points(points)
+                # Clear prior group payloads as well as stale chunks before
+                # inserting the complete, current snapshot.
+                delete_by_filter(owner_id=current.owner_id, meeting_id=current.id)
+                vector_store.upsert_points(points)
+                if not meeting_processing_audit.complete_embedding_in_session(
+                    session,
+                    run=current_run,
+                    meeting_id=meeting_id,
+                    attempt_id=attempt_id,
+                    task_id=_task_request_id(stage_embedding),
+                    point_count=len(points),
+                ):
+                    raise Ignore()
+                current.status = "completed"
+                current.sub_status = None
+                current.processing_heartbeat_at = datetime.utcnow()
+                session.add(current)
+                session.commit()
         if stale_assignment is not None:
             _requeue_stale_meeting_index(meeting_id, meeting, stale_assignment)
-            return meeting_id
+        if stale_content is not None:
+            _requeue_stale_meeting_content(meeting_id, meeting, stale_content)
     except Ignore:
         raise
     except Exception:

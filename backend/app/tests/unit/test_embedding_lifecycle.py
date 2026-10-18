@@ -45,7 +45,16 @@ def _run_embedding(worker, meeting_id):
 
 def _install_embedding_run_check(monkeypatch, worker, *meetings):
     responses = iter(meetings)
-    run = SimpleNamespace(id=456, status="running", dispatch_attempt_id="attempt-456")
+    run = SimpleNamespace(
+        id=456,
+        meeting_id=meetings[0].id,
+        owner_id=meetings[0].owner_id,
+        status="running",
+        dispatch_attempt_id="attempt-456",
+        started_at=None,
+        completed_at=None,
+        final_error=None,
+    )
 
     def locked_current_run(session, run_id, meeting_id, attempt_id):
         assert (run_id, meeting_id, attempt_id) == (456, meetings[0].id, "attempt-456")
@@ -56,6 +65,7 @@ def _install_embedding_run_check(monkeypatch, worker, *meetings):
         "_locked_current_run",
         locked_current_run,
     )
+    return run
 
 
 class _FakeSession:
@@ -66,19 +76,20 @@ class _FakeSession:
         return None
 
 
-def test_indexing_disabled_short_circuits_all_tasks(monkeypatch):
+
+
+def test_indexing_disabled_rejects_embedding_stage(monkeypatch):
     worker = _worker()
     calls = []
     monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", False)
     monkeypatch.setattr(worker, "get_vector_store", lambda: calls.append("store"))
 
-    assert worker.stage_embedding.run(1) == 1
-    assert worker.delete_meeting_vectors.run(1) == 1
-    assert worker.reindex_meeting.run(1) == 1
-    assert worker.delete_group_vectors.run(2) == 2
-    assert worker.reindex_group.run(2) == 2
-    assert calls == []
+    with pytest.raises(RuntimeError, match="indexing is disabled"):
+        worker.stage_embedding.run(1)
+    with pytest.raises(RuntimeError, match="indexing is disabled"):
+        worker.reindex_group.run(2)
 
+    assert calls == []
 
 def test_stage_embedding_indexes_ungrouped_visual_content(monkeypatch):
     worker = _worker()
@@ -105,6 +116,8 @@ def test_stage_embedding_indexes_ungrouped_visual_content(monkeypatch):
     embedded_texts = []
     group_context_requests = []
 
+    transaction_items = []
+
     class FakeSession:
         def __enter__(self):
             return self
@@ -112,9 +125,15 @@ def test_stage_embedding_indexes_ungrouped_visual_content(monkeypatch):
         def __exit__(self, *args):
             return None
 
+        def add(self, item):
+            transaction_items.append(item)
+
+        def commit(self):
+            transaction_items.append("commit")
+
     monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
     monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
-    _install_embedding_run_check(monkeypatch, worker, meeting, meeting)
+    run = _install_embedding_run_check(monkeypatch, worker, meeting, meeting)
     monkeypatch.setattr(
         worker,
         "_get_group_introduction",
@@ -130,7 +149,10 @@ def test_stage_embedding_indexes_ungrouped_visual_content(monkeypatch):
     monkeypatch.setattr(
         worker,
         "get_vector_store",
-        lambda: SimpleNamespace(upsert_points=lambda points: upserts.append(points)),
+        lambda: SimpleNamespace(
+            delete_by_filter=lambda **kwargs: None,
+            upsert_points=lambda points: upserts.append(points),
+        ),
     )
     monkeypatch.setattr(worker.analytics, "capture", lambda *args, **kwargs: None)
 
@@ -143,6 +165,14 @@ def test_stage_embedding_indexes_ungrouped_visual_content(monkeypatch):
     assert "A person falls beside the doorway." in upserts[0][0].text
     assert embedded_texts == [upserts[0][0].text]
     assert group_context_requests == []
+    assert run.status == "completed"
+    assert meeting.status == "completed"
+    assert transaction_items[0] is run
+    assert [item.stage for item in transaction_items if hasattr(item, "stage")] == [
+        "stage_embedding",
+        "run",
+    ]
+    assert transaction_items[-1] == "commit"
 
 
 def test_stage_embedding_builds_points_and_upserts(monkeypatch):
@@ -228,6 +258,12 @@ def test_stage_embedding_indexes_summary_without_transcript(monkeypatch):
             assert getattr(statement, "_for_update_arg", None) is not None
             return SimpleNamespace(first=lambda: meeting)
 
+        def add(self, item):
+            pass
+
+        def commit(self):
+            pass
+
     monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
     monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
     _install_embedding_run_check(monkeypatch, worker, meeting, meeting)
@@ -240,7 +276,10 @@ def test_stage_embedding_indexes_summary_without_transcript(monkeypatch):
     monkeypatch.setattr(
         worker,
         "get_vector_store",
-        lambda: SimpleNamespace(upsert_points=lambda points: upserts.append(points)),
+        lambda: SimpleNamespace(
+            delete_by_filter=lambda **kwargs: None,
+            upsert_points=lambda points: upserts.append(points),
+        ),
     )
     monkeypatch.setattr(worker.analytics, "capture", lambda *args, **kwargs: None)
 
@@ -467,7 +506,69 @@ def test_reindex_meeting_runs_delete_before_index(monkeypatch):
     assert events == [("delete", 10), ("index", 10)]
 
 
-def test_stage_embedding_discards_stale_snapshot_and_requeues_current_assignment(monkeypatch):
+def test_stage_embedding_retries_when_summary_changes_during_embedding(monkeypatch):
+    worker = _worker()
+
+    def meeting(summary_text):
+        return SimpleNamespace(
+            id=16,
+            owner_id=26,
+            group_id=None,
+            source_type="upload",
+            transcript_text="stable transcript",
+            transliterated_text=None,
+            summary_text=summary_text,
+            original_summary_text=None,
+            structured_output=None,
+            structured_output_status="pending",
+            visual_segments=[],
+            status="processing",
+            sub_status="indexing_embeddings",
+        )
+
+    snapshot = meeting("original summary")
+    current = meeting("edited during embedding")
+    vector_effects = []
+    embedded = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def add(self, item):
+            vector_effects.append("meeting-save")
+
+        def commit(self):
+            vector_effects.append("meeting-commit")
+
+    monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
+    monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+    _install_embedding_run_check(monkeypatch, worker, snapshot, current)
+    monkeypatch.setattr(worker, "_get_group_introduction", lambda group_id: None)
+    monkeypatch.setattr(
+        worker,
+        "get_embedding_provider",
+        lambda: SimpleNamespace(embed=lambda texts: embedded.extend(texts) or [[0.1] for _ in texts]),
+    )
+    monkeypatch.setattr(
+        worker,
+        "get_vector_store",
+        lambda: SimpleNamespace(
+            delete_by_filter=lambda **kwargs: vector_effects.append("delete"),
+            upsert_points=lambda points: vector_effects.append("upsert"),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="content changed during embedding"):
+        _run_embedding(worker, 16)
+
+    assert embedded
+    assert vector_effects == []
+    assert current.status == "processing"
+def test_stage_embedding_retries_when_assignment_changes_during_embedding(monkeypatch):
     worker = _worker()
     snapshot = SimpleNamespace(
         id=10,
@@ -504,6 +605,7 @@ def test_stage_embedding_discards_stale_snapshot_and_requeues_current_assignment
     monkeypatch.setattr(worker, "get_embedding_provider", lambda: SimpleNamespace(embed=lambda texts: vector_calls.append(texts) or [[1.0] for _ in texts]))
     monkeypatch.setattr(worker, "get_vector_store", lambda: (_ for _ in ()).throw(AssertionError("stale work must not touch vectors")))
 
-    assert _run_embedding(worker, 10) == 10
-    assert requeued == [10]
+    with pytest.raises(RuntimeError, match="assignment changed"):
+        _run_embedding(worker, 10)
+    assert requeued == []
     assert vector_calls == [["Group introduction: Planning context\n\nsummary", "Group introduction: Planning context\n\none two three"]]
