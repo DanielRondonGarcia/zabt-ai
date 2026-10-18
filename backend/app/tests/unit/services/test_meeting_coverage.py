@@ -214,7 +214,9 @@ def test_get_meetings_lightweight_projection_includes_group_id(
     assert "group_id" in selected_keys
 
 
-def test_status_transcription_type_substatus_heartbeat_and_completion(
+
+
+def test_status_transcription_type_substatus_leave_meeting_processing_for_embeddings(
     service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     meeting = store.add_meeting(title="Daily", owner_id=1, status="pending_upload")
@@ -242,21 +244,17 @@ def test_status_transcription_type_substatus_heartbeat_and_completion(
     assert sub_status.sub_status == "transcribing"
     assert (f"meeting:{meeting.id}:status", "transcribing") in redis_calls
 
-    completed = service.mark_completed(
-        meeting.id,
-        summary_text="summary",
-        action_items_text="actions",
-        template_id=3,
-        template_name="SOAP",
-    )
+    assert sub_status.status == "processing"
 
-    assert completed.status == "completed"
-    assert completed.sub_status is None
-    assert completed.summary_text == "summary"
-    assert completed.action_items_text == "actions"
-    assert completed.template_id == 3
-    assert completed.template_name == "SOAP"
+def test_update_status_cannot_complete_before_embedding_persists(
+    service: MeetingService, store: MeetingStore
+) -> None:
+    meeting = store.add_meeting(title="Still indexing", status="processing")
 
+    with pytest.raises(ValueError, match="embedding stage"):
+        service.update_status(meeting.id, "completed")
+
+    assert meeting.status == "processing"
 
 def test_update_sub_status_ignores_redis_errors(
     service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
@@ -913,6 +911,18 @@ def test_mark_failed_and_add_segment(service: MeetingService, store: MeetingStor
     assert segment.end_time == 3.0
     assert segment.text == "hello"
 
+
+def test_mark_failed_can_preserve_summary_for_embedding_failure(
+    service: MeetingService, store: MeetingStore
+) -> None:
+    meeting = store.add_meeting(title="Existing result", summary_text="Saved summary")
+
+    failed = service.mark_failed(
+        meeting.id, "embedding unavailable", preserve_existing_summary=True
+    )
+
+    assert failed.status == "failed"
+    assert failed.summary_text == "Saved summary"
 
 def test_initiate_processing_dispatches_only_pending_upload(
     service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch

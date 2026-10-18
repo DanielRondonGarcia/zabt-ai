@@ -262,6 +262,8 @@ class MeetingService(BaseService):
         meeting = self.get(Meeting, meeting_id)
         if not meeting:
             return None
+        if status == "completed":
+            raise ValueError("Meeting completion is reserved for the embedding stage.")
         meeting.status = status
         if status in {"queued", "processing"}:
             meeting.processing_heartbeat_at = datetime.utcnow()
@@ -481,8 +483,8 @@ class MeetingService(BaseService):
                 return False
             meeting.structured_output = structured_output
             meeting.structured_output_status = "completed"
-            meeting.status = "completed"
-            meeting.sub_status = None
+            meeting.status = "processing"
+            meeting.sub_status = "indexing_embeddings"
             meeting.processing_heartbeat_at = datetime.utcnow()
             session.add(meeting)
             session.commit()
@@ -507,8 +509,8 @@ class MeetingService(BaseService):
             )
             if meeting is None or meeting.transcript_text:
                 return False
-            meeting.status = "completed"
-            meeting.sub_status = None
+            meeting.status = "processing"
+            meeting.sub_status = "indexing_embeddings"
             meeting.processing_heartbeat_at = datetime.utcnow()
             session.add(meeting)
             session.commit()
@@ -944,6 +946,7 @@ class MeetingService(BaseService):
         *,
         processing_run_id: int | None = None,
         dispatch_attempt_id: str | None = None,
+        preserve_existing_summary: bool = False,
     ) -> Optional[Meeting]:
         """Fail the current attempt; visual-only failures stay off meeting status."""
         with Session(engine) as session:
@@ -993,7 +996,8 @@ class MeetingService(BaseService):
             else:
                 meeting.status = "failed"
                 meeting.sub_status = None
-                meeting.summary_text = f"[Error: {error_message}]"
+                if not preserve_existing_summary or not meeting.summary_text:
+                    meeting.summary_text = f"[Error: {error_message}]"
 
             session.add(meeting)
             session.commit()

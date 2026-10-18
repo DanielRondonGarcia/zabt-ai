@@ -933,7 +933,9 @@ def test_audit_read_hides_current_run_from_foreign_owner() -> None:
         _delete_meeting(meeting_id)
 
 
-def test_pipeline_signatures_attach_headers_without_embedding_link_error() -> None:
+
+
+def test_pipeline_signatures_attach_headers_and_failure_callback_to_embedding() -> None:
     signatures = _build_pipeline_signatures(
         123, [stage_download, stage_embedding], 456, "attempt-456"
     )
@@ -944,8 +946,8 @@ def test_pipeline_signatures_attach_headers_without_embedding_link_error() -> No
     assert signatures[0].options["headers"]["stage"] == "stage_download"
     assert signatures[0].options["link_error"]
     assert signatures[1].options["headers"]["stage"] == "stage_embedding"
-    assert signatures[1].options["link_error"] == []
-
+    assert len(signatures[1].options["link_error"]) == 1
+    assert signatures[1].options["link_error"][0].task == "on_stage_failure"
 
 def test_standard_dispatch_threads_run_and_attempt_identity_to_chain() -> None:
     run = SimpleNamespace(id=456, dispatch_attempt_id="attempt-456")

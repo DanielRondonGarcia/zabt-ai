@@ -288,31 +288,6 @@ def test_stage_embedding_indexes_summary_without_transcript(monkeypatch):
     assert upserts[0][0].text == "A visual-only summary"
 
 
-def test_pipeline_embedding_stage_is_not_linked_to_meeting_failure():
-    worker = _worker()
-
-    signatures = worker._build_pipeline_signatures(
-        123,
-        [
-            worker.stage_download,
-            worker.stage_transcribe,
-            worker.stage_transliterate,
-            worker.stage_optional_visual_breakdown,
-            worker.stage_summarize,
-            worker.stage_extract_intelligence,
-            worker.stage_embedding,
-        ],
-        456,
-    )
-    embedding_signature = signatures[-1]
-
-    assert embedding_signature.task == "stage_embedding"
-    assert embedding_signature.options["headers"] == {
-        "meeting_id": "123",
-        "stage": "stage_embedding",
-        "meeting_processing_run_id": "456",
-    }
-    assert embedding_signature.options["link_error"] == []
 
 
 def test_assignment_and_summary_hooks_enqueue_indexing(monkeypatch):
@@ -335,6 +310,323 @@ def test_assignment_and_summary_hooks_enqueue_indexing(monkeypatch):
     service.update_summary(55, "new")
     assert delayed[-1] == ("index", 55)
 
+
+def test_pipeline_embedding_stage_links_failure_callback():
+    worker = _worker()
+
+    signatures = worker._build_pipeline_signatures(
+        123,
+        [
+            worker.stage_download,
+            worker.stage_transcribe,
+            worker.stage_transliterate,
+            worker.stage_optional_visual_breakdown,
+            worker.stage_summarize,
+            worker.stage_extract_intelligence,
+            worker.stage_embedding,
+        ],
+        456,
+        "attempt-456",
+    )
+    embedding_signature = signatures[-1]
+
+    assert embedding_signature.task == "stage_embedding"
+    assert embedding_signature.options["headers"] == {
+        "meeting_id": "123",
+        "stage": "stage_embedding",
+        "meeting_processing_run_id": "456",
+        "dispatch_attempt_id": "attempt-456",
+    }
+    assert [callback.task for callback in embedding_signature.options["link_error"]] == [
+        "on_stage_failure"
+    ]
+
+def test_embedding_completion_records_stage_and_run_in_caller_transaction():
+    worker = _worker()
+    audit_module = worker.meeting_processing_audit
+    events = []
+    run = SimpleNamespace(
+        id=456,
+        meeting_id=10,
+        dispatch_attempt_id="attempt-456",
+        status="running",
+        started_at=None,
+        completed_at=None,
+        final_error="stale failure",
+    )
+
+    class FakeSession:
+        def add(self, item):
+            events.append(item)
+
+    session = FakeSession()
+    assert audit_module.complete_embedding_in_session(
+        session,
+        run=run,
+        meeting_id=10,
+        attempt_id="attempt-456",
+        task_id="embedding-task",
+        point_count=3,
+    )
+
+    assert run.status == "completed"
+    assert run.started_at is not None
+    assert run.completed_at is not None
+    assert run.final_error is None
+    audit_events = [event for event in events if hasattr(event, "stage")]
+    assert events[0] is run
+    assert [(event.stage, event.event_type, event.status) for event in audit_events] == [
+        ("stage_embedding", "completed", "completed"),
+        ("run", "completed", "completed"),
+    ]
+    assert audit_events[0].metadata_ == {"point_count": 3}
+    assert all(event.dispatch_attempt_id == "attempt-456" for event in audit_events)
+
+def test_stage_embedding_rejects_empty_meeting_content(monkeypatch):
+    worker = _worker()
+    meeting = SimpleNamespace(
+        id=12,
+        owner_id=22,
+        group_id=None,
+        source_type="youtube",
+        transcript_text=None,
+        transliterated_text=None,
+        summary_text=None,
+        original_summary_text=None,
+        structured_output=None,
+        structured_output_status="pending",
+        visual_segments=[],
+        status="processing",
+    )
+    upserts = []
+    deletes = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
+    monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+    _install_embedding_run_check(monkeypatch, worker, meeting, meeting)
+    monkeypatch.setattr(worker, "get_embedding_provider", lambda: (_ for _ in ()).throw(AssertionError("no chunks to embed")))
+    monkeypatch.setattr(
+        worker,
+        "get_vector_store",
+        lambda: SimpleNamespace(
+            delete_by_filter=lambda **kwargs: deletes.append(kwargs),
+            upsert_points=lambda points: upserts.extend(points),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="no indexable content"):
+        _run_embedding(worker, 12)
+
+    assert upserts == []
+    assert deletes == []
+    assert meeting.status == "processing"
+
+def test_stage_embedding_rejects_embedding_count_mismatch(monkeypatch):
+    worker = _worker()
+    meeting = SimpleNamespace(
+        id=13,
+        owner_id=23,
+        group_id=None,
+        source_type="youtube",
+        transcript_text="non-empty transcript",
+        transliterated_text=None,
+        summary_text=None,
+        original_summary_text=None,
+        structured_output=None,
+        structured_output_status="pending",
+        visual_segments=[],
+        status="processing",
+    )
+    upserts = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
+    monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+    _install_embedding_run_check(monkeypatch, worker, meeting, meeting)
+    monkeypatch.setattr(worker, "_get_group_introduction", lambda group_id: None)
+    monkeypatch.setattr(worker, "get_embedding_provider", lambda: SimpleNamespace(embed=lambda texts: []))
+    monkeypatch.setattr(
+        worker,
+        "get_vector_store",
+        lambda: SimpleNamespace(delete_by_filter=lambda **kwargs: None, upsert_points=lambda points: upserts.extend(points)),
+    )
+
+    with pytest.raises(RuntimeError, match="Embedding count mismatch"):
+        _run_embedding(worker, 13)
+
+    assert upserts == []
+    assert meeting.status == "processing"
+
+def test_stage_embedding_completes_meeting_only_after_vector_persistence(monkeypatch):
+    worker = _worker()
+    meeting = SimpleNamespace(
+        id=14,
+        owner_id=24,
+        group_id=None,
+        source_type="upload",
+        transcript_text="non-empty transcript",
+        transliterated_text=None,
+        summary_text=None,
+        original_summary_text=None,
+        structured_output=None,
+        structured_output_status="pending",
+        visual_segments=[],
+        status="processing",
+        sub_status="indexing_embeddings",
+    )
+    events = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def add(self, value):
+            events.append("meeting-save")
+
+        def commit(self):
+            events.append("meeting-commit")
+
+    monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
+    monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+    _install_embedding_run_check(monkeypatch, worker, meeting, meeting)
+    monkeypatch.setattr(worker, "_get_group_introduction", lambda group_id: None)
+    monkeypatch.setattr(
+        worker,
+        "get_embedding_provider",
+        lambda: SimpleNamespace(embed=lambda texts: [[0.1, 0.2, 0.3] for _ in texts]),
+    )
+
+    def upsert(points):
+        assert meeting.status == "processing"
+        assert points
+        events.append("vector-persisted")
+
+    monkeypatch.setattr(
+        worker,
+        "get_vector_store",
+        lambda: SimpleNamespace(delete_by_filter=lambda **kwargs: None, upsert_points=upsert),
+    )
+    monkeypatch.setattr(worker.analytics, "capture", lambda *args, **kwargs: None)
+
+    assert _run_embedding(worker, 14) == 14
+
+    assert meeting.status == "completed"
+    assert events.index("vector-persisted") < events.index("meeting-commit")
+
+@pytest.mark.parametrize(
+    ("method_name", "transcript_text"),
+    [
+        ("complete_intelligence_for_attempt", "existing transcript"),
+        ("complete_without_intelligence_for_attempt", None),
+    ],
+)
+def test_intelligence_completion_waits_for_embedding_gate(monkeypatch, method_name, transcript_text):
+    worker = _worker()
+    meeting = SimpleNamespace(
+        id=15,
+        owner_id=25,
+        transcript_text=transcript_text,
+        status="processing",
+        sub_status="extracting_intelligence",
+        processing_heartbeat_at=None,
+    )
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def add(self, item):
+            pass
+
+        def commit(self):
+            pass
+
+    monkeypatch.setattr(sys.modules["app.services.meeting"], "Session", lambda engine: FakeSession())
+    monkeypatch.setattr(
+        worker.meeting_service,
+        "_locked_intelligence_meeting",
+        lambda session, *args, **kwargs: meeting,
+    )
+    method = getattr(worker.meeting_service, method_name)
+    if method_name == "complete_intelligence_for_attempt":
+        result = method(
+            15,
+            {"topics": []},
+            processing_run_id=456,
+            dispatch_attempt_id="attempt-456",
+            owner_id=25,
+        )
+    else:
+        result = method(
+            15,
+            processing_run_id=456,
+            dispatch_attempt_id="attempt-456",
+            owner_id=25,
+        )
+
+    assert result is True
+    assert meeting.status == "processing"
+    assert meeting.sub_status == "indexing_embeddings"
+
+def test_embedding_failure_callback_marks_meeting_failed_for_exact_run(monkeypatch):
+    worker = _worker()
+    request = SimpleNamespace(
+        args=(14,),
+        headers={
+            "meeting_processing_run_id": "789",
+            "dispatch_attempt_id": "attempt-789",
+        },
+    )
+    failed_meeting = SimpleNamespace(status="failed", owner_id=None)
+    failures = []
+    monkeypatch.setattr(
+        worker.meeting_service,
+        "mark_failed",
+        lambda meeting_id, error, **kwargs: failures.append((meeting_id, error, kwargs)) or failed_meeting,
+    )
+    monkeypatch.setattr(
+        worker.meeting_processing_audit,
+        "run_failed",
+        lambda run_id, **kwargs: failures.append(("run", run_id, kwargs)) or True,
+    )
+    monkeypatch.setattr(
+        worker.meeting_processing_audit,
+        "failure_effects_are_eligible",
+        lambda **kwargs: False,
+    )
+
+    worker.on_stage_failure(request, RuntimeError("Qdrant unavailable"), None)
+
+    assert len(failures) == 2
+    assert failures[0][0] == 14
+    assert str(failures[0][1]) == "Qdrant unavailable"
+    assert failures[0][2] == {
+        "processing_run_id": 789,
+        "dispatch_attempt_id": "attempt-789",
+        "preserve_existing_summary": False,
+    }
+    assert failures[1][0:2] == ("run", 789)
+    assert failures[1][2]["attempt_id"] == "attempt-789"
+    assert str(failures[1][2]["error"]) == "Qdrant unavailable"
 
 def test_assign_group_enqueues_indexing_after_assignment_commit(monkeypatch):
     _install_storage_stub()

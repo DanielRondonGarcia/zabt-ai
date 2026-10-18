@@ -504,7 +504,7 @@ def _build_pipeline_signatures(
     for index, stage in enumerate(stages):
         stage_name = stage.name
         signature = stage.s(meeting_id) if index == 0 else stage.s()
-        link_errors = [] if stage_name == "stage_embedding" else [on_stage_failure.s()]
+        link_errors = [on_stage_failure.s()]
         signatures.append(
             signature.set(
                 headers=_audit_headers(run_id, meeting_id, stage_name, attempt_id),
@@ -568,9 +568,7 @@ def _record_audit_stage_succeeded(sender=None, result=None, **kwargs):
         stage == "stage_visual_breakdown"
         and _get_audit_header(task, "meeting_processing_terminal_success") == "true"
     )
-    if terminal_visual_success or stage == "stage_embedding" or (
-        stage == "finalize_recovered_meeting" and result == meeting_id
-    ):
+    if terminal_visual_success or stage == "stage_embedding":
         meeting_processing_audit.run_completed(
             run_id,
             attempt_id=attempt_id,
@@ -637,11 +635,13 @@ def on_stage_failure(request, exc, traceback):
         return
     # task_failure is the authority for per-stage events. This callback only
     # updates meeting status for the exact current dispatch attempt.
+    stage_name = headers.get("stage") or getattr(request, "task", None)
     failed_meeting = meeting_service.mark_failed(
         meeting_id,
         str(exc),
         processing_run_id=run_id,
         dispatch_attempt_id=attempt_id,
+        preserve_existing_summary=stage_name == "stage_embedding",
     )
     if failed_meeting is None:
         return
