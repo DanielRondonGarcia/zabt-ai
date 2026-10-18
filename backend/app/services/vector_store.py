@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
-"""Qdrant vector store client for group-scoped embeddings."""
+"""Qdrant vector store for meeting embeddings with group-gated retrieval."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class EmbeddingPoint:
     vector: list[float]
     text: str
     owner_id: int
-    group_id: int
+    group_id: int | None
     meeting_id: int
     kind: str
     chunk_index: int
@@ -103,24 +103,27 @@ class QdrantVectorStoreClient:
         if not points:
             return
         self.ensure_collection()
-        qdrant_points = [
-            qdrant_models.PointStruct(
-                id=point.id,
-                vector=point.vector,
-                payload={
-                    "text": point.text,
-                    "owner_id": point.owner_id,
-                    "group_id": point.group_id,
-                    "meeting_id": point.meeting_id,
-                    "kind": point.kind,
-                    "chunk_index": point.chunk_index,
-                    "chunk_count": point.chunk_count,
-                    "source_type": point.source_type,
-                    "model": point.model,
-                },
+        qdrant_points = []
+        for point in points:
+            payload = {
+                "text": point.text,
+                "owner_id": point.owner_id,
+                "meeting_id": point.meeting_id,
+                "kind": point.kind,
+                "chunk_index": point.chunk_index,
+                "chunk_count": point.chunk_count,
+                "source_type": point.source_type,
+                "model": point.model,
+            }
+            if point.group_id is not None:
+                payload["group_id"] = point.group_id
+            qdrant_points.append(
+                qdrant_models.PointStruct(
+                    id=point.id,
+                    vector=point.vector,
+                    payload=payload,
+                )
             )
-            for point in points
-        ]
         self.client.upsert(collection_name=self.active_collection, points=qdrant_points)
 
     def delete_by_filter(
@@ -149,6 +152,8 @@ class QdrantVectorStoreClient:
         limit: int = 10,
     ) -> list[dict[str, Any]]:
         """Search with a mandatory group boundary and optional owner filter."""
+        if group_id is None:
+            raise ValueError("group_id is required for vector search")
         self.ensure_collection()
         query_filter = self._filter(owner_id, group_id, None, kinds=kinds)
         if hasattr(self.client, "search"):

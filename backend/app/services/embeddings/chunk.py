@@ -96,9 +96,10 @@ def build_meeting_chunks(
     original_summary_text: str | None = None,
     structured_output: Any | None = None,
     structured_output_status: str | None = None,
+    visual_segments: list[Any] | None = None,
     group_introduction: str | None = None,
 ) -> list[MeetingContentChunk]:
-    """Build citation-safe chunks with optional group context for embedding only."""
+    """Build citation-safe text chunks with optional group context for embedding only."""
     chunks: list[MeetingContentChunk] = []
     summary = summary_text or original_summary_text
     chunks.extend(
@@ -134,4 +135,30 @@ def build_meeting_chunks(
                 embedding_context=group_introduction,
             )
         )
+
+    visual_lines = []
+    for segment in sorted(
+        visual_segments or [],
+        key=lambda item: (
+            float(getattr(item, "start_time")),
+            float(getattr(item, "end_time")),
+            int(getattr(item, "sequence", 0)),
+        ),
+    ):
+        caption = canonicalize_text(getattr(segment, "caption", None))
+        if not caption:
+            continue
+        start_time = float(getattr(segment, "start_time"))
+        end_time = float(getattr(segment, "end_time"))
+        visual_lines.append(
+            f"Visual description {start_time:.2f}s-{end_time:.2f}s: {caption}"
+        )
+    chunks.extend(
+        _chunked_text(
+            meeting_id,
+            "visual",
+            " ".join(visual_lines),
+            embedding_context=group_introduction,
+        )
+    )
     return chunks

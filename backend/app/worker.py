@@ -2250,7 +2250,7 @@ def _requeue_stale_meeting_index(
     retry_backoff=True,
 )
 def stage_embedding(meeting_id: int) -> int:
-    """Index grouped meeting content into the active vector collection."""
+    """Index available meeting content, whether or not it has a group yet."""
     if not settings.INDEXING_ENABLED:
         logger.info("stage_embedding skipped disabled meeting_id=%s", meeting_id)
         return meeting_id
@@ -2260,11 +2260,13 @@ def stage_embedding(meeting_id: int) -> int:
         meeting, _run = meeting_processing_audit._locked_current_run(
             session, run_id, meeting_id, attempt_id
         )
+        visual_segments = (
+            list(getattr(meeting, "visual_segments", []) or [])
+            if meeting is not None
+            else []
+        )
     if meeting is None:
         raise Ignore()
-    if not meeting.group_id:
-        logger.info("stage_embedding skipped ungrouped meeting_id=%s", meeting_id)
-        return meeting_id
     if not meeting.owner_id:
         logger.warning("stage_embedding skipped missing owner meeting_id=%s", meeting_id)
         return meeting_id
@@ -2282,7 +2284,11 @@ def stage_embedding(meeting_id: int) -> int:
     )
 
     try:
-        group_introduction = _get_group_introduction(meeting.group_id)
+        group_introduction = (
+            _get_group_introduction(meeting.group_id)
+            if meeting.group_id is not None
+            else None
+        )
         chunks = build_meeting_chunks(
             meeting_id=meeting.id,
             transcript_text=meeting.transcript_text,
@@ -2291,6 +2297,7 @@ def stage_embedding(meeting_id: int) -> int:
             original_summary_text=meeting.original_summary_text,
             structured_output=meeting.structured_output,
             structured_output_status=meeting.structured_output_status,
+            visual_segments=visual_segments,
             group_introduction=group_introduction,
         )
         points: list[EmbeddingPoint] = []

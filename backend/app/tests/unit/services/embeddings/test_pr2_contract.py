@@ -93,6 +93,25 @@ def test_short_summary_and_structured_output_keep_single_chunk_contract():
     ]
 
 
+def test_visual_descriptions_are_chunked_with_their_time_ranges():
+    chunks = build_meeting_chunks(
+        meeting_id=123,
+        visual_segments=[
+            SimpleNamespace(
+                start_time=12.5,
+                end_time=18.0,
+                caption="A person falls beside the doorway.",
+            )
+        ],
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].kind == "visual"
+    assert "12.50s-18.00s" in chunks[0].text
+    assert "A person falls beside the doorway." in chunks[0].text
+    assert chunks[0].id == point_id_for(123, "visual", 0)
+
+
 class _FakeResponse:
     def __init__(self, payload, status_code=200):
         self._payload = payload
@@ -331,3 +350,46 @@ def test_vector_store_filters_owner_group_and_uses_deterministic_ids(monkeypatch
     search_filter = fake.searches[0][2]
     rendered = repr(search_filter)
     assert "owner_id" in rendered and "group_id" in rendered and "summary" in rendered
+
+
+def test_vector_search_rejects_missing_group_scope(monkeypatch):
+    fake = _FakeQdrant()
+    monkeypatch.setattr("app.services.vector_store.settings.EMBEDDING_PROVIDER", "ollama")
+    monkeypatch.setattr("app.services.vector_store.settings.EMBEDDING_DIMENSION", 3)
+    client = QdrantVectorStoreClient(client=fake)
+
+    with pytest.raises(ValueError, match="group_id is required"):
+        client.search_filtered([0.1, 0.2, 0.3], owner_id=None, group_id=None)
+
+    assert fake.searches == []
+
+
+def test_ungrouped_points_store_without_group_and_remain_group_filtered(monkeypatch):
+    fake = _FakeQdrant()
+    monkeypatch.setattr("app.services.vector_store.settings.EMBEDDING_PROVIDER", "ollama")
+    monkeypatch.setattr("app.services.vector_store.settings.EMBEDDING_DIMENSION", 3)
+    client = QdrantVectorStoreClient(client=fake)
+
+    client.upsert_points([
+        EmbeddingPoint(
+            id=point_id_for(7, "visual", 0),
+            vector=[0.1, 0.2, 0.3],
+            text="12.50s-18.00s A person falls beside the doorway.",
+            owner_id=5,
+            group_id=None,
+            meeting_id=7,
+            kind="visual",
+            chunk_index=0,
+            chunk_count=1,
+            source_type="upload",
+            model="nomic",
+        )
+    ])
+
+    assert "group_id" not in fake.upserts[0][1][0].payload
+    client.search_filtered([0.1, 0.2, 0.3], owner_id=5, group_id=9)
+    conditions = fake.searches[0][2].must
+    assert [(condition.key, condition.match.value) for condition in conditions] == [
+        ("owner_id", 5),
+        ("group_id", 9),
+    ]

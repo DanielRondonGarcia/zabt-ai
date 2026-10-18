@@ -16,6 +16,10 @@ def _install_storage_stub():
         delete_file=lambda *a, **k: None,
         delete_prefix=lambda *a, **k: None,
     )
+    module.get_storage_for_provider = lambda *a, **k: module.storage
+    module.get_current_storage = lambda *a, **k: module.storage
+    module.get_current_storage_provider = lambda *a, **k: "minio"
+    module.storage_provider_from_object_key = lambda *a, **k: "minio"
     sys.modules["app.services.storage"] = module
 
 
@@ -76,17 +80,69 @@ def test_indexing_disabled_short_circuits_all_tasks(monkeypatch):
     assert calls == []
 
 
-def test_stage_embedding_skips_ungrouped_meeting(monkeypatch):
+def test_stage_embedding_indexes_ungrouped_visual_content(monkeypatch):
     worker = _worker()
+    meeting = SimpleNamespace(
+        id=10,
+        owner_id=20,
+        group_id=None,
+        source_type="upload",
+        transcript_text=None,
+        transliterated_text=None,
+        summary_text=None,
+        original_summary_text=None,
+        structured_output=None,
+        structured_output_status="pending",
+        visual_segments=[
+            SimpleNamespace(
+                start_time=12.5,
+                end_time=18.0,
+                caption="A person falls beside the doorway.",
+            )
+        ],
+    )
+    upserts = []
+    embedded_texts = []
+    group_context_requests = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
     monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
-    meeting = SimpleNamespace(id=10, owner_id=20, group_id=None)
-    monkeypatch.setattr(worker, "Session", lambda engine: _FakeSession())
-    _install_embedding_run_check(monkeypatch, worker, meeting)
-    calls = []
-    monkeypatch.setattr(worker, "get_vector_store", lambda: calls.append("store"))
+    monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+    _install_embedding_run_check(monkeypatch, worker, meeting, meeting)
+    monkeypatch.setattr(
+        worker,
+        "_get_group_introduction",
+        lambda group_id: group_context_requests.append(group_id),
+    )
+    monkeypatch.setattr(
+        worker,
+        "get_embedding_provider",
+        lambda: SimpleNamespace(
+            embed=lambda texts: embedded_texts.extend(texts) or [[1.0, 2.0, 3.0] for _ in texts]
+        ),
+    )
+    monkeypatch.setattr(
+        worker,
+        "get_vector_store",
+        lambda: SimpleNamespace(upsert_points=lambda points: upserts.append(points)),
+    )
+    monkeypatch.setattr(worker.analytics, "capture", lambda *args, **kwargs: None)
 
     assert _run_embedding(worker, 10) == 10
-    assert calls == []
+    assert len(upserts) == 1
+    assert len(upserts[0]) == 1
+    assert upserts[0][0].group_id is None
+    assert upserts[0][0].kind == "visual"
+    assert "12.50s-18.00s" in upserts[0][0].text
+    assert "A person falls beside the doorway." in upserts[0][0].text
+    assert embedded_texts == [upserts[0][0].text]
+    assert group_context_requests == []
 
 
 def test_stage_embedding_builds_points_and_upserts(monkeypatch):
