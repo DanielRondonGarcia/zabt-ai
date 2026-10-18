@@ -2573,7 +2573,7 @@ def delete_group_vectors(group_id: int) -> int:
 def reindex_group(group_id: int) -> int:
     """Re-run indexing for all meetings currently assigned to a group."""
     if not settings.INDEXING_ENABLED:
-        return group_id
+        raise RuntimeError("Vector indexing is disabled; group reindex cannot complete.")
     with Session(engine) as session:
         from app.models import Group
 
@@ -2593,7 +2593,7 @@ def reindex_group(group_id: int) -> int:
     )
     try:
         for meeting_id in meeting_ids:
-            stage_embedding.delay(meeting_id)
+            reindex_meeting.delay(meeting_id)
     except Exception:
         logger.exception("reindex_group failed group_id=%s owner_id=%s", group_id, owner_id)
         _capture_embedding_event(owner_id, "embedding_reindex_failed", {"group_id": group_id})

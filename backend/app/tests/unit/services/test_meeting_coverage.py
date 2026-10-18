@@ -165,7 +165,7 @@ def install_visual_run_lock(
 
 
 def install_worker(monkeypatch: pytest.MonkeyPatch):
-    calls = SimpleNamespace(dispatch=[], embedding=[], delete_vectors=[])
+    calls = SimpleNamespace(dispatch=[], reindex=[], delete_vectors=[])
 
     class DelayRecorder:
         def __init__(self, sink):
@@ -176,7 +176,7 @@ def install_worker(monkeypatch: pytest.MonkeyPatch):
 
     worker = types.ModuleType("app.worker")
     worker.dispatch_pipeline = lambda meeting_id: calls.dispatch.append(meeting_id)
-    worker.stage_embedding = DelayRecorder(calls.embedding)
+    worker.reindex_meeting = DelayRecorder(calls.reindex)
     worker.delete_meeting_vectors = DelayRecorder(calls.delete_vectors)
     monkeypatch.setitem(sys.modules, "app.worker", worker)
     return calls
@@ -942,7 +942,13 @@ def test_initiate_processing_dispatches_only_pending_upload(
     assert service.initiate_processing("missing.mp3") is None
 
 
-def test_update_and_restore_summary_preserve_original_and_reindex_grouped_meeting(
+
+
+
+
+
+
+def test_update_and_restore_summary_preserve_original_and_reindex_meeting(
     service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     meeting = store.add_meeting(title="Grouped", summary_text="AI", group_id=9)
@@ -955,10 +961,9 @@ def test_update_and_restore_summary_preserve_original_and_reindex_grouped_meetin
     assert updated.summary_text == "AI"
     assert updated.summary_edited is False
     assert restored.summary_text == "AI"
-    assert calls.embedding == [meeting.id, meeting.id]
+    assert calls.reindex == [meeting.id, meeting.id]
 
-
-def test_summary_embedding_errors_are_ignored(
+def test_summary_reindex_errors_are_ignored(
     service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     meeting = store.add_meeting(
@@ -970,14 +975,13 @@ def test_summary_embedding_errors_are_ignored(
         def delay(self, _meeting_id):
             raise RuntimeError("queue down")
 
-    worker.stage_embedding = BrokenDelay()
+    worker.reindex_meeting = BrokenDelay()
     monkeypatch.setitem(sys.modules, "app.worker", worker)
 
     assert service.update_summary(meeting.id, "Human").summary_text == "Human"
     assert service.restore_summary(meeting.id).summary_text == "AI"
 
-
-def test_update_summary_without_existing_summary_does_not_set_original(
+def test_update_summary_without_existing_summary_reindexes_ungrouped_meeting(
     service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     meeting = store.add_meeting(title="Empty", summary_text=None, group_id=None)
@@ -988,8 +992,7 @@ def test_update_summary_without_existing_summary_does_not_set_original(
     assert updated.original_summary_text is None
     assert updated.summary_text == "First"
     assert updated.summary_edited is True
-    assert calls.embedding == []
-
+    assert calls.reindex == [meeting.id]
 
 def test_restore_summary_missing_and_no_original_return_none(service: MeetingService, store: MeetingStore) -> None:
     meeting = store.add_meeting(title="No original", summary_text="Human")
@@ -1036,11 +1039,13 @@ def test_update_field_persists_value_and_reindexes_text_fields_for_grouped_meeti
     updated = service.update_field(meeting.id, "summary_text", "new")
 
     assert updated.summary_text == "new"
-    assert calls.embedding == [meeting.id]
+    assert calls.reindex == [meeting.id]
     assert service.update_field(404, "summary_text", "missing") is None
 
 
-def test_update_field_ignores_embedding_errors_and_non_text_fields(
+
+
+def test_update_field_ignores_reindex_errors_and_non_text_fields(
     service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     meeting = store.add_meeting(title="Field", group_id=2)
@@ -1050,12 +1055,11 @@ def test_update_field_ignores_embedding_errors_and_non_text_fields(
         def delay(self, _meeting_id):
             raise RuntimeError("celery down")
 
-    worker.stage_embedding = BrokenDelay()
+    worker.reindex_meeting = BrokenDelay()
     monkeypatch.setitem(sys.modules, "app.worker", worker)
 
     assert service.update_field(meeting.id, "summary_text", "new").summary_text == "new"
     assert service.update_field(meeting.id, "title", "Renamed").title == "Renamed"
-
 
 def test_delete_meeting_requests_vector_cleanup_and_deletes_record(
     service: MeetingService, store: MeetingStore, monkeypatch: pytest.MonkeyPatch

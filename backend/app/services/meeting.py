@@ -1121,15 +1121,15 @@ class MeetingService(BaseService):
 
     @staticmethod
     def _enqueue_embedding(meeting: Meeting) -> None:
-        if not meeting.group_id:
+        if meeting.id is None:
             return
         try:
-            from app.worker import stage_embedding
+            from app.worker import reindex_meeting
 
-            stage_embedding.delay(meeting.id)
+            reindex_meeting.delay(meeting.id)
         except Exception:
             logger.warning(
-                "Failed to enqueue meeting embedding meeting_id=%s",
+                "Failed to enqueue meeting reindex meeting_id=%s",
                 meeting.id,
                 exc_info=True,
             )

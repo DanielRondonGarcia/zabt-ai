@@ -637,6 +637,7 @@ def resummarize_meeting(
     from app.worker import (
         _audit_headers,
         on_stage_failure,
+        stage_embedding,
         stage_extract_intelligence,
         stage_summarize,
     )
@@ -671,8 +672,14 @@ def resummarize_meeting(
         ),
         link_error=[on_stage_failure.s()],
     )
+    embedding_signature = stage_embedding.s().set(
+        headers=_audit_headers(run.id, meeting_id, "stage_embedding", attempt_id),
+        link_error=[on_stage_failure.s()],
+    )
     try:
-        result = chain(summary_signature, intelligence_signature).apply_async(
+        result = chain(
+            summary_signature, intelligence_signature, embedding_signature
+        ).apply_async(
             args=[meeting_id]
         )
     except Exception as exc:

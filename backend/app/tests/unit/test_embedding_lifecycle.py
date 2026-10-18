@@ -204,6 +204,12 @@ def test_stage_embedding_builds_points_and_upserts(monkeypatch):
             assert getattr(statement, "_for_update_arg", None) is not None
             return SimpleNamespace(first=lambda: meeting)
 
+        def add(self, item):
+            pass
+
+        def commit(self):
+            pass
+
     monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
     monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
     _install_embedding_run_check(monkeypatch, worker, meeting, meeting)
@@ -218,7 +224,14 @@ def test_stage_embedding_builds_points_and_upserts(monkeypatch):
             )
         ),
     )
-    monkeypatch.setattr(worker, "get_vector_store", lambda: SimpleNamespace(upsert_points=lambda points: upserts.append(points)))
+    monkeypatch.setattr(
+        worker,
+        "get_vector_store",
+        lambda: SimpleNamespace(
+            delete_by_filter=lambda **kwargs: None,
+            upsert_points=lambda points: upserts.append(points),
+        ),
+    )
     monkeypatch.setattr(worker.analytics, "capture", lambda owner_id, event, props: telemetry.append((owner_id, event, props)))
 
     assert _run_embedding(worker, 10) == 10
@@ -290,25 +303,6 @@ def test_stage_embedding_indexes_summary_without_transcript(monkeypatch):
 
 
 
-def test_assignment_and_summary_hooks_enqueue_indexing(monkeypatch):
-    _install_storage_stub()
-    from app.api.v1.endpoints import meetings as meeting_endpoint
-    from app.services.meeting import MeetingService
-
-    worker = _worker()
-    delayed = []
-    monkeypatch.setattr(worker.stage_embedding, "delay", lambda meeting_id: delayed.append(("index", meeting_id)))
-    monkeypatch.setattr(worker.reindex_meeting, "delay", lambda meeting_id: delayed.append(("reindex", meeting_id)))
-
-    assert meeting_endpoint._enqueue_group_assignment_indexing(1, 3, 4) is None
-    assert meeting_endpoint._enqueue_group_assignment_indexing(1, 4, 4) is None
-    assert delayed == [("reindex", 1), ("reindex", 1)]
-
-    service = MeetingService()
-    monkeypatch.setattr(service, "get", lambda model, meeting_id: SimpleNamespace(id=meeting_id, group_id=9, original_summary_text=None, summary_text="old"))
-    monkeypatch.setattr(service, "save", lambda meeting: meeting)
-    service.update_summary(55, "new")
-    assert delayed[-1] == ("index", 55)
 
 
 def test_pipeline_embedding_stage_links_failure_callback():
@@ -628,6 +622,31 @@ def test_embedding_failure_callback_marks_meeting_failed_for_exact_run(monkeypat
     assert failures[1][2]["attempt_id"] == "attempt-789"
     assert str(failures[1][2]["error"]) == "Qdrant unavailable"
 
+def test_assignment_and_summary_hooks_enqueue_reindex_for_all_meetings(monkeypatch):
+    _install_storage_stub()
+    from app.api.v1.endpoints import meetings as meeting_endpoint
+    from app.services.meeting import MeetingService
+
+    worker = _worker()
+    delayed = []
+    monkeypatch.setattr(worker.stage_embedding, "delay", lambda meeting_id: delayed.append(("index", meeting_id)))
+    monkeypatch.setattr(worker.reindex_meeting, "delay", lambda meeting_id: delayed.append(("reindex", meeting_id)))
+
+    assert meeting_endpoint._enqueue_group_assignment_indexing(1, 3, 4) is None
+    assert meeting_endpoint._enqueue_group_assignment_indexing(1, 4, 4) is None
+    assert delayed == [("reindex", 1), ("reindex", 1)]
+
+    service = MeetingService()
+    meetings = {
+        55: SimpleNamespace(id=55, group_id=9, original_summary_text=None, summary_text="old"),
+        56: SimpleNamespace(id=56, group_id=None, original_summary_text=None, summary_text="old"),
+    }
+    monkeypatch.setattr(service, "get", lambda model, meeting_id: meetings[meeting_id])
+    monkeypatch.setattr(service, "save", lambda meeting: meeting)
+    service.update_summary(55, "new")
+    service.update_summary(56, "new ungrouped summary")
+    assert delayed[-2:] == [("reindex", 55), ("reindex", 56)]
+
 def test_assign_group_enqueues_indexing_after_assignment_commit(monkeypatch):
     _install_storage_stub()
     from app.api.v1.endpoints import meetings as meeting_endpoint
@@ -784,19 +803,46 @@ def test_meeting_reindex_endpoint_provides_retry_path(monkeypatch):
     assert response.model_dump() == {"status": "accepted", "task_id": "retry-task"}
 
 
-def test_reindex_meeting_runs_delete_before_index(monkeypatch):
+
+
+def test_resummarize_pipeline_includes_audited_embedding_stage(monkeypatch):
+    import celery
+    _install_storage_stub()
+    from app.api.v1.endpoints import meetings as meeting_endpoint
+
     worker = _worker()
-    events = []
-    meeting = SimpleNamespace(id=10, group_id=4)
+    run = SimpleNamespace(id=89, dispatch_attempt_id="attempt-89", trigger="resummarize")
+    monkeypatch.setattr(meeting_endpoint, "_get_meeting_for_access", lambda meeting_id, user_id: SimpleNamespace(id=meeting_id))
+    monkeypatch.setattr(worker.meeting_processing_audit, "create_resummarize_run", lambda meeting_id: (run, ("completed", None, None)))
+    monkeypatch.setattr(worker.meeting_processing_audit, "set_root_task", lambda *args, **kwargs: True)
+    captured = {}
 
-    monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
-    monkeypatch.setattr(worker.delete_meeting_vectors, "run", lambda meeting_id: events.append(("delete", meeting_id)))
-    monkeypatch.setattr(worker.meeting_service, "get", lambda model, meeting_id: meeting)
-    monkeypatch.setattr(worker.stage_embedding, "run", lambda meeting_id: events.append(("index", meeting_id)))
+    class FakeChain:
+        def __init__(self, *signatures):
+            captured["signatures"] = signatures
 
-    assert worker.reindex_meeting.run(10) == 10
-    assert events == [("delete", 10), ("index", 10)]
+        def apply_async(self, *, args):
+            captured["args"] = args
+            return SimpleNamespace(id="resummarize-root")
 
+    monkeypatch.setattr(celery, "chain", lambda *signatures: FakeChain(*signatures))
+
+    response = meeting_endpoint.resummarize_meeting(
+        45,
+        meeting_endpoint.ResummarizeRequest(template_id=3),
+        current_user=SimpleNamespace(id=7),
+    )
+
+    assert response["run_id"] == 89
+    signatures = captured["signatures"]
+    assert [signature.task for signature in signatures] == [
+        "stage_summarize",
+        "stage_extract_intelligence",
+        "stage_embedding",
+    ]
+    assert signatures[-1].options["headers"]["meeting_processing_run_id"] == "89"
+    assert signatures[-1].options["headers"]["dispatch_attempt_id"] == "attempt-89"
+    assert signatures[-1].options["link_error"][0].task == "on_stage_failure"
 
 def test_audit_reindex_admission_does_not_reuse_active_reindex_run(monkeypatch):
     worker = _worker()
@@ -982,6 +1028,32 @@ def test_create_reindex_run_claims_completed_meeting_and_skips_duplicate_deliver
 
     duplicate = worker.meeting_processing_audit.create_reindex_run(40)
     assert duplicate is None
+
+def test_reindex_group_enqueues_audited_meeting_reindexes(monkeypatch):
+    worker = _worker()
+    reindexes = []
+
+    class FakeSession:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def get(self, model, group_id):
+            return SimpleNamespace(owner_id=20)
+
+        def exec(self, statement):
+            return SimpleNamespace(all=lambda: [10, 11])
+
+    monkeypatch.setattr(worker.settings, "INDEXING_ENABLED", True)
+    monkeypatch.setattr(worker, "Session", lambda engine: FakeSession())
+    monkeypatch.setattr(worker.reindex_meeting, "delay", lambda meeting_id: reindexes.append(meeting_id))
+    monkeypatch.setattr(worker.stage_embedding, "delay", lambda *args, **kwargs: pytest.fail("stage_embedding needs an audit run"))
+    monkeypatch.setattr(worker, "_capture_embedding_event", lambda *args, **kwargs: None)
+
+    assert worker.reindex_group.run(3) == 3
+    assert reindexes == [10, 11]
 
 def test_stage_embedding_retries_when_summary_changes_during_embedding(monkeypatch):
     worker = _worker()
