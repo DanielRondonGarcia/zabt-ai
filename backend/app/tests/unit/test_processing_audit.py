@@ -35,7 +35,7 @@ from app.worker import (
     finalize_recovered_meeting,
     on_stage_failure,
     send_notification,
-    _clear_transcription_for_no_audio,
+    _mark_transcription_skipped_for_no_audio,
     _save_transcription_for_attempt,
     _temp_path_for,
     stage_extract_intelligence,
@@ -1395,7 +1395,7 @@ def test_stale_transcription_attempt_is_ignored_and_cleans_only_its_temp(tmp_pat
         _delete_meeting(meeting_id)
 
 
-def test_cancelled_attempt_cannot_apply_transcript_or_no_audio_clearing() -> None:
+def test_cancelled_attempt_cannot_apply_transcript_or_no_audio_skip() -> None:
     meeting_id = _make_meeting()
     try:
         run = meeting_processing_audit.get_or_create_pending_run(meeting_id)
@@ -1410,7 +1410,7 @@ def test_cancelled_attempt_cannot_apply_transcript_or_no_audio_clearing() -> Non
             meeting_id, run.id, run.dispatch_attempt_id, late_result,
             owner_id=1, user_tier="free",
         )
-        assert not _clear_transcription_for_no_audio(
+        assert not _mark_transcription_skipped_for_no_audio(
             meeting_id, 180, run.id, run.dispatch_attempt_id
         )
         with Session(engine) as session:

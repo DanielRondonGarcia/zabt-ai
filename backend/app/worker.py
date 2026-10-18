@@ -36,7 +36,6 @@ from app.models import (
     User,
     VisualSegment,
 )
-from app.models.meeting_intelligence import MeetingHighlight
 from app.services.meeting import meeting_service
 from app.services.storage import get_storage_for_provider, storage
 from app.services.transcription import (
@@ -67,7 +66,7 @@ from app.services.meeting_processing_audit import meeting_processing_audit
 from app.services.visual_breakdown.direct_service import DirectVisionService
 
 from sqlalchemy import func
-from sqlmodel import Session, delete, select
+from sqlmodel import Session, select
 
 
 @worker_shutdown.connect
@@ -191,6 +190,8 @@ def _cleanup_youtube_attempt_artifacts(
 
 
 _LOCAL_MEDIA_PROBE_TIMEOUT_SECONDS = 10.0
+_LOCAL_MEDIA_AUDIO_PROBE_TIMEOUT_SECONDS = 60.0
+_LOCAL_MEDIA_SILENCE_THRESHOLD_DB = -90.0
 _TRANSCRIPTION_SKIPPED_NO_AUDIO = "transcription_skipped_no_audio"
 
 
@@ -199,6 +200,76 @@ class _LocalMediaProbe:
     has_video: bool
     has_audio: bool
     duration_seconds: float | None
+    audio_is_silent: bool | None = None
+
+
+def _probe_audio_silence(path: str, audio_stream_count: int) -> bool | None:
+    """Return whether every audio stream is near-digital silence, or None if unknown."""
+    try:
+        completed = subprocess.run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostdin",
+                "-loglevel",
+                "info",
+                "-i",
+                path,
+                "-map",
+                "0:a",
+                "-vn",
+                "-af",
+                "volumedetect",
+                "-f",
+                "null",
+                "-",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_LOCAL_MEDIA_AUDIO_PROBE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("local media audio probe timed out path=%s", path)
+        return None
+    except OSError as exc:
+        logger.warning("local media audio probe unavailable path=%s error=%s", path, exc)
+        return None
+
+    if completed.returncode != 0:
+        logger.warning(
+            "local media audio probe failed path=%s returncode=%s",
+            path,
+            completed.returncode,
+        )
+        return None
+
+    max_volume_values = re.findall(
+        r"\bmax_volume:\s*(-inf|[-+]?(?:\d+(?:\.\d*)?|\.\d+))\s*dB\b",
+        completed.stderr or "",
+        flags=re.IGNORECASE,
+    )
+    if len(max_volume_values) != audio_stream_count:
+        logger.warning(
+            "local media audio probe returned incomplete metadata path=%s expected_streams=%s reported_streams=%s",
+            path,
+            audio_stream_count,
+            len(max_volume_values),
+        )
+        return None
+
+    for value in max_volume_values:
+        if value.casefold() == "-inf":
+            continue
+        try:
+            peak_db = float(value)
+        except ValueError:
+            return None
+        if not isfinite(peak_db):
+            return None
+        if peak_db > _LOCAL_MEDIA_SILENCE_THRESHOLD_DB:
+            return False
+    return True
 
 
 def _probe_local_media(path: str) -> _LocalMediaProbe | None:
@@ -267,26 +338,33 @@ def _probe_local_media(path: str) -> _LocalMediaProbe | None:
             duration_seconds = candidate
             break
 
+    has_video = any(
+        isinstance(stream, dict) and stream.get("codec_type") == "video"
+        for stream in streams
+    )
+    audio_stream_count = sum(
+        1 for stream in streams
+        if isinstance(stream, dict) and stream.get("codec_type") == "audio"
+    )
     return _LocalMediaProbe(
-        has_video=any(
-            isinstance(stream, dict) and stream.get("codec_type") == "video"
-            for stream in streams
-        ),
-        has_audio=any(
-            isinstance(stream, dict) and stream.get("codec_type") == "audio"
-            for stream in streams
-        ),
+        has_video=has_video,
+        has_audio=audio_stream_count > 0,
         duration_seconds=duration_seconds,
+        audio_is_silent=(
+            _probe_audio_silence(path, audio_stream_count)
+            if has_video and audio_stream_count
+            else None
+        ),
     )
 
 
-def _clear_transcription_for_no_audio(
+def _mark_transcription_skipped_for_no_audio(
     meeting_id: int,
     duration_seconds: float | None,
     run_id: int,
     attempt_id: str,
 ) -> bool:
-    """Remove stale spoken output before continuing with video-only stages."""
+    """Mark the current attempt as skipping transcription without deleting prior outputs."""
     with Session(engine) as session:
         meeting, _run = meeting_processing_audit._locked_current_run(
             session, run_id, meeting_id, attempt_id
@@ -294,17 +372,6 @@ def _clear_transcription_for_no_audio(
         if meeting is None:
             return False
 
-        session.exec(delete(TranscriptSegment).where(TranscriptSegment.meeting_id == meeting_id))
-        session.exec(delete(MeetingHighlight).where(MeetingHighlight.meeting_id == meeting_id))
-
-        meeting.transcript_text = None
-        meeting.transliterated_text = None
-        meeting.summary_text = None
-        meeting.original_summary_text = None
-        meeting.summary_edited = False
-        meeting.action_items_text = None
-        meeting.structured_output = None
-        meeting.structured_output_status = "pending"
         meeting.status = "processing"
         meeting.sub_status = _TRANSCRIPTION_SKIPPED_NO_AUDIO
         meeting.processing_heartbeat_at = datetime.utcnow()
@@ -824,20 +891,24 @@ def stage_transcribe(meeting_id: int) -> int:
 
         if not is_runpod:
             media_probe = _probe_local_media(temp_audio_path)
-            if media_probe and media_probe.has_video and not media_probe.has_audio:
+            if media_probe and media_probe.has_video and (
+                not media_probe.has_audio or media_probe.audio_is_silent is True
+            ):
+                skip_reason = "silent_audio_stream" if media_probe.has_audio else "no_audio_stream"
                 logger.info(
-                    "stage_transcribe skipped: local media has no audio stream "
-                    "meeting_id=%s duration_seconds=%s",
+                    "stage_transcribe skipped: video has no audible audio "
+                    "meeting_id=%s duration_seconds=%s reason=%s",
                     meeting_id,
                     media_probe.duration_seconds,
+                    skip_reason,
                 )
-                cleared = _clear_transcription_for_no_audio(
+                skipped = _mark_transcription_skipped_for_no_audio(
                     meeting_id,
                     media_probe.duration_seconds,
                     run_id,
                     attempt_id,
                 )
-                if not cleared:
+                if not skipped:
                     raise Ignore()
                 return meeting_id
 

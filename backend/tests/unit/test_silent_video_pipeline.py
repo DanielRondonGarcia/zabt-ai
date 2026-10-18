@@ -120,7 +120,7 @@ def _transcription_result(text: str = "spoken result") -> TranscriptionResult:
     )
 
 
-def test_video_without_audio_skips_provider_and_clears_stale_transcript(
+def test_video_without_audio_skips_provider_and_preserves_existing_outputs(
     local_video_meeting,
     db: Session,
 ):
@@ -222,17 +222,19 @@ def test_video_without_audio_skips_provider_and_clears_stale_transcript(
     assert updated.owner_id == 1
     assert updated.requested_language == "en"
     assert updated.file_path == "users/1/meetings/silent/video.mp4"
-    assert updated.transcript_text is None
-    assert updated.transliterated_text is None
-    assert updated.summary_text is None
-    assert updated.original_summary_text is None
-    assert updated.summary_edited is False
-    assert updated.action_items_text is None
-    assert updated.structured_output is None
-    assert updated.structured_output_status == "pending"
+    assert updated.transcript_text == "stale transcript"
+    assert updated.transliterated_text == "stale transliteration"
+    assert updated.summary_text == "stale summary"
+    assert updated.original_summary_text == "stale original summary"
+    assert updated.summary_edited is True
+    assert updated.action_items_text == "stale action items"
+    assert updated.structured_output == {"stale": True}
+    assert updated.structured_output_status == "completed"
     assert updated.duration_seconds == 42
-    assert segments == []
-    assert highlights == []
+    assert len(segments) == 1
+    assert segments[0].text == "stale transcript"
+    assert len(highlights) == 1
+    assert highlights[0].content == "stale highlight"
     assert len(visual_segments) == 1
     assert visual_segments[0].caption == "current visual context"
 
