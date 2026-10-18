@@ -155,6 +155,9 @@ export default function MeetingDetailPage({
   const [groupReindexPending, setGroupReindexPending] = useState(false);
   const [groupReindexRetrying, setGroupReindexRetrying] = useState(false);
   const [groupFeedback, setGroupFeedback] = useState<string | null>(null);
+  const [isReindexing, setIsReindexing] = useState(false);
+  const [reindexFeedback, setReindexFeedback] = useState<string | null>(null);
+  const [reindexError, setReindexError] = useState<string | null>(null);
   const [transcriptView, setTranscriptView] = useState<"original" | "roman">("original");
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
@@ -445,6 +448,23 @@ export default function MeetingDetailPage({
     ]);
   };
 
+  const handleReindexMeeting = async () => {
+    if (!meeting || !canEditMeeting || isReindexing || isActiveMeeting(meeting)) return;
+
+    setIsReindexing(true);
+    setReindexError(null);
+    setReindexFeedback(null);
+    try {
+      await reindexMeeting(meeting.id);
+      await refreshMeetingAndAudit(meeting.id);
+      setReindexFeedback("Vector reindex queued.");
+    } catch (err) {
+      setReindexError(getRequestErrorMessage(err, "The meeting vectors could not be queued for reindexing."));
+    } finally {
+      setIsReindexing(false);
+    }
+  };
+
   const handleCancelProcessing = async () => {
     if (!meeting || !canCancelProcessing || !activeProcessingRun || isCancelling) return;
 
@@ -617,6 +637,33 @@ export default function MeetingDetailPage({
               />
             </div>
           </div>
+          {canEditMeeting && !isActive && !groupReindexPending && (
+            <div className="flex flex-col items-end gap-1">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={handleReindexMeeting}
+                disabled={isReindexing || groupSaving || groupReindexRetrying}
+              >
+                {isReindexing ? (
+                  <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                ) : (
+                  <RefreshCw className="size-3.5" aria-hidden="true" />
+                )}
+                {isReindexing ? "Queueing…" : "Reindex vectors"}
+              </Button>
+              {reindexFeedback && (
+                <p role="status" className="max-w-64 text-right text-xs text-muted-foreground">
+                  {reindexFeedback}
+                </p>
+              )}
+              {reindexError && (
+                <p role="alert" className="max-w-64 text-right text-xs text-destructive">
+                  {reindexError}
+                </p>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Meeting-wide status banners — rendered above tabs so they're visible regardless of active tab */}
