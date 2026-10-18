@@ -156,18 +156,18 @@ def dispatch_recovery_plan(
             stages.append("stage_optional_visual_breakdown")
         if plan.include_summary:
             stages.append("stage_summarize")
-        stages.append("stage_extract_intelligence")
+        stages.extend(("stage_extract_intelligence", "stage_embedding"))
         dispatch_stages(meeting_id, tuple(stages))
         return
 
     if plan.action == "intelligence":
-        dispatch_stages(meeting_id, ("stage_extract_intelligence",))
+        dispatch_stages(meeting_id, ("stage_extract_intelligence", "stage_embedding"))
         return
 
     if plan.action == "visual_then_finalize":
         dispatch_stages(
             meeting_id,
-            ("stage_optional_visual_breakdown", "finalize_recovered_meeting"),
+            ("stage_optional_visual_breakdown", "stage_embedding"),
         )
         return
 

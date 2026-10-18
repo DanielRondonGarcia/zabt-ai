@@ -369,49 +369,7 @@ class MeetingService(BaseService):
             )
             return False
 
-    def mark_completed(
-        self,
-        meeting_id: int,
-        summary_text: str | None = None,
-        action_items_text: str | None = None,
-        template_id: int | None = None,
-        template_name: str | None = None,
-    ) -> Optional[Meeting]:
-        """Mark a meeting as completed, clearing sub_status and setting final outputs."""
-        meeting = self.get(Meeting, meeting_id)
-        if not meeting:
-            return None
-        meeting.status = "completed"
-        meeting.sub_status = None
-        if summary_text is not None:
-            meeting.summary_text = summary_text
-        if action_items_text is not None:
-            meeting.action_items_text = action_items_text
-        if template_id is not None:
-            meeting.template_id = template_id
-        if template_name is not None:
-            meeting.template_name = template_name
-        return self.save(meeting)
 
-    def mark_completed_for_processing_run(
-        self, meeting_id: int, *, processing_run_id: int, dispatch_attempt_id: str
-    ) -> bool:
-        """Complete durable recovery output only for its current dispatch attempt."""
-        with Session(engine) as session:
-            meeting, _ = meeting_processing_audit._locked_current_run(
-                session, processing_run_id, meeting_id, dispatch_attempt_id
-            )
-            if (
-                meeting is None
-                or meeting.structured_output_status != "completed"
-                or meeting.structured_output is None
-            ):
-                return False
-            meeting.status = "completed"
-            meeting.sub_status = None
-            session.add(meeting)
-            session.commit()
-            return True
 
     def _locked_intelligence_meeting(
         self,

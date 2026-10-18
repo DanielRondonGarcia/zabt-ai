@@ -201,6 +201,7 @@ def test_transcript_without_summary_resumes_the_missing_tail():
             "stage_optional_visual_breakdown",
             "stage_summarize",
             "stage_extract_intelligence",
+            "stage_embedding",
         ),
     )
 
@@ -217,11 +218,15 @@ def test_transcript_without_summary_does_not_reopen_terminal_visual_work():
 
     dispatchers["stages"].assert_called_once_with(
         meeting.id,
-        ("stage_summarize", "stage_extract_intelligence"),
+        ("stage_summarize", "stage_extract_intelligence", "stage_embedding"),
     )
 
 
-def test_summary_with_incomplete_intelligence_dispatches_intelligence_only():
+
+
+
+
+def test_summary_with_incomplete_intelligence_dispatches_intelligence_and_embedding():
     meeting = _meeting(
         transcript_text="durable transcript",
         summary_text="durable summary",
@@ -235,11 +240,10 @@ def test_summary_with_incomplete_intelligence_dispatches_intelligence_only():
     assert plan.action == "intelligence"
     dispatchers["stages"].assert_called_once_with(
         meeting.id,
-        ("stage_extract_intelligence",),
+        ("stage_extract_intelligence", "stage_embedding"),
     )
 
-
-def test_completed_structured_output_is_finalized_without_dispatch():
+def test_completed_structured_output_dispatches_embedding_finalizer():
     meeting = _meeting(
         transcript_text="durable transcript",
         summary_text="durable summary",
@@ -257,6 +261,24 @@ def test_completed_structured_output_is_finalized_without_dispatch():
     dispatchers["youtube"].assert_not_called()
     dispatchers["stages"].assert_not_called()
 
+def test_completed_intelligence_with_active_visual_runs_visual_then_embedding():
+    meeting = _meeting(
+        transcript_text="durable transcript",
+        summary_text="durable summary",
+        structured_output={"topics": []},
+        structured_output_status="completed",
+        visual_breakdown_status="processing",
+    )
+    plan = build_recovery_plan(meeting)
+    dispatchers = _dispatchers()
+
+    _dispatch(meeting.id, plan, dispatchers)
+
+    assert plan.action == "visual_then_finalize"
+    dispatchers["stages"].assert_called_once_with(
+        meeting.id,
+        ("stage_optional_visual_breakdown", "stage_embedding"),
+    )
 
 def test_stale_processing_visual_epoch_is_invalidated_and_requeued():
     meeting = _meeting(
@@ -275,6 +297,7 @@ def test_stale_processing_visual_epoch_is_invalidated_and_requeued():
             "stage_optional_visual_breakdown",
             "stage_summarize",
             "stage_extract_intelligence",
+            "stage_embedding",
         ),
     )
 

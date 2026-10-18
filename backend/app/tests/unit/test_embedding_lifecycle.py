@@ -622,6 +622,28 @@ def test_embedding_failure_callback_marks_meeting_failed_for_exact_run(monkeypat
     assert failures[1][2]["attempt_id"] == "attempt-789"
     assert str(failures[1][2]["error"]) == "Qdrant unavailable"
 
+def test_recovery_finalizer_dispatches_embedding_with_audit_identity(monkeypatch):
+    worker = _worker()
+    meeting = SimpleNamespace(
+        structured_output_status="completed",
+        structured_output={"topics": []},
+    )
+    dispatched = []
+    monkeypatch.setattr(worker.meeting_service, "get", lambda model, meeting_id: meeting)
+    monkeypatch.setattr(worker, "_audit_run_id_from_task", lambda task: 789)
+    monkeypatch.setattr(worker, "_audit_attempt_id_from_task", lambda task: "attempt-789")
+    monkeypatch.setattr(
+        worker.stage_embedding,
+        "apply_async",
+        lambda **kwargs: dispatched.append(kwargs),
+    )
+
+    assert worker.finalize_recovered_meeting.run(14) == 14
+
+    assert dispatched[0]["headers"]["meeting_processing_run_id"] == "789"
+    assert dispatched[0]["headers"]["dispatch_attempt_id"] == "attempt-789"
+    assert dispatched[0]["link_error"][0].task == "on_stage_failure"
+
 def test_assignment_and_summary_hooks_enqueue_reindex_for_all_meetings(monkeypatch):
     _install_storage_stub()
     from app.api.v1.endpoints import meetings as meeting_endpoint

@@ -275,7 +275,6 @@ def test_status_methods_return_none_for_missing_meetings(service: MeetingService
     assert service.update_transcription_type(404, TranscriptionType.GENERAL) is None
     assert service.update_meeting_type(404, "generic") is None
     assert service.update_sub_status(404, "stage") is None
-    assert service.mark_completed(404) is None
     assert service.save_summary(404, "summary") is None
     assert service.mark_failed(404, "boom") is None
 

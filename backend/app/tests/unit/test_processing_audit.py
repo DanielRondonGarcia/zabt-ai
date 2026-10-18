@@ -772,7 +772,6 @@ def test_intelligence_stage_treats_rejected_highlight_write_as_ignore() -> None:
             patch("app.worker._audit_attempt_id_from_task", return_value=run.dispatch_attempt_id),
             patch("app.worker._task_request_id", return_value="intelligence-task"),
             patch("app.worker.meeting_service.touch_processing_heartbeat"),
-            patch("app.worker.meeting_service.mark_completed") as mark_completed,
             patch(
                 "app.services.meeting_intelligence.intelligence_service.extract_highlights",
                 return_value={"chapters": [], "action_items": [], "key_questions": []},
@@ -794,7 +793,6 @@ def test_intelligence_stage_treats_rejected_highlight_write_as_ignore() -> None:
             dispatch_attempt_id=run.dispatch_attempt_id,
         )
         extract_structured.assert_not_called()
-        mark_completed.assert_not_called()
         with Session(engine) as session:
             highlights = session.exec(
                 select(MeetingHighlight).where(MeetingHighlight.meeting_id == meeting_id)
@@ -1073,6 +1071,7 @@ def test_on_stage_failure_only_ensures_run_failed_without_duplicate_stage_or_run
             "embedding failed",
             processing_run_id=run.id,
             dispatch_attempt_id=run.dispatch_attempt_id,
+            preserve_existing_summary=True,
         )
 
         audit = meeting_processing_audit.list_for_meeting(meeting_id=meeting_id, owner_id=1)
@@ -1259,66 +1258,35 @@ def test_failure_effects_are_suppressed_if_cancelled_before_admission() -> None:
         _delete_meeting(meeting_id)
 
 
-def test_recovery_completion_rejects_stale_attempt_and_accepts_current_attempt() -> None:
-    meeting_id = _make_meeting()
-    try:
-        stale_run = meeting_processing_audit.get_or_create_pending_run(meeting_id)
-        stale_attempt_id = stale_run.dispatch_attempt_id
-        current_run = meeting_processing_audit.get_or_create_pending_run(
-            meeting_id, trigger="recovery"
-        )
-        assert current_run.id == stale_run.id
-        assert current_run.dispatch_attempt_id != stale_attempt_id
-        with Session(engine) as session:
-            meeting = session.get(Meeting, meeting_id)
-            meeting.status = "processing"
-            meeting.structured_output_status = "completed"
-            meeting.structured_output = {"topics": []}
-            session.add(meeting)
-            session.commit()
-
-        assert not meeting_service.mark_completed_for_processing_run(
-            meeting_id,
-            processing_run_id=stale_run.id,
-            dispatch_attempt_id=stale_attempt_id,
-        )
-        assert meeting_service.get(Meeting, meeting_id).status == "processing"
-        assert meeting_service.mark_completed_for_processing_run(
-            meeting_id,
-            processing_run_id=current_run.id,
-            dispatch_attempt_id=current_run.dispatch_attempt_id,
-        )
-        assert meeting_service.get(Meeting, meeting_id).status == "completed"
-    finally:
-        _delete_meeting(meeting_id)
 
 
-def test_recovery_finalizer_requires_output_and_applied_completion() -> None:
+
+
+def test_recovery_finalizer_dispatches_embedding_and_does_not_complete_run() -> None:
     meeting = SimpleNamespace(structured_output_status="pending", structured_output=None)
     with (
         patch("app.worker.meeting_service.get", return_value=meeting),
         patch("app.worker._audit_run_id_from_task", return_value=7),
         patch("app.worker._audit_attempt_id_from_task", return_value="attempt-7"),
-        patch("app.worker.meeting_service.mark_completed_for_processing_run", return_value=False) as complete,
+        patch("app.worker.stage_embedding.apply_async") as dispatch_embedding,
     ):
         with pytest.raises(RuntimeError, match="completed structured output"):
             finalize_recovered_meeting.run(123)
-        complete.assert_not_called()
+        dispatch_embedding.assert_not_called()
 
         meeting.structured_output_status = "completed"
         meeting.structured_output = {"topics": []}
-        with pytest.raises(RuntimeError, match="was rejected"):
-            finalize_recovered_meeting.run(123)
-        complete.assert_called_once_with(
-            123, processing_run_id=7, dispatch_attempt_id="attempt-7"
-        )
-
-        complete.reset_mock()
-        complete.return_value = True
         assert finalize_recovered_meeting.run(123) == 123
-        complete.assert_called_once_with(
-            123, processing_run_id=7, dispatch_attempt_id="attempt-7"
-        )
+        dispatch_embedding.assert_called_once()
+        kwargs = dispatch_embedding.call_args.kwargs
+        assert kwargs["args"] == (123,)
+        assert kwargs["headers"] == {
+            "meeting_id": "123",
+            "stage": "stage_embedding",
+            "meeting_processing_run_id": "7",
+            "dispatch_attempt_id": "attempt-7",
+        }
+        assert kwargs["link_error"][0].task == "on_stage_failure"
 
         sender = _FakeTask(
             name="finalize_recovered_meeting",
@@ -1333,13 +1301,8 @@ def test_recovery_finalizer_requires_output_and_applied_completion() -> None:
             patch("app.worker.meeting_processing_audit.stage_completed"),
             patch("app.worker.meeting_processing_audit.run_completed") as run_completed,
         ):
-            _record_audit_stage_succeeded(sender=sender, result=124)
-            run_completed.assert_not_called()
             _record_audit_stage_succeeded(sender=sender, result=123)
-        run_completed.assert_called_once_with(
-            7, attempt_id="attempt-7", message="Processing pipeline completed"
-        )
-
+        run_completed.assert_not_called()
 
 def test_stale_transcription_attempt_is_ignored_and_cleans_only_its_temp(tmp_path) -> None:
     meeting_id = _make_meeting()

@@ -2003,7 +2003,7 @@ def stage_visual_breakdown(meeting_id: int) -> int:
 
 @celery_app.task(name="finalize_recovered_meeting")
 def finalize_recovered_meeting(meeting_id: int) -> int:
-    """Finalize a meeting whose durable intelligence already completed."""
+    """Dispatch embedding for durable recovery output; vectors gate completion."""
     meeting = meeting_service.get(Meeting, meeting_id)
     if not meeting:
         raise RuntimeError(f"Meeting {meeting_id} not found")
@@ -2016,10 +2016,11 @@ def finalize_recovered_meeting(meeting_id: int) -> int:
     attempt_id = _audit_attempt_id_from_task(finalize_recovered_meeting)
     if run_id is None or attempt_id is None:
         raise RuntimeError("Recovery finalization requires a current processing identity")
-    if not meeting_service.mark_completed_for_processing_run(
-        meeting_id, processing_run_id=run_id, dispatch_attempt_id=attempt_id
-    ):
-        raise RuntimeError("Recovery finalization was rejected for the current processing attempt")
+    stage_embedding.apply_async(
+        args=(meeting_id,),
+        headers=_audit_headers(run_id, meeting_id, "stage_embedding", attempt_id),
+        link_error=[on_stage_failure.s()],
+    )
     return meeting_id
 
 
@@ -2075,6 +2076,7 @@ def _dispatch_recovery_plan(meeting_id: int, plan: MeetingRecoveryPlan) -> None:
         "stage_optional_visual_breakdown": stage_optional_visual_breakdown,
         "stage_summarize": stage_summarize,
         "stage_extract_intelligence": stage_extract_intelligence,
+        "stage_embedding": stage_embedding,
         "finalize_recovered_meeting": finalize_recovered_meeting,
     }
 
