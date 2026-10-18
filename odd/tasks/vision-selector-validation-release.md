@@ -1,0 +1,32 @@
+# Vision selector validation and release
+
+This feature task validates the local visual-selector correction with the user-authorized security video, reviews the repository's reported findings, and publishes only the validated visual-selector change.
+
+## Specs
+1. “Haz pruebas de esta mejora de vision con ese video, te doy permisos de todo”
+2. “de una revisa los hallazgos reportados en C:/Users/daniel.rondon/orca/workspaces/zabt-ai/main/hallazgos.md”
+3. “al final me general la release y publicas cuando cumplas esos hitos con conciencia y bien ejecutadas”
+
+## Tasks
+- T1 [S1] Route: run the bounded local visual pipeline against the authorized video, record aggregate candidate/result evidence, and avoid production storage or deployment. Commit: N/A (local validation).
+- T2 [S2] Route: review all three findings against source and report evidence-based disposition; keep unrelated UX/RAG work outside the visual-selector release. Commit: N/A (triage only).
+- T3 [S1-S3] Route: verify the scoped code and release plan independently, including the selected image set and release workflow preconditions. Commit: pending.
+- T4 [S3] Route: commit the validated selector/test/task slice and integrate it into `main` using the repository's release gate. Commit: pending.
+- T5 [S3] Route: publish the next patch release through the manual workflow and verify its tag, GitHub Release, and core GHCR image tags. Commit: T4 commit.
+
+## Log
+- L1: Vale, pues haz pruebas de una con el video para vallidar de que está bien. Porfa actualiza tus TODOS, y agrega estos hitos:
+  1. Haz pruebas de esta mejora de vision con ese video, te doy permisos de todo
+  2. “de una revisa los hallazgos reportados en C:/Users/daniel.rondon/orca/workspaces/zabt-ai/main/hallazgos.md ”
+
+  ----
+
+  importante que asumas mi rol, pq me voy a dormir, entonces quiero que finalices todo eso, tomes las mejores deciciones, investiga, y al final me general la release y publicas cuando cumplas esos hitos con conciencia y bien ejecutadas
+- L2: Release scope is the visual-selector correction only. The three `hallazgos.md` entries will be reviewed and triaged, but the separate RAG/summary and processing-tracking changes are not silently bundled into this release. No deployment or production reprocessing is included; video validation is a separate local run using the explicitly authorized clip.
+- L3: The release workflow is manual-only and requires `main`. The changed runtime path is in backend API/worker images; for the documented `cloud-actsis` topology, publish the core image set and leave optional images disabled unless evidence shows they are required.
+- L4: Engram mirror creation failed twice with `unable to open database file (14)`, including with explicit project/cwd. Keep this Markdown task document as the available tracking source; do not repeat the failed memory write.
+- L5: The local environment has no FFmpeg decoder and no configured vision/chat API credential. For S1, use a temporary `imageio-ffmpeg` runtime isolated under the repository to decode the authorized clip and validate actual candidate selection locally; inspect selected frames only locally, without provider upload. Do not retrieve remote production credentials or deploy/reprocess a production meeting.
+- L6: S1 local video check: decoded all 120 grayscale thumbnails from the 135.6-second MP4 at effective 0.884955 FPS (configured 2 FPS, cap 120). The old global score produced 0 above-threshold candidates; localized scoring produced 12 candidates (cap), indexes 34, 35, 37, 43, 44, 55, 59, 60, 61, 63, 78, 117, spanning 38.42–132.21 seconds. The selected 132.21-second frame visibly includes a person on the floor. No provider inference/upload occurred because no local vision/chat key is configured; the temporary contact sheet was deleted. This validates real-video candidate selection, not AI caption output.
+- L7: S2 triage: (1) chat's no-evidence response follows empty retrieval in `backend/app/services/ai_chat.py`; missing/late group embeddings or an interrupted summarize→embed chain are hypotheses requiring run/DB evidence, and are unrelated to the selector. (2) `backend/app/services/ai_agent.py:365` returns the literal fallback for empty context; the summary stage can persist it as completed in `backend/app/worker.py`. Static evidence does not establish whether the reported run had empty context or empty provider output; requires run/provider records. (3) the per-meeting audit card currently lacks a global queue/pipeline view; that is a separate UX/API feature (`frontend-2/app/components/meeting-processing-audit.tsx`, `frontend-2/app/(dashboard)/meetings/[id]/page.tsx`). No source changes were made for these findings. Referenced screenshots were absent from the repository, and no production DB/logs were accessed.
+- L8: T3 independent verifier returned MET for S1-S3 with no blockers. It independently checked the selector's monotonic sensitivity relative to global distance, screen-transition test, 120/135.6 FPS arithmetic, prompt constraints, video-test evidence boundaries, main-only manual workflow, and core-only cloud-actsis image set. Advisories: existing 34-pass evidence was not rerun by the verifier; several line references in L7 were shifted and have been corrected to file/function references.
+- L9: Release decision: publish a patch release from `main` using the core seven-image matrix (`include_optional=false`) for cloud-actsis; do not deploy or process any production meeting as part of release.

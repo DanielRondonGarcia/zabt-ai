@@ -511,6 +511,106 @@ def _direct_service_config():
     )
 
 
+def _thumbnail_with_patch(x: int | None = None) -> bytes:
+    pixels = bytearray([64] * (32 * 18))
+    if x is not None:
+        for y in range(5, 9):
+            for column in range(x, x + 4):
+                pixels[y * 32 + column] = 240
+    return bytes(pixels)
+
+
+def test_direct_visual_candidate_selector_detects_localized_motion():
+    config = _direct_service_config()
+    config.VISION_CHANGE_THRESHOLD = 0.18
+    service = DirectVisionService(storage_provider=_FakeVisualStorage(), config=config)
+    thumbnails = [
+        _thumbnail_with_patch(),
+        _thumbnail_with_patch(8),
+        _thumbnail_with_patch(12),
+    ]
+
+    assert service._distance(thumbnails[0], thumbnails[1]) < config.VISION_CHANGE_THRESHOLD
+    assert service._select_candidate_indexes(
+        [b"frame-0", b"frame-1", b"frame-2"],
+        thumbnails,
+        transcript=[],
+        fps=2,
+    ) == [1, 2]
+
+
+def test_direct_visual_candidate_selector_keeps_screen_transitions():
+    config = _direct_service_config()
+    config.VISION_CHANGE_THRESHOLD = 0.18
+    service = DirectVisionService(storage_provider=_FakeVisualStorage(), config=config)
+    dark = bytes([0] * (32 * 18))
+    light = bytes([255] * (32 * 18))
+
+    assert service._select_candidate_indexes(
+        [b"frame-0", b"frame-1", b"frame-2"],
+        [dark, light, dark],
+        transcript=[],
+        fps=2,
+    ) == [1, 2]
+
+
+def test_direct_visual_service_samples_long_video_across_its_duration():
+    storage = _FakeVisualStorage()
+    inference = MagicMock()
+    inference.analyze.return_value = VisualAnalysis(
+        segments=[VisualAnalysisSegment(frame_index=0, caption="A person falls", confidence=0.95)]
+    )
+    config = _direct_service_config()
+    config.VISION_FPS = 2
+    config.VISION_MAX_FRAMES = 10
+    service = DirectVisionService(storage_provider=storage, inference=inference, config=config)
+    service._probe_media = MagicMock(
+        return_value=SimpleNamespace(
+            duration_s=20.0,
+            has_video=True,
+            video_codec="h264",
+            media_format="mp4",
+        )
+    )
+    service._extract_frames = MagicMock(return_value=[f"frame-{i}".encode() for i in range(10)])
+    still = _thumbnail_with_patch()
+    changed = _thumbnail_with_patch(8)
+    service._extract_thumbnails = MagicMock(return_value=[still] * 5 + [changed] * 5)
+
+    result = service.submit_and_wait(
+        {
+            "file_path": "users/1/meetings/7/source.mp4",
+            "owner_id": "1",
+            "meeting_id": "7",
+            "visual_epoch": 1,
+            "params": {"content_type": "video/mp4"},
+            "transcript": [],
+        }
+    )
+
+    assert result.status == "completed"
+    assert service._extract_frames.call_args.args[2] == pytest.approx(0.5)
+    assert service._extract_thumbnails.call_args.args[1] == pytest.approx(0.5)
+    inference.analyze.assert_called_once()
+    assert 0 < len(inference.analyze.call_args.args[0]) <= config.VISION_MAX_CANDIDATE_FRAMES
+
+
+def test_direct_visual_prompt_includes_human_actions_and_screen_changes_without_identity_inference():
+    client = OpenAIVisionClient(
+        config=SimpleNamespace(VISION_OPENAI_MODEL="test-model"),
+        client=MagicMock(),
+    )
+    prompt = client._prompt(
+        [CandidateFrame(frame_index=0, timestamp_s=0.5, image=b"frame")],
+        transcript=[],
+    ).casefold()
+
+    assert "fall" in prompt
+    assert "application" in prompt
+    assert "identity" in prompt
+    assert "intent" in prompt
+
+
 def test_direct_visual_service_accepts_video_without_audio_and_persists_artifacts():
     storage = _FakeVisualStorage()
     service = DirectVisionService(
