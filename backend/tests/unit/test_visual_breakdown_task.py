@@ -910,7 +910,7 @@ def test_summary_uses_visual_context_without_transcript(
     )
 
 
-def test_summary_waits_for_transcript_intelligence_before_completion(
+def test_summary_and_intelligence_wait_for_embedding_before_completion(
     meeting_with_file, pipeline_identity, db: Session
 ):
     run_id, attempt_id = pipeline_identity
@@ -945,6 +945,30 @@ def test_summary_waits_for_transcript_intelligence_before_completion(
     ):
         stage_extract_intelligence(meeting_with_file)
 
+    with Session(engine) as session:
+        waiting_for_embedding = session.get(Meeting, meeting_with_file)
+        assert waiting_for_embedding.status == "processing"
+        assert waiting_for_embedding.sub_status == "indexing_embeddings"
+        assert waiting_for_embedding.structured_output_status == "completed"
+
+    upserts = []
+    embedding_provider = SimpleNamespace(
+        embed=lambda texts: [[0.1, 0.2, 0.3] for _ in texts]
+    )
+    vector_store = SimpleNamespace(
+        delete_by_filter=lambda **kwargs: None,
+        upsert_points=lambda points: upserts.extend(points),
+    )
+    with (
+        patch.object(worker.settings, "INDEXING_ENABLED", True),
+        patch("app.worker.get_embedding_provider", return_value=embedding_provider),
+        patch("app.worker.get_vector_store", return_value=vector_store),
+        patch("app.worker.analytics.capture"),
+        _task_headers(run_id, attempt_id),
+    ):
+        worker.stage_embedding(meeting_with_file)
+
+    assert upserts
     with Session(engine) as session:
         completed = session.get(Meeting, meeting_with_file)
         assert completed.status == "completed"

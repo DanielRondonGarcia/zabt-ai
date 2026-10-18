@@ -1134,9 +1134,8 @@ def stage_transliterate(meeting_id: int) -> int:
 def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
     """Build ephemeral evidence context and generate the meeting summary.
 
-    Completion is deliberately deferred to ``stage_extract_intelligence`` so a
-    meeting cannot appear completed while the transcript-only intelligence pass
-    is still running.
+    Completion is deliberately deferred through ``stage_embedding`` so a
+    meeting cannot appear completed before its vectors are persisted.
     """
     logger.info("stage_summarize started meeting_id=%s template_id=%s", meeting_id, template_id)
     run_id, attempt_id = _required_processing_identity(stage_summarize)
@@ -1319,7 +1318,9 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
 
 @celery_app.task(name="stage_extract_intelligence")
 def stage_extract_intelligence(meeting_id: int) -> int:
-    """Extract intelligence, then complete only the current processing attempt."""
+    """Extract intelligence for the current attempt; final completion waits
+    for ``stage_embedding``.
+    """
     logger.info("stage_extract_intelligence started meeting_id=%s", meeting_id)
     run_id, attempt_id = _required_processing_identity(stage_extract_intelligence)
     claim = meeting_processing_audit.claim_intelligence(

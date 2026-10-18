@@ -23,6 +23,7 @@ def _worker(monkeypatch):
         delete_file=lambda *args, **kwargs: None,
         delete_prefix=lambda *args, **kwargs: None,
     )
+    storage.get_storage_for_provider = lambda *args, **kwargs: storage.storage
     monkeypatch.setitem(sys.modules, "app.services.storage", storage)
     import app.worker as worker
 
@@ -63,6 +64,12 @@ class _Session:
     def __exit__(self, *args):
         self.active_sessions.remove(self)
 
+    def add(self, item):
+        pass
+
+    def commit(self):
+        pass
+
 
 def _install_fence(monkeypatch, worker, state, events, active_sessions):
     monkeypatch.setattr(
@@ -82,8 +89,13 @@ def _install_fence(monkeypatch, worker, state, events, active_sessions):
             return None, None
         return state["meeting"], SimpleNamespace(
             id=run_id,
+            meeting_id=state["meeting"].id,
+            owner_id=state["meeting"].owner_id,
             status=state["status"],
             dispatch_attempt_id=attempt_id,
+            started_at=None,
+            completed_at=None,
+            final_error=None,
         )
 
     monkeypatch.setattr(
@@ -205,7 +217,7 @@ def test_current_attempt_replaces_meeting_vectors(monkeypatch):
 
     def delete_by_filter(**kwargs):
         assert active_sessions
-        assert kwargs == {"owner_id": 20, "group_id": 30, "meeting_id": 10}
+        assert kwargs == {"owner_id": 20, "meeting_id": 10}
         events.append("delete")
         vectors.clear()
 
