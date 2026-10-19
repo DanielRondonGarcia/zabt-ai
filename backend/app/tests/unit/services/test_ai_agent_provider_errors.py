@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from app.services.ai_agent import summarize_transcript
+from app.services.multimodal_context import ContextBuildResult, ContextChunk, ContextItem
 from app.services.ai_provider import (
     AIProviderError,
     OpenAICompatibleCompletionClient,
@@ -216,6 +217,32 @@ def test_allowlisted_internal_configuration_messages_remain_useful(
     public_message = str(AIProviderError(internal_message))
 
     assert expected in public_message
+
+
+@pytest.mark.parametrize("context_mode", ["transcript", "single_chunk"])
+def test_empty_summary_response_does_not_become_a_successful_summary(caplog, context_mode):
+    client = _completion_client("   ")
+    context = None
+    if context_mode == "single_chunk":
+        item = ContextItem(
+            source="spoken", source_id=1, start=0, end=1,
+            content="Meeting notes", relevance="high", provenance="observed",
+            evidence_ref="spoken:1",
+        )
+        context = ContextBuildResult(
+            chunks=(ContextChunk(index=0, start=0, end=1, items=(item,),
+                                 estimated_input_tokens=5, complete=True),),
+            source_item_count=1, assigned_item_count=1, unassigned_items=(),
+            completeness="complete", warning_codes=(),
+        )
+
+    with caplog.at_level(logging.ERROR, logger="app.services.ai_agent"):
+        with pytest.raises(AIProviderError) as raised:
+            summarize_transcript("PROMPT_SECRET", context=context, completion_client=client)
+
+    assert "PROMPT_SECRET" not in str(raised.value)
+    assert "PROMPT_SECRET" not in caplog.text
+    assert "empty" in caplog.text
 
 
 def test_successful_summary_returns_content_without_failure_log(caplog):

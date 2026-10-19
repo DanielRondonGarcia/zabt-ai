@@ -272,7 +272,7 @@ def _completion_text(
         ],
         temperature=temperature,
         phase=phase,
-    ) or "Summary could not be generated."
+    )
 
 
 def _safe_summary_model(model: object) -> str:
@@ -301,7 +301,7 @@ def _summary_completion(
 ) -> str:
     started_at = perf_counter()
     try:
-        return client.complete(messages, temperature=temperature)
+        result = client.complete(messages, temperature=temperature)
     except AIProviderError as exc:
         details = exc.diagnostics
         provider = getattr(getattr(client, "provider", None), "value", None)
@@ -326,6 +326,15 @@ def _summary_completion(
             elapsed_ms,
         )
         raise
+    if not result or not result.strip():
+        logger.error(
+            "summary provider returned empty content operation=summary stage=stage_summarize "
+            "phase=%s model=%s",
+            phase,
+            _safe_summary_model(getattr(client, "model", None)),
+        )
+        raise AIProviderError("empty summary response")
+    return result
 
 
 def summarize_context(
@@ -362,7 +371,8 @@ def summarize_context(
         )
 
     if not context.chunks:
-        return "Summary could not be generated."
+        logger.error("summary context has no evidence chunks operation=summary stage=stage_summarize")
+        raise AIProviderError("no summary evidence chunks")
 
     if len(context.chunks) == 1:
         return _completion_text(
@@ -490,16 +500,10 @@ def summarize_transcript(
         )
     system_prompt = _append_template_instruction(system_prompt, template_body)
     system_prompt = _append_output_language_instruction(system_prompt, output_language)
-    client = completion_client or OpenAICompatibleCompletionClient(
-        _client,
-        model=settings.OPENAI_MODEL,
-    )
-    return _summary_completion(
-        client,
-        [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": transcript_text},
-        ],
+    return _completion_text(
+        system_prompt,
+        transcript_text,
         temperature=0.3,
+        completion_client=completion_client,
         phase="transcript_summary",
-    ) or "Summary could not be generated."
+    )

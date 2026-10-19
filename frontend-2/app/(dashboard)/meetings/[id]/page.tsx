@@ -5,7 +5,7 @@
 import { useState, useEffect, useRef, use } from "react";
 import { useRouter } from "next/navigation";
 import { usePostHog } from "posthog-js/react";
-import { assignMeetingGroup, cancelMeetingProcessingRun, fetchCurrentUser, getGroups, getMeeting, getMeetingProcessingAudit, updateMeetingSummary, restoreMeetingSummary, Meeting, updateMeetingType, reExtractIntelligence, listLanguages, reprocessMeeting, reindexMeeting, type GroupSummary, type LanguageEntry } from "@/app/lib/api";
+import { assignMeetingGroup, cancelMeetingProcessingRun, fetchCurrentUser, getGroups, getMeeting, getMeetingProcessingAudit, updateMeetingSummary, restoreMeetingSummary, Meeting, updateMeetingType, reExtractIntelligence, listLanguages, reprocessMeeting, reindexMeeting, resummarizeMeeting, type GroupSummary, type LanguageEntry } from "@/app/lib/api";
 import type { MeetingProcessingAudit, MeetingType } from "@/app/lib/api";
 import { ReTranscribeDialog } from "@/app/components/ReTranscribeDialog";
 import { StatusBadge } from "@/app/components/status-badge";
@@ -49,6 +49,9 @@ import {
 } from "@/app/components/ui/dropdown-menu";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+const isPlaceholderSummary = (value: string | null | undefined) =>
+  value?.trim().toLowerCase() === "summary could not be generated.";
 
 const ROMAN_SPEAKER_COLORS: Record<string, string> = {
   SPEAKER_00: "bg-stone-500 text-white",
@@ -167,6 +170,8 @@ export default function MeetingDetailPage({
   const [isCancelling, setIsCancelling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
   const [currentUserId, setCurrentUserId] = useState<number | null>(null);
+  const [isRetryingSummary, setIsRetryingSummary] = useState(false);
+  const [retrySummaryError, setRetrySummaryError] = useState<string | null>(null);
 
   const { setSeekRequest } = useTranscriptStore();
   const resetTranscriptMedia = useTranscriptStore((state) => state.reset);
@@ -490,6 +495,24 @@ export default function MeetingDetailPage({
     }
   };
 
+  const handleRetrySummary = async () => {
+    if (!meeting || isRetryingSummary || !isPlaceholderSummary(meeting.summary_text)) return;
+    setIsRetryingSummary(true);
+    setRetrySummaryError(null);
+    try {
+      // Summary-only retry via the existing summarize endpoint: no
+      // retranscription and no automatic data reset.
+      await resummarizeMeeting(meeting.id, meeting.template_id ?? undefined);
+      setMeeting((m) => m ? { ...m, status: "processing", sub_status: "summarizing" } : m);
+      startPolling();
+      posthog?.capture("summary_retry", { meeting_id: meeting.id });
+    } catch (err) {
+      setRetrySummaryError(getRequestErrorMessage(err, "The summary retry could not be started. Please try again."));
+    } finally {
+      setIsRetryingSummary(false);
+    }
+  };
+
   // Warn before navigating away with unsaved edits
   useEffect(() => {
     if (!isEditing) return;
@@ -582,6 +605,7 @@ export default function MeetingDetailPage({
     return `${m} min`;
   };
 
+  const canExportSummary = Boolean(meeting.summary_text) && !isPlaceholderSummary(meeting.summary_text);
   const transcriptSegmentCount = meeting.segments?.length ?? 0;
   const hasTranscriptText = Boolean(meeting.transcript_text?.trim());
 
@@ -731,9 +755,8 @@ export default function MeetingDetailPage({
               {visualCancelled ? "Visual analysis cancelled" : "Visual analysis failed"}
             </p>
             <p className="mt-1">
-              {visualCancelled
-                ? "The meeting, summary, and media remain available."
-                : "Visual analysis did not complete. The completed meeting, summary, and media remain available."}
+              {visualCancelled ? "The meeting and media remain available." : "Visual analysis did not complete. The meeting and media remain available."}
+              {canExportSummary ? " The summary remains available." : " No summary is available yet."}
             </p>
           </div>
         )}
@@ -823,6 +846,7 @@ export default function MeetingDetailPage({
                      Edit
                    </Button>}
                   <Separator orientation="vertical" className="h-4 mx-0.5" />
+                  {canExportSummary && (
                   <DropdownMenu>
                     <DropdownMenuTrigger render={<Button variant="ghost" size="sm" disabled={isActive} />}>
                       <Download className="size-3.5" />
@@ -853,6 +877,7 @@ export default function MeetingDetailPage({
                       </DropdownMenuItem>
                     </DropdownMenuContent>
                   </DropdownMenu>
+                  )}
                   <Separator orientation="vertical" className="h-4 mx-0.5" />
                    {canEditMeeting && <TemplateSelector
                     meetingId={meeting.id}
@@ -911,11 +936,40 @@ export default function MeetingDetailPage({
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{meeting.original_summary_text}</ReactMarkdown>
                   </div>
                 </div>
-              ) : meeting.summary_text ? (
+              ) : meeting.summary_text && !isPlaceholderSummary(meeting.summary_text) ? (
                 <div className="bg-white rounded-lg border border-stone-200 p-6">
                   <div className="prose prose-stone max-w-none prose-headings:font-semibold prose-h1:text-xl prose-h2:text-lg prose-h3:text-base prose-p:text-stone-700 prose-p:leading-relaxed">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{meeting.summary_text}</ReactMarkdown>
                   </div>
+                </div>
+              ) : isPlaceholderSummary(meeting.summary_text) ? (
+                <div className="bg-white rounded-lg border border-stone-200 p-6">
+                  <p className="text-sm font-semibold text-foreground">Summary unavailable</p>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    The summary could not be generated for this meeting. You can retry it
+                    without retranscribing the recording.
+                  </p>
+                  {meeting.status === "completed" && canEditMeeting && (
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="mt-3 text-primary"
+                      onClick={handleRetrySummary}
+                      disabled={isRetryingSummary}
+                    >
+                      {isRetryingSummary ? (
+                        <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
+                      ) : (
+                        <RefreshCw className="size-3.5" aria-hidden="true" />
+                      )}
+                      {isRetryingSummary ? "Starting…" : "Retry summary"}
+                    </Button>
+                  )}
+                  {retrySummaryError && (
+                    <p role="alert" className="mt-2 text-sm text-destructive">
+                      {retrySummaryError}
+                    </p>
+                  )}
                 </div>
               ) : (
                 <div className="bg-white rounded-lg border border-stone-200 p-6">
@@ -944,8 +998,10 @@ export default function MeetingDetailPage({
 
               {visualFallback && (
                 <div className="rounded-lg border border-stone-200 bg-stone-50 px-4 py-3 text-sm text-stone-600">
-                  Visual context was unavailable for this meeting. The summary uses transcript-only
-                  evidence and remains available.
+                  Visual context was unavailable for this meeting.
+                  {canExportSummary
+                    ? " The summary uses transcript evidence only."
+                    : " A summary retry can use the available transcript evidence."}
                 </div>
               )}
 
