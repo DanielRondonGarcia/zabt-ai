@@ -5,8 +5,10 @@
 from unittest.mock import patch
 
 import pytest
+from fastapi.testclient import TestClient
 from sqlmodel import Session, select
 
+from app.main import app
 from app.db.engine import engine
 from app.models import MeetingProcessingEvent, MeetingProcessingRun
 from app.models.base import Meeting
@@ -20,7 +22,7 @@ from app.models.base import Meeting
     ],
 )
 def test_reprocess_preserves_source_mime_but_clears_stale_visual_state(
-    client, params, persisted, media_type
+    params, persisted, media_type
 ):
     # tests/conftest.py provisions user 1. The endpoint requires a failed owner meeting.
     with Session(engine) as session:
@@ -37,6 +39,9 @@ def test_reprocess_preserves_source_mime_but_clears_stale_visual_state(
         session.refresh(meeting)
         meeting_id = meeting.id
 
+    # Do not enter TestClient's lifespan here: another unit test already ran the
+    # process-global MCP manager, which cannot start twice in the same pytest run.
+    client = TestClient(app)
     try:
         with patch("app.api.v1.endpoints.meetings.dispatch_transcription_job") as dispatch:
             response = client.post(f"/api/v1/meetings/{meeting_id}/reprocess")
@@ -53,6 +58,7 @@ def test_reprocess_preserves_source_mime_but_clears_stale_visual_state(
         assert detail.status_code == 200, detail.text
         assert detail.json()["media_type"] == media_type
     finally:
+        client.close()
         with Session(engine) as session:
             for event in session.exec(
                 select(MeetingProcessingEvent).where(MeetingProcessingEvent.meeting_id == meeting_id)
