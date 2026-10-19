@@ -391,25 +391,45 @@ def summarize_context(
         )
 
     partials: list[str] = []
-    for chunk in context.chunks:
-        partials.append(
-            _completion_text(
-                system_prompt
-                + "\n\nYou are preparing a bounded partial evidence summary. "
-                "Do not invent missing context or expose hidden reasoning.",
-                "Create a concise, factual partial summary for this time window. "
-                "Keep every source reference needed for later synthesis.\n"
-                + format_context_chunk(chunk),
-                temperature=0.2,
-                completion_client=completion_client,
-                phase="partial_chunk_summary",
+    omitted_windows: list[int] = []
+    for index, chunk in enumerate(context.chunks):
+        try:
+            partials.append(
+                f"PARTIAL WINDOW {index + 1}\n"
+                + _completion_text(
+                    system_prompt
+                    + "\n\nYou are preparing a bounded partial evidence summary. "
+                    "Do not invent missing context or expose hidden reasoning.",
+                    "Create a concise, factual partial summary for this time window. "
+                    "Keep every source reference needed for later synthesis.\n"
+                    + format_context_chunk(chunk),
+                    temperature=0.2,
+                    completion_client=completion_client,
+                    phase="partial_chunk_summary",
+                )
             )
+        except AIProviderError as exc:
+            # One stubborn window must not cost the whole meeting its summary.
+            # Keep the remaining windows and disclose the omission downstream.
+            logger.warning(
+                "summary partial window omitted operation=summary stage=stage_summarize "
+                "window=%s reason=%s",
+                index + 1,
+                str(exc)[:120],
+            )
+            omitted_windows.append(index + 1)
+
+    if not partials:
+        raise AIProviderError("empty summary response")
+    if omitted_windows:
+        warning_text += (
+            "\n\nMISSING TIME WINDOWS: bounded evidence for window(s) "
+            + ", ".join(str(window) for window in omitted_windows)
+            + " could not be summarized. State that this part of the meeting is "
+            "not covered instead of inventing it.\n"
         )
 
-    partial_context = "\n\n".join(
-        f"PARTIAL WINDOW {index + 1}\n{partial}"
-        for index, partial in enumerate(partials)
-    )
+    partial_context = "\n\n".join(partials)
     return _completion_text(
         system_prompt
         + "\n\nYou are performing the final hierarchical synthesis. "

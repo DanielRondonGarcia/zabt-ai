@@ -27,11 +27,12 @@ from app.services.integration import integration_service
 
 MAX_OUTPUT_TOKENS = 4096
 # Summaries run on reasoning-capable models that spend completion tokens before
-# emitting any text. Measured provider behaviour: 8 192 tokens still truncated
-# to an empty response, 16 384 produced content. Summaries start at that budget
-# and a truncated call retries once at this ceiling before failing loudly.
+# emitting any text. Measured provider behaviour: 8 192 tokens truncated to an
+# empty response and 16 384 produced content for a short prompt, while a long
+# meeting window still exhausted 16 384. Summaries therefore start at 16 384 and
+# a truncated call retries once at the 32 768 ceiling the gateway accepts.
 SUMMARY_OUTPUT_TOKENS = 16384
-MAX_OUTPUT_TOKENS_CEILING = 16384
+MAX_OUTPUT_TOKENS_CEILING = 32768
 _TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens"})
 PROVIDER_TIMEOUT_SECONDS = 120.0
 MAX_PROVIDER_RETRIES = 0

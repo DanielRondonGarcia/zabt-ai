@@ -68,6 +68,39 @@ def _sequenced_client(outcomes):
     )
 
 
+def _context(*, chunk_count: int = 2) -> ContextBuildResult:
+    chunks = tuple(
+        ContextChunk(
+            index=index,
+            start=float(index * 60),
+            end=float((index + 1) * 60),
+            items=(
+                ContextItem(
+                    source="spoken",
+                    source_id=index + 1,
+                    start=float(index * 60),
+                    end=float((index + 1) * 60),
+                    content="The team agreed to review the proposal.",
+                    relevance="high",
+                    provenance="observed",
+                    evidence_ref=f"spoken:{index + 1}",
+                ),
+            ),
+            estimated_input_tokens=10,
+            complete=True,
+        )
+        for index in range(chunk_count)
+    )
+    return ContextBuildResult(
+        chunks=chunks,
+        source_item_count=chunk_count,
+        assigned_item_count=chunk_count,
+        unassigned_items=(),
+        completeness="complete",
+        warning_codes=(),
+    )
+
+
 def test_truncated_empty_completion_retries_with_a_larger_output_budget():
     client, completions = _sequenced_client(
         [("", "length"), ("Recovered summary", "stop")]
@@ -105,6 +138,55 @@ def test_truncated_non_empty_completion_is_returned_without_retry():
 
     assert result == "Cut off text"
     assert len(completions.requests) == 1
+
+
+def test_summary_truncation_retry_reaches_the_verified_ceiling():
+    client, completions = _sequenced_client(
+        [("", "length"), ("Recovered summary", "stop")]
+    )
+
+    result = client.complete(
+        [{"role": "user", "content": "PROMPT_SECRET"}],
+        temperature=0.2,
+        max_tokens=SUMMARY_OUTPUT_TOKENS,
+    )
+
+    assert result == "Recovered summary"
+    assert completions.requests[0]["max_tokens"] == SUMMARY_OUTPUT_TOKENS
+    assert completions.requests[1]["max_tokens"] > SUMMARY_OUTPUT_TOKENS
+
+
+def test_one_truncated_window_keeps_the_summary_and_discloses_the_gap():
+    client, completions = _sequenced_client(
+        [
+            ("", "length"),
+            ("", "length"),  # window 1 fails after its bounded retry
+            ("Window two notes", "stop"),
+            ("Final notes", "stop"),
+        ]
+    )
+
+    result = summarize_transcript(
+        "PROMPT_SECRET", context=_context(chunk_count=2), completion_client=client
+    )
+
+    assert result == "Final notes"
+    synthesis_prompt = completions.requests[-1]["messages"][1]["content"]
+    assert "MISSING TIME WINDOWS" in synthesis_prompt
+    assert "window(s) 1" in synthesis_prompt
+    assert "PARTIAL WINDOW 2" in synthesis_prompt
+    assert "PARTIAL WINDOW 1" not in synthesis_prompt
+
+
+def test_every_truncated_window_fails_instead_of_returning_an_empty_summary():
+    client, _completions = _sequenced_client(
+        [("", "length"), ("", "length"), ("", "length"), ("", "length")]
+    )
+
+    with pytest.raises(AIProviderError):
+        summarize_transcript(
+            "PROMPT_SECRET", context=_context(chunk_count=2), completion_client=client
+        )
 
 
 def test_summary_requests_the_dedicated_output_budget():
