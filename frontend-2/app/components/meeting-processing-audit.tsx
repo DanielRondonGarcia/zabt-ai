@@ -49,11 +49,87 @@ function truncateTaskId(taskId: string | null): string {
   return `${taskId.slice(0, 8)}…${taskId.slice(-6)}`;
 }
 
+const stageLabels: Record<string, string> = {
+  stage_download: "Prepare audio",
+  stage_youtube_download: "Fetch YouTube audio",
+  stage_transcribe: "Transcribe audio",
+  stage_transliterate: "Transliterate audio",
+  stage_summarize: "Summarize",
+  stage_extract_intelligence: "Extract intelligence",
+  stage_embedding: "Generate embeddings",
+  stage_visual_breakdown: "Visual breakdown",
+  stage_optional_visual_breakdown: "Visual breakdown",
+};
+
+const stageDescriptions: Record<string, string> = {
+  stage_download:
+    "Checks audio in storage and retrieves it for transcription when needed. Nothing is downloaded to your device.",
+  stage_youtube_download:
+    "Fetches the audio track from the linked YouTube video before transcription.",
+};
+
 function stageLabel(stage: string): string {
-  return stage
-    .replace(/^stage_/, "")
-    .replaceAll("_", " ")
-    .replace(/\b\w/g, (match) => match.toUpperCase());
+  return (
+    stageLabels[stage] ??
+    stage
+      .replace(/^stage_/, "")
+      .replaceAll("_", " ")
+      .replace(/\b\w/g, (match) => match.toUpperCase())
+  );
+}
+
+function statusDisplay(status: string): string {
+  if (status === "started") return "in progress";
+  return status;
+}
+
+// Backend writes bare machine markers such as `stage_download started` /
+// `stage_download completed`. They add no information once the start and
+// terminal events of the same stage are merged into one row, so hide them.
+function isRawStageMarker(event: MeetingProcessingEvent): boolean {
+  if (!event.message) return false;
+  return event.message === `${event.stage} started` || event.message === `${event.stage} completed`;
+}
+
+interface StageGroup {
+  key: string;
+  start: MeetingProcessingEvent | null;
+  terminal: MeetingProcessingEvent | null;
+  extras: MeetingProcessingEvent[];
+}
+
+// Group each stage's started event with its terminal event (completed /
+// failed / skipped / cancelled) for the same task into one chronological row.
+// Retries recorded under a different task id, unpaired events, and errors
+// still get their own rows.
+function buildStageGroups(events: MeetingProcessingEvent[]): StageGroup[] {
+  const groups: StageGroup[] = [];
+  const open = new Map<string, StageGroup>();
+  for (const event of events) {
+    const key = `${event.stage}::${event.task_id ?? ""}`;
+    const current = open.get(key);
+    if (event.status === "started") {
+      if (current && !current.terminal) {
+        current.extras.push(event);
+      } else {
+        const group: StageGroup = { key: `${key}::${event.id}`, start: event, terminal: null, extras: [] };
+        groups.push(group);
+        open.set(key, group);
+      }
+    } else if (current && !current.terminal) {
+      current.terminal = event;
+      open.delete(key);
+    } else {
+      groups.push({ key: `${key}::${event.id}`, start: null, terminal: event, extras: [] });
+    }
+  }
+  return groups;
+}
+
+// A stage group's outcome: its terminal status when paired, otherwise the
+// stage is still running.
+function groupOutcome(group: StageGroup): string {
+  return group.terminal?.status ?? "running";
 }
 
 function StatusIcon({ status }: { status: string }) {
@@ -66,42 +142,75 @@ function StatusIcon({ status }: { status: string }) {
 function StatusPill({ status }: { status: string }) {
   return (
     <span className={`rounded-4xl border px-2.5 py-1 text-xs font-medium ${statusClasses[status] ?? statusClasses.queued}`}>
-      {status}
+      {statusDisplay(status)}
     </span>
   );
 }
 
-function AuditEventRow({ event }: { event: MeetingProcessingEvent }) {
-  const text = event.error ?? event.message;
+function StageRow({ group }: { group: StageGroup }) {
+  const outcome = groupOutcome(group);
+  const stage = group.start?.stage ?? group.terminal?.stage ?? "";
+  const description = stageDescriptions[stage];
+  const startTime = group.start?.started_at ?? group.start?.created_at ?? null;
+  const endTime = group.terminal?.completed_at ?? group.terminal?.created_at ?? null;
+
+  // Keep real messages and errors; drop the bare machine markers.
+  const notes: Array<{ text: string; isError: boolean }> = [];
+  const seen = new Set<string>();
+  const pushNote = (event: MeetingProcessingEvent | null) => {
+    if (!event) return;
+    const candidates: Array<{ text: string; isError: boolean }> = [];
+    if (event.error) candidates.push({ text: event.error, isError: true });
+    if (event.message && !isRawStageMarker(event)) candidates.push({ text: event.message, isError: false });
+    for (const candidate of candidates) {
+      const dedupeKey = `${candidate.isError}:${candidate.text}`;
+      if (seen.has(dedupeKey)) continue;
+      seen.add(dedupeKey);
+      notes.push(candidate);
+    }
+  };
+  pushNote(group.terminal);
+  if (group.start) pushNote(group.start);
+  for (const extra of group.extras) pushNote(extra);
+
   return (
     <li className="flex gap-3 border-b border-border py-3 last:border-b-0">
       <div className="mt-0.5 shrink-0">
-        <StatusIcon status={event.status} />
+        <StatusIcon status={outcome} />
       </div>
       <div className="min-w-0 flex-1 space-y-1">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-medium text-foreground">{stageLabel(event.stage)}</span>
-          <StatusPill status={event.status} />
-          <span className="font-mono text-xs text-muted-foreground" title={event.task_id ?? undefined}>
-            task {truncateTaskId(event.task_id)}
+          <span className="text-sm font-medium text-foreground">{stageLabel(stage)}</span>
+          <StatusPill status={outcome} />
+          <span className="font-mono text-xs text-muted-foreground" title={group.start?.task_id ?? group.terminal?.task_id ?? undefined}>
+            task {truncateTaskId(group.start?.task_id ?? group.terminal?.task_id ?? null)}
           </span>
         </div>
+        {description && <p className="text-xs text-muted-foreground">{description}</p>}
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
-          <span>start {formatDate(event.started_at ?? event.created_at)}</span>
-          <span>end {formatDate(event.completed_at)}</span>
-          <span>duration {formatDuration(event.started_at ?? event.created_at, event.completed_at)}</span>
+          <span>started {formatDate(startTime)}</span>
+          {group.terminal ? (
+            <span>finished {formatDate(endTime)}</span>
+          ) : (
+            <span>in progress</span>
+          )}
+          <span>duration {formatDuration(startTime, endTime)}</span>
         </div>
-        {text && (
-          <p className={`break-words text-sm ${event.error ? "text-red-700" : "text-muted-foreground"}`}>
-            {text}
+        {notes.map((note, index) => (
+          <p
+            key={index}
+            className={`break-words text-sm ${note.isError ? "text-red-700" : "text-muted-foreground"}`}
+          >
+            {note.text}
           </p>
-        )}
+        ))}
       </div>
     </li>
   );
 }
 
 function AuditRun({ run }: { run: MeetingProcessingRun }) {
+  const groups = buildStageGroups(run.events);
   return (
     <section className="rounded-lg border border-border bg-background p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -113,7 +222,7 @@ function AuditRun({ run }: { run: MeetingProcessingRun }) {
           <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
             <span>created {formatDate(run.created_at)}</span>
             <span>started {formatDate(run.started_at)}</span>
-            <span>completed {formatDate(run.completed_at)}</span>
+            <span>finished {formatDate(run.completed_at)}</span>
             <span>duration {formatDuration(run.started_at, run.completed_at)}</span>
           </div>
           <p className="font-mono text-xs text-muted-foreground" title={run.root_task_id ?? undefined}>
@@ -126,12 +235,12 @@ function AuditRun({ run }: { run: MeetingProcessingRun }) {
           {run.final_error}
         </p>
       )}
-      {run.events.length > 0 ? (
+      {groups.length > 0 ? (
         <ol className="mt-3 divide-y-0">
-          {run.events.map((event) => <AuditEventRow key={event.id} event={event} />)}
+          {groups.map((group) => <StageRow key={group.key} group={group} />)}
         </ol>
       ) : (
-        <p className="mt-3 text-sm text-muted-foreground">No audit events have been recorded for this run yet.</p>
+        <p className="mt-3 text-sm text-muted-foreground">No stage activity has been recorded for this run yet.</p>
       )}
     </section>
   );
@@ -146,7 +255,7 @@ function AuditSummary({ runCount, latestStatus }: { runCount: number; latestStat
             Processing audit
           </span>
           <span className="mt-1 block text-sm text-muted-foreground">
-            Safe audit events for this meeting&apos;s processing runs.
+            Stage-by-stage record of how each processing run for this meeting progressed.
           </span>
         </span>
         <span className="flex shrink-0 flex-wrap items-center justify-end gap-2">
@@ -178,7 +287,7 @@ export function MeetingProcessingAuditCard({ audit, loading = false }: MeetingPr
             <div className="min-w-0">
               <h2 className="text-lg font-semibold text-foreground">Processing audit</h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                Safe audit events for this meeting&apos;s processing runs.
+                Stage-by-stage record of how each processing run for this meeting progressed.
               </p>
             </div>
             <span className="shrink-0 rounded-4xl border border-border bg-muted/50 px-2.5 py-1 text-xs font-medium text-muted-foreground">
@@ -188,7 +297,7 @@ export function MeetingProcessingAuditCard({ audit, loading = false }: MeetingPr
           {loading && !audit ? (
             <p className="mt-4 text-sm text-muted-foreground">Loading processing audit…</p>
           ) : (
-            <p className="mt-4 text-sm text-muted-foreground">No processing audit events have been recorded yet.</p>
+            <p className="mt-4 text-sm text-muted-foreground">No processing runs have been recorded yet.</p>
           )}
         </>
       ) : (
