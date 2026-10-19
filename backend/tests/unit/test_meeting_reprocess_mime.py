@@ -44,7 +44,9 @@ def test_reprocess_preserves_source_mime_but_clears_stale_visual_state(
     client = TestClient(app)
     try:
         with patch("app.api.v1.endpoints.meetings.dispatch_transcription_job") as dispatch:
-            response = client.post(f"/api/v1/meetings/{meeting_id}/reprocess")
+            response = client.post(
+                f"/api/v1/meetings/{meeting_id}/reprocess", json={"mode": "restart"}
+            )
         assert response.status_code == 200, response.text
         assert response.json()["media_type"] == media_type
         dispatch.assert_called_once_with(meeting_id)
