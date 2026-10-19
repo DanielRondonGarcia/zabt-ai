@@ -11,6 +11,7 @@ from app.services.ai_provider import (
     AIProviderError,
     CompletionClient,
     OpenAICompatibleCompletionClient,
+    SUMMARY_OUTPUT_TOKENS,
     build_openai_client,
 )
 from app.services.multimodal_context import ContextBuildResult, ContextChunk, ContextItem, build_context
@@ -301,7 +302,11 @@ def _summary_completion(
 ) -> str:
     started_at = perf_counter()
     try:
-        result = client.complete(messages, temperature=temperature)
+        result = client.complete(
+            messages,
+            temperature=temperature,
+            max_tokens=SUMMARY_OUTPUT_TOKENS,
+        )
     except AIProviderError as exc:
         details = exc.diagnostics
         provider = getattr(getattr(client, "provider", None), "value", None)

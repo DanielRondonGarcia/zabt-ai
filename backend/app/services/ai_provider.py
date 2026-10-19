@@ -26,6 +26,13 @@ from app.services.ai_provider_configuration import (
 from app.services.integration import integration_service
 
 MAX_OUTPUT_TOKENS = 4096
+# Summaries run on reasoning-capable models that spend completion tokens before
+# emitting any text. Measured provider behaviour: 8 192 tokens still truncated
+# to an empty response, 16 384 produced content. Summaries start at that budget
+# and a truncated call retries once at this ceiling before failing loudly.
+SUMMARY_OUTPUT_TOKENS = 16384
+MAX_OUTPUT_TOKENS_CEILING = 16384
+_TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens"})
 PROVIDER_TIMEOUT_SECONDS = 120.0
 MAX_PROVIDER_RETRIES = 0
 CompletionPurpose = Literal["summary", "chat"]
@@ -87,15 +94,29 @@ _SAFE_INTERNAL_ERROR_MESSAGES = {
         "The application default AI provider is unavailable. Check application AI "
         "configuration and logs before retrying."
     ),
+    "provider output was truncated before any content": (
+        "The AI provider ran out of output tokens before producing any text. "
+        "Retry, or reduce the meeting evidence sent to the model."
+    ),
 }
 
 
 def _bounded_output_tokens(max_tokens: int | None) -> int:
     return min(
         MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens,
-        MAX_OUTPUT_TOKENS,
+        MAX_OUTPUT_TOKENS_CEILING,
     )
 
+
+def _completion_content_and_finish(response: Any) -> tuple[str, str | None]:
+    choice = response.choices[0]
+    content = getattr(getattr(choice, "message", None), "content", None)
+    finish_reason = getattr(choice, "finish_reason", None)
+    return str(content or ""), finish_reason if isinstance(finish_reason, str) else None
+
+
+def _was_truncated(finish_reason: str | None) -> bool:
+    return finish_reason is not None and finish_reason in _TRUNCATION_FINISH_REASONS
 
 def build_openai_client(
     *,
@@ -376,16 +397,31 @@ class OpenAICompatibleCompletionClient:
                     "configured AI provider is unavailable",
                     configured=self.configured,
                 ) from None
+
+        content, finish_reason = self._send(request)
+        if _was_truncated(finish_reason) and not content.strip():
+            # Reasoning-capable models can spend the whole budget on hidden
+            # reasoning and return no text. Retry once with a larger budget.
+            retry_budget = min(
+                request["max_tokens"] * 2, MAX_OUTPUT_TOKENS_CEILING
+            )
+            if retry_budget > request["max_tokens"]:
+                request = {**request, "max_tokens": retry_budget}
+                content, finish_reason = self._send(request)
+        if _was_truncated(finish_reason) and not content.strip():
+            raise AIProviderError("provider output was truncated before any content")
+        return content
+
+    def _send(self, request: dict[str, Any]) -> tuple[str, str | None]:
         try:
             response = self._client.chat.completions.create(**request)
-            content = response.choices[0].message.content
+            return _completion_content_and_finish(response)
         except Exception as exc:
             raise AIProviderError(
                 f"{self.provider.value} provider request failed",
                 configured=self.configured,
                 diagnostics=_provider_error_diagnostics(exc),
             ) from None
-        return str(content or "")
 
 
 class AnthropicCompletionClient:

@@ -931,8 +931,6 @@ def test_audit_read_hides_current_run_from_foreign_owner() -> None:
         _delete_meeting(meeting_id)
 
 
-
-
 def test_pipeline_signatures_attach_headers_and_failure_callback_to_embedding() -> None:
     signatures = _build_pipeline_signatures(
         123, [stage_download, stage_embedding], 456, "attempt-456"
@@ -946,6 +944,7 @@ def test_pipeline_signatures_attach_headers_and_failure_callback_to_embedding() 
     assert signatures[1].options["headers"]["stage"] == "stage_embedding"
     assert len(signatures[1].options["link_error"]) == 1
     assert signatures[1].options["link_error"][0].task == "on_stage_failure"
+
 
 def test_standard_dispatch_threads_run_and_attempt_identity_to_chain() -> None:
     run = SimpleNamespace(id=456, dispatch_attempt_id="attempt-456")
@@ -1040,6 +1039,47 @@ def test_failure_signal_is_authoritative_for_embedding_run() -> None:
         assert saved_run.final_error == "embedding failed"
         assert [event.status for event in saved_run.events] == ["failed", "failed"]
         assert all(event.status != "completed" for event in saved_run.events)
+    finally:
+        _delete_meeting(meeting_id)
+
+
+def test_stage_failure_records_terminal_event_after_run_already_failed() -> None:
+    """A late task_failure must close its stage instead of leaving it in progress."""
+    meeting_id = _make_meeting()
+    try:
+        run = meeting_processing_audit.create_run(meeting_id, trigger="pipeline")
+        assert run is not None
+        attempt_id = run.dispatch_attempt_id
+        meeting_processing_audit.stage_started(
+            run_id=run.id,
+            attempt_id=attempt_id,
+            meeting_id=meeting_id,
+            stage="stage_summarize",
+            task_id="summarize-task",
+        )
+        # The link_error callback can fail the run before Celery fires the
+        # task_failure signal that records the per-stage event.
+        assert meeting_processing_audit.run_failed(
+            run.id, attempt_id=attempt_id, error="provider failed"
+        )
+
+        meeting_processing_audit.stage_failed(
+            run_id=run.id,
+            attempt_id=attempt_id,
+            meeting_id=meeting_id,
+            stage="stage_summarize",
+            task_id="summarize-task",
+            error="provider failed",
+        )
+
+        audit = meeting_processing_audit.list_for_meeting(meeting_id=meeting_id, owner_id=1)
+        saved_run = audit.runs[0]
+        stage_events = [
+            event for event in saved_run.events if event.stage == "stage_summarize"
+        ]
+        assert [event.status for event in stage_events] == ["started", "failed"]
+        assert stage_events[-1].error == "provider failed"
+        assert saved_run.status == "failed"
     finally:
         _delete_meeting(meeting_id)
 
@@ -1258,10 +1298,6 @@ def test_failure_effects_are_suppressed_if_cancelled_before_admission() -> None:
         _delete_meeting(meeting_id)
 
 
-
-
-
-
 def test_recovery_finalizer_dispatches_embedding_and_does_not_complete_run() -> None:
     meeting = SimpleNamespace(structured_output_status="pending", structured_output=None)
     with (
@@ -1303,6 +1339,7 @@ def test_recovery_finalizer_dispatches_embedding_and_does_not_complete_run() -> 
         ):
             _record_audit_stage_succeeded(sender=sender, result=123)
         run_completed.assert_not_called()
+
 
 def test_stale_transcription_attempt_is_ignored_and_cleans_only_its_temp(tmp_path) -> None:
     meeting_id = _make_meeting()

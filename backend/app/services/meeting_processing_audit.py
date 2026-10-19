@@ -922,7 +922,16 @@ class MeetingProcessingAuditService:
             now = datetime.utcnow()
             safe_task_id = sanitize_message(task_id)[:255] if task_id else None
             with Session(engine) as session:
-                _, run = self._locked_current_run(session, run_id, meeting_id, attempt_id)
+                # A failure callback can mark the run failed before Celery's
+                # task_failure signal records its stage event. Accept that late
+                # event so the stage is closed instead of staying "in progress".
+                _, run = self._locked_current_run(
+                    session,
+                    run_id,
+                    meeting_id,
+                    attempt_id,
+                    allow_terminal=event_type == "failed",
+                )
                 if run is None:
                     return
                 if event_type == "failed":

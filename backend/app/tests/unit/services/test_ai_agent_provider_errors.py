@@ -16,6 +16,7 @@ from app.services.ai_provider import (
     AIProviderError,
     OpenAICompatibleCompletionClient,
     ProviderErrorDiagnostics,
+    SUMMARY_OUTPUT_TOKENS,
 )
 
 
@@ -36,6 +37,82 @@ def _completion_client(outcome):
         chat=SimpleNamespace(completions=FakeCompletions(outcome))
     )
     return OpenAICompatibleCompletionClient(sdk_client, model="oc/glm-5.3-flash")
+
+
+class SequencedCompletions:
+    """Return one scripted (content, finish_reason) pair per provider call."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.requests: list[dict] = []
+
+    def create(self, **request):
+        self.requests.append(dict(request))
+        content, finish_reason = self.outcomes.pop(0)
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content=content),
+                    finish_reason=finish_reason,
+                )
+            ]
+        )
+
+
+def _sequenced_client(outcomes):
+    completions = SequencedCompletions(outcomes)
+    sdk_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    return (
+        OpenAICompatibleCompletionClient(sdk_client, model="oc/glm-5.3-flash"),
+        completions,
+    )
+
+
+def test_truncated_empty_completion_retries_with_a_larger_output_budget():
+    client, completions = _sequenced_client(
+        [("", "length"), ("Recovered summary", "stop")]
+    )
+
+    result = client.complete(
+        [{"role": "user", "content": "PROMPT_SECRET"}], temperature=0.2
+    )
+
+    assert result == "Recovered summary"
+    assert len(completions.requests) == 2
+    assert completions.requests[1]["max_tokens"] > completions.requests[0]["max_tokens"]
+
+
+def test_persistent_truncation_raises_actionable_safe_error():
+    client, completions = _sequenced_client([("", "length"), ("   ", "length")])
+
+    with pytest.raises(AIProviderError) as raised:
+        client.complete(
+            [{"role": "user", "content": "PROMPT_SECRET"}], temperature=0.2
+        )
+
+    message = str(raised.value)
+    assert "output tokens" in message
+    assert "PROMPT_SECRET" not in message
+    assert len(completions.requests) == 2
+
+
+def test_truncated_non_empty_completion_is_returned_without_retry():
+    client, completions = _sequenced_client([("Cut off text", "length")])
+
+    result = client.complete(
+        [{"role": "user", "content": "PROMPT_SECRET"}], temperature=0.2
+    )
+
+    assert result == "Cut off text"
+    assert len(completions.requests) == 1
+
+
+def test_summary_requests_the_dedicated_output_budget():
+    client, completions = _sequenced_client([("Safe summary", "stop")])
+
+    summarize_transcript("PROMPT_SECRET", completion_client=client)
+
+    assert completions.requests[0]["max_tokens"] == SUMMARY_OUTPUT_TOKENS
 
 
 def test_network_failure_logs_safe_summary_diagnostics(caplog):
