@@ -23,8 +23,8 @@ Branch: fix/meeting-summary-video-integrity (slices 502f5a5, 0d9d0b4, 3cf4181, 8
 - T10 [S5] done; inline; commit pending — audit test added; local run blocked by object-storage import, CI to confirm.
 - T11 [S4-S5] done; inline; commits b047552, 4668746 — v1.5.2 published and deployed to ACT-TWC-11; meeting 10 retry remains user-triggered.
 - T12 [S4] done; inline; commit a3a2862 + release 39329982763 — v1.5.3 published and deployed to ACT-TWC-11; app services healthy on v1.5.3.
-- T13 [S6] in_progress; inline; commit pending — resume a failed meeting from durable outputs instead of restarting the pipeline.
-- T14 [S6] pending; inline; commit pending — CI, minor release and app-only redeploy.
+- T13 [S6] done; inline; commits 2834354, 5b8da4a — resume planner, dispatch, API mode and UI; planner suite 19 passed, CI green.
+- T14 [S6] done; inline; release 39334362807 — v1.6.0 published and deployed to ACT-TWC-11 with app services healthy.
 
 ## Log
 - L1: mi acá como que no pudo generar el resumen!? C:\Users\DANIEL~1.RON\AppData\Local\Temp\orca-paste-1792421474837-202cc7a5-eb68-427d-b8f8-072680f65e5a.png pila ahí  y es un video y sale que solo audio C:\Users\DANIEL~1.RON\AppData\Local\Temp\orca-paste-1792421496702-9fdacce5-aca3-4c89-928d-794a0b72f60d.png
@@ -63,3 +63,4 @@ Branch: fix/meeting-summary-video-integrity (slices 502f5a5, 0d9d0b4, 3cf4181, 8
 - L34: Reused the existing durable-output recovery planner instead of a new state machine: added `build_resume_plan` for failed meetings (transcript/transliteration/visual/intelligence aware, treats `[Error: ...]` and the placeholder literal as unusable summaries, never re-runs an already-failed visual stage), `dispatch_reprocess_resume` in the worker, and a `mode` body on `POST /meetings/{id}/reprocess` defaulting to `resume` with `restart` preserving the previous full-rebuild behavior. Pure planner tests plus the public API tests were written first; planner suite 19 passed locally with `--noconftest`, provider suite 23 passed, frontend typecheck exit 0. Integration test now sends `mode: restart` because the default changed by request.
 - L35: CI 39333149531 failed on `tests/unit/test_meeting_reprocess_mime.py`: it posted no body, so the new default resumed instead of calling `dispatch_transcription_job`. That test pins the restart path (MIME survives the destructive reset), so it now sends `{"mode": "restart"}`; the resume default is untouched.
 - L36: CI green for 5b8da4a (CI/Docker/gitleaks). Dispatched minor release run 39334362807 to publish v1.6.0 with resumable reprocess; deployment and the app-only redeploy follow publication.
+- L37: Release 39334362807 completed; annotated tag v1.6.0 peels to 5b8da4a and the GitHub release is complete. ACT-TWC-11 `.env` backed up as `.env.bak.v160-*`, api/worker/beat/web recreated on v1.6.0: api healthy (200), worker ready, web runtime-config 200; postgres/minio/qdrant/redis untouched. Resume reprocess is now live; the meeting 10 retry remains user-triggered.
