@@ -59,6 +59,7 @@ from app.services.embeddings.chunk import build_meeting_chunks
 from app.services.vector_store import EmbeddingPoint, get_vector_store
 from app.services.meeting_recovery import (
     MeetingRecoveryPlan,
+    build_resume_plan,
     claim_recovery_plan,
     dispatch_recovery_plan,
 )
@@ -2224,6 +2225,7 @@ def _visual_embedding_signature(segments: list) -> tuple:
         )
     )
 
+
 def _meeting_embedding_source_changed(
     snapshot: Meeting,
     current: Meeting,
@@ -2248,6 +2250,7 @@ def _meeting_embedding_source_changed(
     return _visual_embedding_signature(snapshot_visual_segments) != _visual_embedding_signature(
         current_visual_segments
     )
+
 
 def _requeue_stale_meeting_index(
     meeting_id: int,
@@ -2295,6 +2298,7 @@ def _requeue_stale_meeting_content(
     raise RuntimeError(
         f"Meeting {meeting_id} content changed during embedding; retry current content."
     )
+
 
 @celery_app.task(
     name="stage_embedding",
@@ -2632,6 +2636,14 @@ def dispatch_pipeline(meeting_id: int):
     meeting_processing_audit.set_root_task(
         run_id, getattr(result, "id", None), attempt_id=attempt_id
     )
+
+
+def dispatch_reprocess_resume(meeting_id: int) -> None:
+    """Continue a failed meeting from its durable outputs instead of restarting."""
+    meeting = meeting_service.get(Meeting, meeting_id)
+    if meeting is None:
+        raise ValueError(f"Meeting {meeting_id} not found")
+    _dispatch_recovery_plan(meeting_id, build_resume_plan(meeting))
 
 
 # ── Stage 0 (YouTube): Download from YouTube ────────────────────────────────

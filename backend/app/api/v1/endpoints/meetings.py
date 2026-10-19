@@ -830,13 +830,21 @@ def re_transcribe_meeting(
     return _build_meeting_response(meeting, current_user.id)
 
 
+class ReprocessRequest(BaseModel):
+    # "resume" continues from the last durable stage; "restart" rebuilds everything.
+    mode: Literal["resume", "restart"] = "resume"
+
+
 @router.post("/{meeting_id}/reprocess", response_model=MeetingRead)
 def reprocess_failed_meeting(
     meeting_id: int,
+    body: ReprocessRequest | None = None,
     db: Session = Depends(deps.get_db),
     current_user: User = Depends(deps.get_current_active_user),
 ) -> Any:
-    """Re-run the stored media pipeline for a failed meeting."""
+    """Resume a failed meeting from durable outputs, or rebuild it on request."""
+    from app.worker import dispatch_reprocess_resume
+
     meeting = meeting_service.require_editor_in_session(
         db, meeting_id, current_user.id
     )
@@ -851,6 +859,24 @@ def reprocess_failed_meeting(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Meeting has no stored media file to reprocess.",
         )
+
+    mode = body.mode if body is not None else "resume"
+    if mode == "resume":
+        # Keep every durable output (audio, transcript, transliteration, visual
+        # segments) and let the resume plan dispatch only what is still missing.
+        if meeting.visual_breakdown_status == "processing":
+            meeting.visual_breakdown_status = None
+            meeting.visual_breakdown_error = None
+        meeting.status = "queued"
+        meeting.sub_status = None
+        meeting.processing_heartbeat_at = datetime.utcnow()
+        db.add(meeting)
+        db.commit()
+        db.refresh(meeting)
+
+        meeting_processing_audit.create_run(meeting.id, trigger="reprocess")
+        dispatch_reprocess_resume(meeting.id)
+        return _build_meeting_response(meeting, current_user.id)
 
     meeting.status = "queued"
     meeting.sub_status = None

@@ -424,12 +424,12 @@ export default function MeetingDetailPage({
     return err instanceof Error && err.message ? err.message : fallback;
   };
 
-  const handleReprocess = async () => {
+  const handleReprocess = async (mode: "resume" | "restart" = "resume") => {
     if (!meeting || isReprocessing) return;
     setIsReprocessing(true);
     setReprocessError(null);
     try {
-      const updated = await reprocessMeeting(meeting.id);
+      const updated = await reprocessMeeting(meeting.id, mode);
       setMeeting(updated);
       setTranscriptView("original");
       setError(null);
@@ -725,7 +725,7 @@ export default function MeetingDetailPage({
                 variant="outline"
                 size="sm"
                 className="shrink-0 border-red-300 bg-white text-red-800 hover:bg-red-100 hover:text-red-900 dark:border-red-700/60 dark:bg-red-950/40 dark:text-red-200 dark:hover:bg-red-900/50 dark:hover:text-red-100"
-                onClick={handleReprocess}
+                onClick={() => handleReprocess("resume")}
                 disabled={isReprocessing}
               >
                 {isReprocessing ? (
@@ -733,9 +733,22 @@ export default function MeetingDetailPage({
                 ) : (
                   <RefreshCw className="size-3.5" />
                 )}
-                Reprocess
+                Resume processing
               </Button>}
             </div>
+            {canReprocessMeeting && (
+              <p className="text-xs text-red-700 dark:text-red-300">
+                Resume continues from the last durable stage and keeps the existing transcript.{" "}
+                <button
+                  type="button"
+                  className="underline underline-offset-2 disabled:opacity-60"
+                  onClick={() => handleReprocess("restart")}
+                  disabled={isReprocessing}
+                >
+                  Start over instead
+                </button>
+              </p>
+            )}
             {reprocessError && (
               <p className="rounded-lg border border-red-200 bg-white px-3 py-2 text-red-700 dark:border-red-800/60 dark:bg-red-950/40 dark:text-red-300">
                 {reprocessError}

@@ -837,8 +837,13 @@ export const cancelMeetingProcessingRun = async (meetingId: number, runId: numbe
   await apiClient.post(`/meetings/${meetingId}/processing-runs/${runId}/cancel`);
 };
 
-export const reprocessMeeting = async (meetingId: number): Promise<Meeting> => {
-  const res = await apiClient.post<Meeting>(`/meetings/${meetingId}/reprocess`);
+export type ReprocessMode = "resume" | "restart";
+
+export const reprocessMeeting = async (
+  meetingId: number,
+  mode: ReprocessMode = "resume"
+): Promise<Meeting> => {
+  const res = await apiClient.post<Meeting>(`/meetings/${meetingId}/reprocess`, { mode });
   return res.data;
 };
 

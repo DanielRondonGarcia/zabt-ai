@@ -175,7 +175,9 @@ def test_reprocess_failed_meeting_queues_dispatches_and_clears_stale_pipeline_da
 
     try:
         with patch("app.api.v1.endpoints.meetings.dispatch_transcription_job") as mock_dispatch:
-            resp = client.post(f"/api/v1/meetings/{meeting_id}/reprocess")
+            resp = client.post(
+                f"/api/v1/meetings/{meeting_id}/reprocess", json={"mode": "restart"}
+            )
 
         assert resp.status_code == 200, resp.text
         body = resp.json()
@@ -243,7 +245,9 @@ def test_reprocess_rejects_failed_meeting_without_file_path(client):
 
     try:
         with patch("app.api.v1.endpoints.meetings.dispatch_transcription_job") as mock_dispatch:
-            resp = client.post(f"/api/v1/meetings/{meeting_id}/reprocess")
+            resp = client.post(
+                f"/api/v1/meetings/{meeting_id}/reprocess", json={"mode": "restart"}
+            )
         assert resp.status_code == 400
         assert "stored media file" in resp.json()["detail"]
         mock_dispatch.assert_not_called()
@@ -261,7 +265,9 @@ def test_reprocess_404_for_other_users_meeting(client):
 
     try:
         with patch("app.api.v1.endpoints.meetings.dispatch_transcription_job") as mock_dispatch:
-            resp = client.post(f"/api/v1/meetings/{meeting_id}/reprocess")
+            resp = client.post(
+                f"/api/v1/meetings/{meeting_id}/reprocess", json={"mode": "restart"}
+            )
         assert resp.status_code == 404
         mock_dispatch.assert_not_called()
     finally:

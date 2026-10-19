@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 
 from app.services.meeting_recovery import (
     build_recovery_plan,
+    build_resume_plan,
     claim_recovery_plan,
     dispatch_recovery_plan,
     is_stale_meeting,
@@ -222,10 +223,6 @@ def test_transcript_without_summary_does_not_reopen_terminal_visual_work():
     )
 
 
-
-
-
-
 def test_summary_with_incomplete_intelligence_dispatches_intelligence_and_embedding():
     meeting = _meeting(
         transcript_text="durable transcript",
@@ -242,6 +239,7 @@ def test_summary_with_incomplete_intelligence_dispatches_intelligence_and_embedd
         meeting.id,
         ("stage_extract_intelligence", "stage_embedding"),
     )
+
 
 def test_completed_structured_output_dispatches_embedding_finalizer():
     meeting = _meeting(
@@ -261,6 +259,7 @@ def test_completed_structured_output_dispatches_embedding_finalizer():
     dispatchers["youtube"].assert_not_called()
     dispatchers["stages"].assert_not_called()
 
+
 def test_completed_intelligence_with_active_visual_runs_visual_then_embedding():
     meeting = _meeting(
         transcript_text="durable transcript",
@@ -279,6 +278,7 @@ def test_completed_intelligence_with_active_visual_runs_visual_then_embedding():
         meeting.id,
         ("stage_optional_visual_breakdown", "stage_embedding"),
     )
+
 
 def test_stale_processing_visual_epoch_is_invalidated_and_requeued():
     meeting = _meeting(
@@ -326,3 +326,91 @@ def test_terminal_completed_and_failed_rows_are_ignored():
             grace_seconds=GRACE_SECONDS,
         )
         assert build_recovery_plan(meeting) is None
+
+def _failed_meeting(**overrides):
+    values = {"status": "failed"}
+    values.update(overrides)
+    return _meeting(**values)
+
+
+def test_failed_meeting_resumes_only_the_stages_after_a_durable_transcript():
+    meeting = _failed_meeting(
+        transcript_text="durable transcript",
+        summary_text="[Error: provider failed]",
+        visual_breakdown_status="completed",
+    )
+
+    plan = build_resume_plan(meeting)
+    dispatchers = _dispatchers()
+    _dispatch(meeting.id, plan, dispatchers)
+
+    assert plan.action == "tail_pipeline"
+    assert plan.include_summary is True
+    dispatchers["stages"].assert_called_once_with(
+        meeting.id,
+        ("stage_summarize", "stage_extract_intelligence", "stage_embedding"),
+    )
+
+
+def test_failed_meeting_without_transcript_restarts_the_full_pipeline():
+    meeting = _failed_meeting(transcript_text=None)
+
+    plan = build_resume_plan(meeting)
+
+    assert plan.action == "full_pipeline"
+
+
+def test_failed_meeting_with_completed_intelligence_only_finalizes():
+    meeting = _failed_meeting(
+        transcript_text="durable transcript",
+        summary_text="durable summary",
+        structured_output={"ok": True},
+        structured_output_status="completed",
+        visual_breakdown_status="completed",
+    )
+
+    plan = build_resume_plan(meeting)
+    dispatchers = _dispatchers()
+    _dispatch(meeting.id, plan, dispatchers)
+
+    assert plan.action == "finalize"
+    dispatchers["finalize"].assert_called_once_with(meeting.id)
+
+
+def test_failed_meeting_does_not_reopen_a_failed_visual_stage():
+    meeting = _failed_meeting(
+        transcript_text="durable transcript",
+        summary_text="[Error: provider failed]",
+        visual_breakdown_status="failed",
+    )
+
+    plan = build_resume_plan(meeting)
+
+    assert plan.action == "tail_pipeline"
+    assert plan.include_visual is False
+
+
+def test_failed_meeting_regenerates_a_placeholder_summary():
+    meeting = _failed_meeting(
+        transcript_text="durable transcript",
+        summary_text="Summary could not be generated.",
+        visual_breakdown_status="completed",
+    )
+
+    plan = build_resume_plan(meeting)
+
+    assert plan.action == "tail_pipeline"
+    assert plan.include_summary is True
+
+
+def test_failed_meeting_with_usable_summary_only_needs_intelligence():
+    meeting = _failed_meeting(
+        transcript_text="durable transcript",
+        summary_text="A real summary",
+        structured_output_status="pending",
+        visual_breakdown_status="completed",
+    )
+
+    plan = build_resume_plan(meeting)
+
+    assert plan.action == "intelligence"

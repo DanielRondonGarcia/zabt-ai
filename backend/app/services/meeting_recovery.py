@@ -112,6 +112,77 @@ def build_recovery_plan(meeting: Any) -> MeetingRecoveryPlan | None:
     return MeetingRecoveryPlan(action="intelligence")
 
 
+PLACEHOLDER_SUMMARIES = frozenset({"summary could not be generated."})
+# A stage that already failed is not re-run by a resume: the user can request
+# that work explicitly, and repeating it is exactly what resume must avoid.
+RESUME_VISUAL_CLOSED_STATUSES = VISUAL_BREAKDOWN_TERMINAL_STATUSES | {
+    "failed",
+    "cancelled",
+}
+
+
+def summary_is_usable(summary_text: Any) -> bool:
+    """Return whether a stored summary is real content, not a failure marker."""
+    if not isinstance(summary_text, str):
+        return False
+    normalized = summary_text.strip().lower()
+    if not normalized or normalized in PLACEHOLDER_SUMMARIES:
+        return False
+    return not normalized.startswith("[error:")
+
+
+def build_resume_plan(meeting: Any) -> MeetingRecoveryPlan:
+    """Plan a failed-meeting resume from the outputs that are already durable."""
+    visual_status = getattr(meeting, "visual_breakdown_status", None)
+    visual_needed = visual_status not in RESUME_VISUAL_CLOSED_STATUSES
+    reset_visual = visual_status == "processing"
+    source_type = getattr(meeting, "source_type", None)
+
+    if not getattr(meeting, "transcript_text", None):
+        return MeetingRecoveryPlan(
+            action="full_pipeline",
+            source_type=source_type,
+            reset_visual_epoch=reset_visual,
+        )
+
+    structured_complete = (
+        getattr(meeting, "structured_output_status", None) == "completed"
+        and getattr(meeting, "structured_output", None) is not None
+    )
+    if structured_complete:
+        if visual_needed:
+            return MeetingRecoveryPlan(
+                action="visual_then_finalize",
+                include_visual=True,
+                reset_visual_epoch=reset_visual,
+            )
+        return MeetingRecoveryPlan(action="finalize")
+
+    include_transliteration = bool(getattr(meeting, "requested_language", None)) and not bool(
+        getattr(meeting, "transliterated_text", None)
+    )
+
+    if not summary_is_usable(getattr(meeting, "summary_text", None)):
+        return MeetingRecoveryPlan(
+            action="tail_pipeline",
+            include_transliteration=include_transliteration,
+            include_visual=visual_needed,
+            include_summary=True,
+            reset_visual_epoch=reset_visual,
+        )
+
+    if visual_needed:
+        return MeetingRecoveryPlan(
+            action="tail_pipeline",
+            include_transliteration=include_transliteration,
+            include_visual=True,
+            include_summary=False,
+            reset_visual_epoch=reset_visual,
+        )
+
+    return MeetingRecoveryPlan(action="intelligence")
+
+
 def claim_recovery_plan(
     meeting: Any,
     *,
