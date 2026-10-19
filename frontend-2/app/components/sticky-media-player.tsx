@@ -13,6 +13,18 @@ interface StickyMediaPlayerProps {
 
 const MEDIA_ERROR_MESSAGE = "This media could not be loaded. Transcript seeking is still available.";
 
+/** Recognizable video extensions browsers play natively; anything else stays audio. */
+const KNOWN_VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "m4v"]);
+
+const hasKnownVideoExtension = (filePath: string | null | undefined) => {
+    if (!filePath) return false;
+    // Read the extension from the stored file path only; a signed URL's query
+    // string never determines the player type.
+    const pathOnly = filePath.split(/[?#]/)[0];
+    const extension = pathOnly.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+    return extension !== undefined && KNOWN_VIDEO_EXTENSIONS.has(extension);
+};
+
 const getDownloadFilename = (title: string, mediaSrc: string | undefined) => {
     const safeTitle = title.replace(/[^a-z0-9\s_-]/gi, "").trim().slice(0, 80) || "meeting";
     const extension = mediaSrc?.match(/\.(mp4|webm|mov|m4v)(?:$|\?)/i)?.[1]?.toLowerCase() ?? "mp4";
@@ -40,7 +52,15 @@ export function StickyMediaPlayer({ meeting }: StickyMediaPlayerProps) {
     const [playbackRate, setPlaybackRate] = useState(1);
     const [mediaError, setMediaError] = useState<string | null>(null);
     const [isMediaLoading, setIsMediaLoading] = useState(true);
-    const mediaType = meeting.media_type === "video" ? "video" : "audio";
+    // Explicit audio always wins (audio-only MP4 is possible). For legacy
+    // uploads without a stored media type, a known video file extension
+    // selects the video player; unknown or non-video extensions stay audio.
+    const mediaType: "video" | "audio" =
+        meeting.media_type === "audio"
+            ? "audio"
+            : meeting.media_type === "video" || hasKnownVideoExtension(meeting.file_path)
+                ? "video"
+                : "audio";
     const mediaSrc = meeting.audio_url || meeting.file_path || undefined;
     const mediaKey = `${meeting.id}:${mediaSrc ?? ""}:${mediaType}`;
     const mediaDescriptionId = `meeting-${meeting.id}-media-description`;

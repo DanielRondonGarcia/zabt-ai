@@ -868,7 +868,14 @@ def reprocess_failed_meeting(
     meeting.visual_breakdown_completed_at = None
     meeting.visual_raw_output_s3_key = None
     meeting.visual_breakdown_model = None
-    meeting.visual_breakdown_params = None
+    # The upload's media type is source metadata, not run-scoped visual state.
+    # Keep it so a failed-video retry remains a video in API responses and playback.
+    source_content_type = _normalize_content_type(
+        (meeting.visual_breakdown_params or {}).get("content_type")
+    )
+    meeting.visual_breakdown_params = (
+        {"content_type": source_content_type} if source_content_type else None
+    )
 
     for segment in db.exec(
         sqlmodel_select(TranscriptSegment).where(TranscriptSegment.meeting_id == meeting_id)
