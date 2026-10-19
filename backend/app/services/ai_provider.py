@@ -101,11 +101,10 @@ _SAFE_INTERNAL_ERROR_MESSAGES = {
 }
 
 
-def _bounded_output_tokens(max_tokens: int | None) -> int:
-    return min(
-        MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens,
-        MAX_OUTPUT_TOKENS_CEILING,
-    )
+def _bounded_output_tokens(
+    max_tokens: int | None, *, ceiling: int = MAX_OUTPUT_TOKENS
+) -> int:
+    return min(MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens, ceiling)
 
 
 def _completion_content_and_finish(response: Any) -> tuple[str, str | None]:
@@ -384,7 +383,11 @@ class OpenAICompatibleCompletionClient:
             "model": self.model,
             "messages": list(messages),
             "temperature": temperature,
-            "max_tokens": _bounded_output_tokens(max_tokens),
+            # Callers that ask for more than the default cap (summaries) get the
+            # higher ceiling; everyone else keeps the bounded default.
+            "max_tokens": _bounded_output_tokens(
+                max_tokens, ceiling=MAX_OUTPUT_TOKENS_CEILING
+            ),
         }
         if self._endpoint_url:
             try:
