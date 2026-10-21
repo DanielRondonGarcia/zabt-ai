@@ -256,8 +256,9 @@ class Settings(BaseSettings):
     VISION_MAX_TRANSCRIPT_CHARS: int = 6000
     VISION_FFMPEG_TIMEOUT_SECONDS: float = 900.0
 
-    # Summary context budgets
-    SUMMARY_CHUNK_SECONDS: int = 120
+    # Summary context budgets. Larger temporal windows reduce sequential model calls;
+    # the token budget still bounds each individual request.
+    SUMMARY_CHUNK_SECONDS: int = 600
     SUMMARY_MAX_INPUT_TOKENS: int = 6000
 
     # First-party local authentication. There is deliberately no default: every

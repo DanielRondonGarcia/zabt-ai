@@ -152,6 +152,30 @@ def test_hierarchical_budget_splits_spoken_items_without_losing_source_identity(
     assert result.assigned_item_count == 1
 
 
+def test_128_minute_summary_uses_ten_minute_windows_without_dropping_evidence():
+    from app.core.config import Settings
+
+    chunk_seconds = Settings.model_fields["SUMMARY_CHUNK_SECONDS"].default
+    max_input_tokens = Settings.model_fields["SUMMARY_MAX_INPUT_TOKENS"].default
+    spoken = [
+        _spoken(index + 1, index * 120.0, index * 120.0 + 100.0, f"Evidence {index + 1}")
+        for index in range(64)
+    ]
+    result = build_context(
+        spoken,
+        [],
+        chunk_seconds=chunk_seconds,
+        max_input_tokens=max_input_tokens,
+    )
+
+    assert chunk_seconds == 600
+    assert len(result.chunks) == 13
+    assert result.completeness == "complete"
+    assert result.source_item_count == result.assigned_item_count == len(spoken)
+    assert result.unassigned_items == ()
+    assert all(chunk.estimated_input_tokens <= max_input_tokens for chunk in result.chunks)
+
+
 def test_oversized_visual_is_reported_as_explicit_overflow():
     result = build_context(
         [],

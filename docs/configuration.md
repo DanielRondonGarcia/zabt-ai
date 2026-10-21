@@ -322,7 +322,7 @@ it never switches providers automatically.
 | `VISION_ALLOWED_HOSTS` | — | OpenAI mode requires the explicit `api.openai.com` allowlist entry. Use HTTPS endpoints only. |
 | `VISION_SIGNED_URL_EXPIRATION` | `3600` | Lifetime in seconds for fresh media URLs sent to the worker. |
 | `VISION_RUNPOD_API_KEY` / `VISION_RUNPOD_ENDPOINT_ID` / `VISION_POLL_INTERVAL` / `VISION_TIMEOUT` | — | RunPod vision path. |
-| `SUMMARY_CHUNK_SECONDS` / `SUMMARY_MAX_INPUT_TOKENS` | `120` / `6000` | Bounded temporal chunks and request budget for summary context. |
+| `SUMMARY_CHUNK_SECONDS` / `SUMMARY_MAX_INPUT_TOKENS` | `600` / `6000` | Ten-minute temporal windows and the per-request summary evidence budget. |
 
 ### Use OpenAI for visual analysis
 
