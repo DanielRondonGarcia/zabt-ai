@@ -114,6 +114,7 @@ jobs:
           app/tests/unit/test_model_title_stage.py
           app/tests/unit/test_model_extraction_stages.py
           app/tests/unit/test_model_stage_dispatch.py
+          app/tests/unit/test_model_recovery_dispatch.py
           app/tests/unit/test_summary_stage_preservation.py
           app/tests/unit/test_model_completion_transaction.py -q
 

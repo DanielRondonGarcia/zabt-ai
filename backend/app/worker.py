@@ -2347,13 +2347,28 @@ def _dispatch_recovery_plan(meeting_id: int, plan: MeetingRecoveryPlan) -> None:
         "stage_transliterate": stage_transliterate,
         "stage_optional_visual_breakdown": stage_optional_visual_breakdown,
         "stage_summarize": stage_summarize,
-        "stage_extract_intelligence": stage_extract_intelligence,
+        "stage_infer_title": stage_infer_title,
+        "stage_extract_highlights": stage_extract_highlights,
+        "stage_extract_structured_output": stage_extract_structured_output,
         "stage_embedding": stage_embedding,
         "finalize_recovered_meeting": finalize_recovered_meeting,
     }
 
     def dispatch_stages(mid: int, stage_names: tuple[str, ...]) -> None:
         _dispatch_recovery_stages(mid, [stage_by_name[name] for name in stage_names])
+
+    if (
+        plan.resume_lineage
+        and plan.action != "full_pipeline"
+        and plan.previous_run_id is not None
+    ):
+        # Explicit restarts (full pipeline) never reuse an older generation;
+        # resume runs keep only the immediately previous same-owner lineage.
+        meeting_processing_audit.carry_forward_completed_stages(
+            meeting_id=meeting_id,
+            source_run_id=plan.previous_run_id,
+            stages=tuple(sorted(plan.reused_stages())),
+        )
 
     dispatch_recovery_plan(
         meeting_id,
@@ -2915,7 +2930,21 @@ def dispatch_reprocess_resume(meeting_id: int) -> None:
     meeting = meeting_service.get(Meeting, meeting_id)
     if meeting is None:
         raise ValueError(f"Meeting {meeting_id} not found")
-    _dispatch_recovery_plan(meeting_id, build_resume_plan(meeting))
+    # The reprocess admission already installed the new run as the current
+    # one, so the lineage lookup must exclude it rather than trust it.
+    previous_run_id, completed_stages = meeting_processing_audit.previous_resume_lineage(
+        meeting_id,
+        meeting.current_processing_run_id,
+        transcript_text=meeting.transcript_text,
+    )
+    _dispatch_recovery_plan(
+        meeting_id,
+        build_resume_plan(
+            meeting,
+            previous_run_id=previous_run_id,
+            previous_completed_stages=completed_stages,
+        ),
+    )
 
 
 # ── Stage 0 (YouTube): Download from YouTube ────────────────────────────────

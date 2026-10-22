@@ -25,6 +25,9 @@ from app.models.processing_audit import (
     MeetingProcessingRun,
     MeetingProcessingRunRead,
 )
+from app.services.meeting_recovery import (
+    valid_resume_completed_stages,
+)
 
 logger = get_logger(__name__)
 
@@ -1149,6 +1152,196 @@ class MeetingProcessingAuditService:
                 and run.dispatch_attempt_id == attempt_id
                 and run.status in {"running", "completed"}
             )
+
+    def previous_resume_lineage(
+        self,
+        meeting_id: int,
+        current_run_id: int | None = None,
+        *,
+        transcript_text: str | None = None,
+    ) -> tuple[int | None, tuple[str, ...]]:
+        """Return (immediately previous run id, still-valid completed stages).
+
+        The selection takes whatever run immediately precedes the current one
+        for this meeting, regardless of its status. That neighbor is then
+        explicitly rejected when it is still active, cancelled, or owned by
+        someone else: a cancelled or active neighbor is never crossed into
+        older runs, so markers from any earlier run are never carried forward.
+        Each completed split-stage marker must additionally belong to the
+        previous run's own dispatch attempt (stale attempt events are
+        rejected) and still match the current transcript fingerprint. This is
+        the only lineage source for a resume.
+        """
+        try:
+            with Session(engine) as session:
+                meeting = session.get(Meeting, meeting_id)
+                if meeting is None or meeting.owner_id is None:
+                    return None, ()
+                statement = (
+                    select(MeetingProcessingRun)
+                    .where(MeetingProcessingRun.meeting_id == meeting_id)
+                    .order_by(
+                        MeetingProcessingRun.created_at.desc(),
+                        MeetingProcessingRun.id.desc(),
+                    )
+                    .limit(1)
+                )
+                if current_run_id is not None:
+                    statement = statement.where(MeetingProcessingRun.id != current_run_id)
+                previous = session.exec(statement).first()
+                if (
+                    previous is None
+                    or previous.owner_id != meeting.owner_id
+                    or previous.status in _ACTIVE_RUN_STATUSES
+                    or previous.status == "cancelled"
+                ):
+                    return None, ()
+                attempt_id = getattr(previous, "dispatch_attempt_id", None)
+                events = [
+                    event
+                    for event in session.exec(
+                        select(MeetingProcessingEvent)
+                        .where(MeetingProcessingEvent.run_id == previous.id)
+                        .where(MeetingProcessingEvent.meeting_id == meeting_id)
+                        .where(MeetingProcessingEvent.event_type == "completed")
+                        .order_by(MeetingProcessingEvent.id.asc())
+                    ).all()
+                    if getattr(event, "dispatch_attempt_id", None) == attempt_id
+                ]
+                return previous.id, valid_resume_completed_stages(
+                    events, transcript_text=transcript_text
+                )
+        except Exception:
+            logger.warning(
+                "processing audit previous_resume_lineage failed meeting_id=%s",
+                meeting_id,
+                exc_info=True,
+            )
+            return None, ()
+
+    def carry_forward_completed_stages(
+        self,
+        *,
+        meeting_id: int,
+        source_run_id: int,
+        stages: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        """Copy validated previous-run completed markers into the current run.
+
+        Each copied marker is marked used-as-input (``reused``) and keeps the
+        transcript fingerprint of the lineage run whose output it proves, so a
+        later resume re-validates against the origin epoch, not the copy.
+        """
+        try:
+            now = datetime.utcnow()
+            with Session(engine) as session:
+                meeting = session.exec(
+                    select(Meeting)
+                    .where(Meeting.id == meeting_id)
+                    .with_for_update()
+                ).first()
+                if meeting is None or meeting.owner_id is None:
+                    return ()
+                run_id = meeting.current_processing_run_id
+                if run_id is None:
+                    return ()
+                run = session.exec(
+                    select(MeetingProcessingRun)
+                    .where(MeetingProcessingRun.id == run_id)
+                    .with_for_update()
+                ).first()
+                if (
+                    run is None
+                    or run.meeting_id != meeting_id
+                    or run.owner_id != meeting.owner_id
+                    or run.status not in _ACTIVE_RUN_STATUSES
+                    or not run.dispatch_attempt_id
+                ):
+                    return ()
+                source = session.get(MeetingProcessingRun, source_run_id)
+                if (
+                    source is None
+                    or source.meeting_id != meeting_id
+                    or source.owner_id != meeting.owner_id
+                    or source.status in _ACTIVE_RUN_STATUSES
+                    # A cancelled source run's markers prove nothing: the work
+                    # was stopped, not finished.
+                    or source.status == "cancelled"
+                ):
+                    return ()
+                source_attempt_id = getattr(source, "dispatch_attempt_id", None)
+                source_events = [
+                    event
+                    for event in session.exec(
+                        select(MeetingProcessingEvent)
+                        .where(MeetingProcessingEvent.run_id == source_run_id)
+                        .where(MeetingProcessingEvent.meeting_id == meeting_id)
+                        .where(MeetingProcessingEvent.event_type == "completed")
+                        .order_by(MeetingProcessingEvent.id.asc())
+                    ).all()
+                    # Only markers recorded under the source run's own dispatch
+                    # attempt are valid carry sources.
+                    if getattr(event, "dispatch_attempt_id", None) == source_attempt_id
+                ]
+                # The source marker must still describe output for the exact
+                # transcript epoch the current run now holds.
+                valid = set(
+                    valid_resume_completed_stages(
+                        source_events, transcript_text=meeting.transcript_text
+                    )
+                )
+                by_stage = {
+                    event.stage: event
+                    for event in source_events
+                    if event.stage in valid
+                }
+                existing = session.exec(
+                    select(MeetingProcessingEvent)
+                    .where(MeetingProcessingEvent.run_id == run.id)
+                    .where(MeetingProcessingEvent.meeting_id == meeting_id)
+                    .where(MeetingProcessingEvent.event_type == "completed")
+                ).all()
+                existing_stages = {event.stage for event in existing}
+                carried: list[str] = []
+                for stage in stages:
+                    source_event = by_stage.get(stage)
+                    if source_event is None or stage in existing_stages:
+                        continue
+                    origin = (
+                        (source_event.metadata_ or {}).get("resume_origin_run_id")
+                        or source_run_id
+                    )
+                    session.add(
+                        MeetingProcessingEvent(
+                            run_id=run.id,
+                            meeting_id=meeting_id,
+                            dispatch_attempt_id=run.dispatch_attempt_id,
+                            stage=stage,
+                            event_type="completed",
+                            status="completed",
+                            message=f"Kept {stage} output from processing run {source_run_id}",
+                            metadata_=sanitize_metadata({
+                                "reused": True,
+                                "resume_origin_run_id": origin,
+                                "transcript_fingerprint": (
+                                    source_event.metadata_ or {}
+                                ).get("transcript_fingerprint"),
+                            }),
+                            created_at=now,
+                            completed_at=now,
+                        )
+                    )
+                    carried.append(stage)
+                session.commit()
+                return tuple(carried)
+        except Exception:
+            logger.warning(
+                "processing audit carry-forward failed meeting_id=%s source_run_id=%s",
+                meeting_id,
+                source_run_id,
+                exc_info=True,
+            )
+            return ()
 
     def _run_terminal(
         self,
