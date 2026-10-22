@@ -611,6 +611,19 @@ def _record_audit_stage_failed(task_id=None, exception=None, args=None, sender=N
 
 # ── Error callback (linked to each stage via link_error) ─────────────────────
 
+# Stages that run after stage_summarize has durably stored the meeting summary.
+# A failure in one of these stages must not overwrite that summary with an
+# error marker: resume skips completed model operations and dispatches only
+# missing/failed work, so the valid summary should survive the failure.
+SUMMARY_PRESERVING_STAGES = frozenset({
+    "stage_embedding",
+    "stage_extract_intelligence",
+    "stage_infer_title",
+    "stage_extract_highlights",
+    "stage_extract_structured_output",
+})
+
+
 @celery_app.task(name="on_stage_failure")
 def on_stage_failure(request, exc, traceback):
     """Fail the exact run while keeping visual-only failures meeting-scoped."""
@@ -642,7 +655,7 @@ def on_stage_failure(request, exc, traceback):
         str(exc),
         processing_run_id=run_id,
         dispatch_attempt_id=attempt_id,
-        preserve_existing_summary=stage_name == "stage_embedding",
+        preserve_existing_summary=stage_name in SUMMARY_PRESERVING_STAGES,
     )
     if failed_meeting is None:
         return

@@ -26,6 +26,10 @@ from app.services.meeting_processing_audit import (
     meeting_processing_audit,
     sanitize_message,
 )
+from app.services.meeting_recovery import (
+    summary_is_usable,
+    transcript_fingerprint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -954,7 +958,12 @@ class MeetingService(BaseService):
             else:
                 meeting.status = "failed"
                 meeting.sub_status = None
-                if not preserve_existing_summary or not meeting.summary_text:
+                # Only clobber the stored summary when it is missing or a
+                # failure marker/placeholder; reusing summary_is_usable keeps
+                # the durable success summary on request.
+                if not preserve_existing_summary or not summary_is_usable(
+                    meeting.summary_text
+                ):
                     meeting.summary_text = f"[Error: {error_message}]"
 
             session.add(meeting)
