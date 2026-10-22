@@ -62,7 +62,9 @@ from app.services.meeting_recovery import (
     build_resume_plan,
     claim_recovery_plan,
     dispatch_recovery_plan,
+    summary_is_usable,
 )
+from app.services.transcript_fingerprint import transcript_fingerprint
 from app.services.meeting_processing_audit import meeting_processing_audit
 from app.services.visual_breakdown.direct_service import DirectVisionService
 
@@ -394,9 +396,23 @@ _AUDITED_STAGE_TASKS = {
     "stage_visual_breakdown",
     "stage_summarize",
     "stage_extract_intelligence",
+    "stage_infer_title",
+    "stage_extract_highlights",
+    "stage_extract_structured_output",
     "stage_embedding",
     "finalize_recovered_meeting",
 }
+
+# Split model stages that admit themselves with a row-locked provider claim
+# (the claim is the logical, durable start event) and record their own
+# completed marker together with the saved output. The prerun/success audit
+# signals must not duplicate those events for these stages.
+_MODEL_STAGE_ADMITTED_STAGES = frozenset({
+    "stage_summarize",
+    "stage_infer_title",
+    "stage_extract_highlights",
+    "stage_extract_structured_output",
+})
 
 
 def _audit_headers(
@@ -520,8 +536,8 @@ def _record_audit_stage_started(task_id=None, task=None, args=None, **kwargs):
     stage = getattr(task, "name", None)
     if stage not in _AUDITED_STAGE_TASKS:
         return
-    if stage == "stage_summarize":
-        # The provider-admission claim is the summary stage's logical start.
+    if stage in _MODEL_STAGE_ADMITTED_STAGES:
+        # The provider-admission claim is the stage's logical start.
         return
     meeting_id = _meeting_id_from_task_args(args)
     if meeting_id is None:
@@ -557,14 +573,17 @@ def _record_audit_stage_succeeded(sender=None, result=None, **kwargs):
     if run_id is None or attempt_id is None:
         return
     task_id = _task_request_id(task)
-    meeting_processing_audit.stage_completed(
-        run_id=run_id,
-        attempt_id=attempt_id,
-        meeting_id=meeting_id,
-        stage=stage,
-        task_id=task_id,
-        metadata={"celery_state": "SUCCESS"},
-    )
+    if stage not in _MODEL_STAGE_ADMITTED_STAGES:
+        # These stages write their own completed marker inside the output
+        # commit, describing exactly what was saved.
+        meeting_processing_audit.stage_completed(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            meeting_id=meeting_id,
+            stage=stage,
+            task_id=task_id,
+            metadata={"celery_state": "SUCCESS"},
+        )
     terminal_visual_success = (
         stage == "stage_visual_breakdown"
         and _get_audit_header(task, "meeting_processing_terminal_success") == "true"
@@ -1252,20 +1271,6 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             completion_client=completion_client,
         )
 
-    inferred_title = None
-    if summary_text:
-        if not _update_sub_status_for_attempt(
-            meeting_id, run_id, attempt_id, "summarizing"
-        ):
-            raise Ignore()
-        from app.services.ai_agent import infer_title
-
-        inferred_title = infer_title(
-            summary_text,
-            output_language=meeting.requested_language,
-            completion_client=completion_client,
-        )
-
     saved_meeting = meeting_service.save_summary_for_attempt(
         meeting_id,
         run_id,
@@ -1273,7 +1278,9 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
         summary_text,
         template_id=active_template.id if active_template else None,
         template_name=active_template.name if active_template else None,
-        inferred_title=inferred_title,
+        # T3 stage split: the completion marker commits with the summary itself
+        # so a crash cannot leave the durable summary unresumeable.
+        audit_task_id=_task_request_id(stage_summarize),
     )
     if saved_meeting is None:
         raise Ignore()
@@ -1402,6 +1409,256 @@ def stage_extract_intelligence(meeting_id: int) -> int:
 
     logger.info("stage_extract_intelligence complete meeting_id=%s type=%s", meeting_id, meeting_type)
 
+    return meeting_id
+
+
+# ── T3/T4 stage split: separate audited model operations ───────────────────
+
+
+def _claim_model_stage(meeting_id: int, stage_name: str, task) -> tuple[int, str]:
+    """Admit one split model stage for the exact current attempt.
+
+    The row-locked ``provider_claimed`` event guards duplicate deliveries; a
+    stale attempt returns no claim and the stage is ignored before any
+    provider I/O or write.
+    """
+    run_id, attempt_id = _required_processing_identity(task)
+    claim = meeting_processing_audit.claim_intelligence(
+        run_id=run_id,
+        attempt_id=attempt_id,
+        meeting_id=meeting_id,
+        task_id=_task_request_id(task),
+        stage=stage_name,
+    )
+    if claim is None:
+        raise Ignore()
+    return run_id, attempt_id
+
+
+def _stage_completed_with_output(
+    task,
+    meeting_id: int,
+    run_id: int,
+    attempt_id: str,
+    *,
+    message: str,
+    transcript_text: str | None,
+    skipped_no_source: bool = True,
+) -> None:
+    """Complete a no-source skip inline (no output was written for this stage).
+
+    Output-producing stages must NOT use this: their completion marker is
+    written inside the same transaction as the saved output (see the
+    ``audit_task_id`` argument on the attempt-locked save methods). This
+    helper remains for skip paths that persist no output, where a crash
+    between marker and output cannot occur.
+    """
+    meeting_processing_audit.stage_completed(
+        run_id=run_id,
+        attempt_id=attempt_id,
+        meeting_id=meeting_id,
+        stage=task.name,
+        task_id=_task_request_id(task),
+        message=message,
+        metadata={
+            "transcript_fingerprint": transcript_fingerprint(transcript_text),
+            "skipped_no_source": skipped_no_source,
+        },
+    )
+
+
+@celery_app.task(name="stage_infer_title")
+def stage_infer_title(meeting_id: int) -> int:
+    """Infer a title from the durable summary; the summary itself is untouched."""
+    logger.info("stage_infer_title started meeting_id=%s", meeting_id)
+    run_id, attempt_id = _claim_model_stage(meeting_id, "stage_infer_title", stage_infer_title)
+    if not _update_sub_status_for_attempt(
+        meeting_id, run_id, attempt_id, "inferring_title"
+    ):
+        raise Ignore()
+
+    meeting = meeting_service.get(Meeting, meeting_id)
+    if not meeting:
+        raise ValueError(f"Meeting {meeting_id} not found.")
+    if meeting.owner_id is None:
+        raise Ignore()
+    if not meeting_service.validate_intelligence_for_attempt(
+        meeting_id,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+        owner_id=meeting.owner_id,
+    ):
+        raise Ignore()
+
+    if not summary_is_usable(meeting.summary_text):
+        # No durable summary to title: complete without provider I/O so a
+        # resume can skip this claimed stage.
+        _stage_completed_with_output(
+            stage_infer_title,
+            meeting_id,
+            run_id,
+            attempt_id,
+            message="No durable summary; title inference skipped without provider",
+            transcript_text=meeting.transcript_text,
+            skipped_no_source=True,
+        )
+        return meeting_id
+
+    from app.services.ai_agent import infer_title
+
+    completion_client = get_completion_client(
+        meeting.owner_id,
+        purpose="summary",
+        fallback_client=ai_agent._client,
+        fallback_model=settings.OPENAI_MODEL,
+    )
+    inferred_title = infer_title(
+        meeting.summary_text,
+        output_language=meeting.requested_language,
+        completion_client=completion_client,
+    )
+    saved_meeting = meeting_service.save_inferred_title_for_attempt(
+        meeting_id,
+        run_id,
+        attempt_id,
+        inferred_title,
+        owner_id=meeting.owner_id,
+        # The title's completion marker commits together with the title so a
+        # crash cannot repeat the inference call on resume.
+        audit_task_id=_task_request_id(stage_infer_title),
+    )
+    if saved_meeting is None:
+        raise Ignore()
+
+    logger.info("stage_infer_title complete meeting_id=%s", meeting_id)
+    return meeting_id
+
+
+@celery_app.task(name="stage_extract_highlights")
+def stage_extract_highlights(meeting_id: int) -> int:
+    """Extract and save chapters, action items, and key questions."""
+    logger.info("stage_extract_highlights started meeting_id=%s", meeting_id)
+    run_id, attempt_id = _claim_model_stage(
+        meeting_id, "stage_extract_highlights", stage_extract_highlights
+    )
+    if not _update_sub_status_for_attempt(
+        meeting_id, run_id, attempt_id, "extracting_highlights"
+    ):
+        raise Ignore()
+
+    meeting = meeting_service.get(Meeting, meeting_id)
+    if not meeting:
+        raise ValueError(f"Meeting {meeting_id} not found.")
+    if meeting.owner_id is None:
+        raise Ignore()
+    if not meeting_service.validate_intelligence_for_attempt(
+        meeting_id,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+        owner_id=meeting.owner_id,
+    ):
+        raise Ignore()
+    if not meeting.transcript_text:
+        _stage_completed_with_output(
+            stage_extract_highlights,
+            meeting_id,
+            run_id,
+            attempt_id,
+            message="No transcript; highlight extraction skipped without provider",
+            transcript_text=None,
+            skipped_no_source=True,
+        )
+        return meeting_id
+
+    from app.services.meeting_intelligence import (
+        HighlightSaveRejected,
+        intelligence_service,
+    )
+
+    highlights_data = intelligence_service.extract_highlights(meeting.transcript_text)
+    highlight_result = intelligence_service.save_highlights(
+        meeting_id,
+        highlights_data,
+        owner_id=meeting.owner_id,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+        audit_task_id=_task_request_id(stage_extract_highlights),
+    )
+    if highlight_result is HighlightSaveRejected.STALE_OR_CANCELLED:
+        raise Ignore()
+
+    # The highlights' completion marker commits inside save_highlights, so an
+    # empty highlight list is still a successful, durable save with its marker.
+    logger.info("stage_extract_highlights complete meeting_id=%s", meeting_id)
+    return meeting_id
+
+
+@celery_app.task(name="stage_extract_structured_output")
+def stage_extract_structured_output(meeting_id: int) -> int:
+    """Extract and save the meeting-type-specific structured output."""
+    logger.info("stage_extract_structured_output started meeting_id=%s", meeting_id)
+    run_id, attempt_id = _claim_model_stage(
+        meeting_id, "stage_extract_structured_output", stage_extract_structured_output
+    )
+    if not _update_sub_status_for_attempt(
+        meeting_id, run_id, attempt_id, "extracting_structured"
+    ):
+        raise Ignore()
+
+    meeting = meeting_service.get(Meeting, meeting_id)
+    if not meeting:
+        raise ValueError(f"Meeting {meeting_id} not found.")
+    if meeting.owner_id is None:
+        raise Ignore()
+    if not meeting.transcript_text:
+        if not meeting_service.complete_without_intelligence_for_attempt(
+            meeting_id,
+            processing_run_id=run_id,
+            dispatch_attempt_id=attempt_id,
+            owner_id=meeting.owner_id,
+        ):
+            raise Ignore()
+        _stage_completed_with_output(
+            stage_extract_structured_output,
+            meeting_id,
+            run_id,
+            attempt_id,
+            message="No transcript; structured extraction skipped without provider",
+            transcript_text=None,
+            skipped_no_source=True,
+        )
+        return meeting_id
+    if not meeting_service.begin_intelligence_for_attempt(
+        meeting_id,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+        owner_id=meeting.owner_id,
+    ):
+        raise Ignore()
+
+    from app.services.meeting_intelligence import intelligence_service
+
+    meeting_type = meeting.meeting_type or "generic"
+    structured_output = intelligence_service.extract_structured_output(
+        meeting.transcript_text, meeting_type
+    )
+    if not meeting_service.complete_intelligence_for_attempt(
+        meeting_id,
+        structured_output,
+        processing_run_id=run_id,
+        dispatch_attempt_id=attempt_id,
+        owner_id=meeting.owner_id,
+        # The structured output's completion marker commits together with the
+        # output so a crash cannot repeat the extraction call on resume.
+        audit_task_id=_task_request_id(stage_extract_structured_output),
+    ):
+        raise Ignore()
+
+    logger.info(
+        "stage_extract_structured_output complete meeting_id=%s type=%s",
+        meeting_id,
+        meeting_type,
+    )
     return meeting_id
 
 
@@ -2642,7 +2899,9 @@ def dispatch_pipeline(meeting_id: int):
         stage_transliterate,
         stage_optional_visual_breakdown,
         stage_summarize,
-        stage_extract_intelligence,
+        stage_infer_title,
+        stage_extract_highlights,
+        stage_extract_structured_output,
         stage_embedding,
     ]
     result = chain(*_build_pipeline_signatures(meeting_id, stages, run_id, attempt_id)).apply_async()
@@ -2831,7 +3090,9 @@ def dispatch_youtube_pipeline(meeting_id: int):
         stage_transliterate,
         stage_optional_visual_breakdown,
         stage_summarize,
-        stage_extract_intelligence,
+        stage_infer_title,
+        stage_extract_highlights,
+        stage_extract_structured_output,
         stage_embedding,
     ]
     result = chain(*_build_pipeline_signatures(meeting_id, stages, run_id, attempt_id)).apply_async()

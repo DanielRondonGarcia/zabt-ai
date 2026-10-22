@@ -11,7 +11,10 @@ from app.core.logging import get_logger
 from app.db.engine import engine
 from app.models.meeting_intelligence import MeetingHighlight
 from app.services.ai_provider import build_openai_client
-from app.services.meeting_processing_audit import meeting_processing_audit
+from app.services.meeting_processing_audit import (
+    meeting_processing_audit,
+)
+from app.services.meeting_recovery import transcript_fingerprint
 
 logger = get_logger(__name__)
 
@@ -276,8 +279,15 @@ class MeetingIntelligenceService:
         owner_id: int | None,
         processing_run_id: int | None,
         dispatch_attempt_id: str | None,
+        audit_task_id: str | None = None,
     ) -> list[MeetingHighlight] | HighlightSaveRejected:
-        """Replace highlights only for the exact current meeting owner/attempt."""
+        """Replace highlights only for the exact current meeting owner/attempt.
+
+        With ``audit_task_id`` the split highlight stage's completed resume
+        marker is added to this same transaction, so a crash cannot leave
+        saved highlights without their marker and repeat the extraction call
+        on resume.
+        """
         if owner_id is None or processing_run_id is None or not dispatch_attempt_id:
             return HighlightSaveRejected.STALE_OR_CANCELLED
         with Session(engine) as session:
@@ -350,6 +360,21 @@ class MeetingIntelligenceService:
                 saved.append(highlight)
                 sort_order += 1
 
+            if audit_task_id:
+                meeting_processing_audit.stage_completed_event_for_output(
+                    session,
+                    run=run,
+                    meeting_id=meeting_id,
+                    attempt_id=dispatch_attempt_id,
+                    stage="stage_extract_highlights",
+                    task_id=audit_task_id,
+                    message=f"Saved {len(saved)} meeting highlights",
+                    metadata={
+                        "transcript_fingerprint": transcript_fingerprint(
+                            meeting.transcript_text
+                        )
+                    },
+                )
             session.commit()
             return saved
 

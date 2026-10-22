@@ -859,12 +859,21 @@ def test_resummarize_pipeline_includes_audited_embedding_stage(monkeypatch):
     signatures = captured["signatures"]
     assert [signature.task for signature in signatures] == [
         "stage_summarize",
-        "stage_extract_intelligence",
+        "stage_infer_title",
+        "stage_extract_highlights",
+        "stage_extract_structured_output",
         "stage_embedding",
     ]
-    assert signatures[-1].options["headers"]["meeting_processing_run_id"] == "89"
-    assert signatures[-1].options["headers"]["dispatch_attempt_id"] == "attempt-89"
-    assert signatures[-1].options["link_error"][0].task == "on_stage_failure"
+    # Every split model stage carries the same audited identity headers.
+    for signature in signatures:
+        headers = signature.options["headers"]
+        assert headers["meeting_processing_run_id"] == "89"
+        assert headers["dispatch_attempt_id"] == "attempt-89"
+        assert headers["meeting_id"] == "45"
+        assert [callback.task for callback in signature.options["link_error"]] == [
+            "on_stage_failure"
+        ]
+
 
 def test_audit_reindex_admission_does_not_reuse_active_reindex_run(monkeypatch):
     worker = _worker()

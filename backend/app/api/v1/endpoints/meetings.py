@@ -638,7 +638,9 @@ def resummarize_meeting(
         _audit_headers,
         on_stage_failure,
         stage_embedding,
-        stage_extract_intelligence,
+        stage_extract_highlights,
+        stage_extract_structured_output,
+        stage_infer_title,
         stage_summarize,
     )
 
@@ -666,9 +668,19 @@ def resummarize_meeting(
         headers=_audit_headers(run.id, meeting_id, "stage_summarize", attempt_id),
         link_error=[on_stage_failure.s()],
     )
-    intelligence_signature = stage_extract_intelligence.s().set(
+    title_signature = stage_infer_title.s().set(
+        headers=_audit_headers(run.id, meeting_id, "stage_infer_title", attempt_id),
+        link_error=[on_stage_failure.s()],
+    )
+    highlights_signature = stage_extract_highlights.s().set(
         headers=_audit_headers(
-            run.id, meeting_id, "stage_extract_intelligence", attempt_id
+            run.id, meeting_id, "stage_extract_highlights", attempt_id
+        ),
+        link_error=[on_stage_failure.s()],
+    )
+    structured_signature = stage_extract_structured_output.s().set(
+        headers=_audit_headers(
+            run.id, meeting_id, "stage_extract_structured_output", attempt_id
         ),
         link_error=[on_stage_failure.s()],
     )
@@ -678,7 +690,11 @@ def resummarize_meeting(
     )
     try:
         result = chain(
-            summary_signature, intelligence_signature, embedding_signature
+            summary_signature,
+            title_signature,
+            highlights_signature,
+            structured_signature,
+            embedding_signature,
         ).apply_async(
             args=[meeting_id]
         )

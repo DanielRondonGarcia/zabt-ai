@@ -26,10 +26,8 @@ from app.services.meeting_processing_audit import (
     meeting_processing_audit,
     sanitize_message,
 )
-from app.services.meeting_recovery import (
-    summary_is_usable,
-    transcript_fingerprint,
-)
+from app.services.meeting_recovery import summary_is_usable
+from app.services.transcript_fingerprint import transcript_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -373,8 +371,6 @@ class MeetingService(BaseService):
             )
             return False
 
-
-
     def _locked_intelligence_meeting(
         self,
         session: Session,
@@ -423,6 +419,88 @@ class MeetingService(BaseService):
             session.commit()
             return True
 
+    def validate_intelligence_for_attempt(
+        self,
+        meeting_id: int,
+        *,
+        processing_run_id: int,
+        dispatch_attempt_id: str,
+        owner_id: int,
+    ) -> bool:
+        """Confirm the exact owner/current-attempt identity before provider I/O."""
+        with Session(engine) as session:
+            meeting = self._locked_intelligence_meeting(
+                session,
+                meeting_id,
+                processing_run_id=processing_run_id,
+                dispatch_attempt_id=dispatch_attempt_id,
+                owner_id=owner_id,
+            )
+            return meeting is not None
+
+    def save_inferred_title_for_attempt(
+        self,
+        meeting_id: int,
+        run_id: int,
+        attempt_id: str,
+        inferred_title: str | None,
+        *,
+        owner_id: int,
+        audit_task_id: str | None = None,
+    ) -> Optional[Meeting]:
+        """Persist an inferred title without touching summary or other fields.
+
+        A late title stage must never reset a durable summary. The existing
+        file-extension rule applies exactly as in ``save_summary_for_attempt``:
+        only an upload-file-style title is replaced, so user-authored titles
+        always win. With ``audit_task_id`` the stage's completed resume marker
+        is added to this same transaction, so a crash cannot leave a saved
+        title without its marker and repeat the model call on resume.
+        """
+        with Session(engine) as session:
+            meeting = self._locked_intelligence_meeting(
+                session,
+                meeting_id,
+                processing_run_id=run_id,
+                dispatch_attempt_id=attempt_id,
+                owner_id=owner_id,
+            )
+            if meeting is None:
+                return None
+            if inferred_title and meeting.title:
+                file_extensions = (
+                    ".m4a", ".mp3", ".wav", ".mp4", ".mov", ".webm", ".ogg", ".flac"
+                )
+                if any(meeting.title.lower().endswith(ext) for ext in file_extensions):
+                    meeting.title = inferred_title
+            if audit_task_id:
+                title_applied = bool(inferred_title) and meeting.title == inferred_title
+                run = meeting_processing_audit._locked_current_run(
+                    session, run_id, meeting_id, attempt_id
+                )[1]
+                meeting_processing_audit.stage_completed_event_for_output(
+                    session,
+                    run=run,
+                    meeting_id=meeting_id,
+                    attempt_id=attempt_id,
+                    stage="stage_infer_title",
+                    task_id=audit_task_id,
+                    message=(
+                        "Title updated from the meeting summary"
+                        if title_applied
+                        else "Existing meeting title kept; inferred title not applied"
+                    ),
+                    metadata={
+                        "transcript_fingerprint": transcript_fingerprint(
+                            meeting.transcript_text
+                        )
+                    },
+                )
+            session.add(meeting)
+            session.commit()
+            session.refresh(meeting)
+            return meeting
+
     def complete_intelligence_for_attempt(
         self,
         meeting_id: int,
@@ -431,6 +509,7 @@ class MeetingService(BaseService):
         processing_run_id: int,
         dispatch_attempt_id: str,
         owner_id: int,
+        audit_task_id: str | None = None,
     ) -> bool:
         """Persist intelligence output and complete the Meeting atomically."""
         with Session(engine) as session:
@@ -448,6 +527,25 @@ class MeetingService(BaseService):
             meeting.status = "processing"
             meeting.sub_status = "indexing_embeddings"
             meeting.processing_heartbeat_at = datetime.utcnow()
+            if audit_task_id:
+                meeting_type = structured_output.get("meeting_type", "generic")
+                run = meeting_processing_audit._locked_current_run(
+                    session, processing_run_id, meeting_id, dispatch_attempt_id
+                )[1]
+                meeting_processing_audit.stage_completed_event_for_output(
+                    session,
+                    run=run,
+                    meeting_id=meeting_id,
+                    attempt_id=dispatch_attempt_id,
+                    stage="stage_extract_structured_output",
+                    task_id=audit_task_id,
+                    message=f"Saved structured output for a {meeting_type} meeting",
+                    metadata={
+                        "transcript_fingerprint": transcript_fingerprint(
+                            meeting.transcript_text
+                        )
+                    },
+                )
             session.add(meeting)
             session.commit()
             return True
@@ -509,8 +607,14 @@ class MeetingService(BaseService):
         template_id: int | None = None,
         template_name: str | None = None,
         inferred_title: str | None = None,
+        audit_task_id: str | None = None,
     ) -> Optional[Meeting]:
-        """Commit summary fields only for the exact active processing attempt."""
+        """Commit summary fields only for the exact active processing attempt.
+
+        With ``audit_task_id`` the summary's completed resume marker is added
+        to this same transaction, so a crash cannot leave a saved summary
+        without its marker and repeat the summary model call on resume.
+        """
         with Session(engine) as session:
             meeting, _run = meeting_processing_audit._locked_current_run(
                 session, run_id, meeting_id, attempt_id
@@ -531,6 +635,21 @@ class MeetingService(BaseService):
                 )
                 if any(meeting.title.lower().endswith(ext) for ext in file_extensions):
                     meeting.title = inferred_title
+            if audit_task_id:
+                meeting_processing_audit.stage_completed_event_for_output(
+                    session,
+                    run=_run,
+                    meeting_id=meeting_id,
+                    attempt_id=attempt_id,
+                    stage="stage_summarize",
+                    task_id=audit_task_id,
+                    message="Meeting summary saved",
+                    metadata={
+                        "transcript_fingerprint": transcript_fingerprint(
+                            meeting.transcript_text
+                        )
+                    },
+                )
             session.add(meeting)
             session.commit()
             session.refresh(meeting)

@@ -671,8 +671,23 @@ class MeetingProcessingAuditService:
         attempt_id: str,
         meeting_id: int,
         task_id: str | None,
+        stage: str = "stage_extract_intelligence",
     ) -> MeetingProcessingEvent | None:
-        """Atomically admit intelligence extraction once for the exact attempt."""
+        """Atomically admit one split model stage for the exact attempt.
+
+        The legacy intelligence task uses the default ``stage``; the split
+        title/highlights/structured stages reuse this row-locked claim with
+        their own stage name so a duplicate delivery is rejected before any
+        provider I/O.
+        """
+        allowed_stages = (
+            "stage_extract_intelligence",
+            "stage_infer_title",
+            "stage_extract_highlights",
+            "stage_extract_structured_output",
+        )
+        if stage not in allowed_stages:
+            raise ValueError(f"Unsupported model stage claim: {stage}")
         if not attempt_id:
             return None
         now = datetime.utcnow()
@@ -681,7 +696,7 @@ class MeetingProcessingAuditService:
             .where(MeetingProcessingEvent.run_id == run_id)
             .where(MeetingProcessingEvent.meeting_id == meeting_id)
             .where(MeetingProcessingEvent.dispatch_attempt_id == attempt_id)
-            .where(MeetingProcessingEvent.stage == "stage_extract_intelligence")
+            .where(MeetingProcessingEvent.stage == stage)
             .where(MeetingProcessingEvent.event_type == "started")
         )
         with Session(engine) as session:
@@ -697,7 +712,7 @@ class MeetingProcessingAuditService:
             session.add(run)
             claim_metadata = dict(event.metadata_ or {}) if event is not None else {}
             claim_metadata.update({
-                "celery_task_name": "stage_extract_intelligence",
+                "celery_task_name": stage,
                 "provider_claimed": True,
             })
             if event is None:
@@ -705,11 +720,11 @@ class MeetingProcessingAuditService:
                     run_id=run_id,
                     meeting_id=meeting_id,
                     dispatch_attempt_id=attempt_id,
-                    stage="stage_extract_intelligence",
+                    stage=stage,
                     event_type="started",
                     status="started",
                     task_id=(sanitize_message(task_id)[:255] if task_id else None),
-                    message="stage_extract_intelligence started",
+                    message=f"{stage} started",
                     metadata_=sanitize_metadata(claim_metadata),
                     created_at=now,
                     started_at=now,
@@ -964,6 +979,47 @@ class MeetingProcessingAuditService:
                 session.commit()
         except Exception:
             logger.warning("processing audit terminal event failed run_id=%s stage=%s", run_id, stage, exc_info=True)
+
+    def stage_completed_event_for_output(
+        self,
+        session: Session,
+        *,
+        run: MeetingProcessingRun | None,
+        meeting_id: int,
+        attempt_id: str,
+        stage: str,
+        task_id: str | None,
+        message: Any = None,
+        metadata: Mapping[str, Any] | None = None,
+    ) -> MeetingProcessingEvent | None:
+        """Build a stage completed marker inside the caller's output transaction.
+
+        Model output and its resume marker must commit together: the caller
+        already holds the locked meeting/run and writes the saved output, and
+        adding this marker to the same session makes a crash unable to leave
+        durable output without its resume marker (which would repeat the
+        durable model work on resume). The caller owns the commit; this helper
+        only adds the bounded marker. Returns None (adding nothing) when no
+        run can be addressed.
+        """
+        if run is None or getattr(run, "id", None) is None:
+            return None
+        now = datetime.utcnow()
+        event = MeetingProcessingEvent(
+            run_id=run.id,
+            meeting_id=meeting_id,
+            dispatch_attempt_id=attempt_id,
+            stage=stage,
+            event_type="completed",
+            status="completed",
+            task_id=sanitize_message(task_id)[:255] if task_id else None,
+            message=sanitize_message(message) or f"{stage} completed",
+            metadata_=sanitize_metadata(metadata),
+            created_at=now,
+            completed_at=now,
+        )
+        session.add(event)
+        return event
 
     def complete_embedding_in_session(
         self,
