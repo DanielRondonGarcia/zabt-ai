@@ -11,6 +11,9 @@ export type UserStage =
   | "analyzing_video"
   | "building_context"
   | "summarizing"
+  | "inferring_title"
+  | "extracting_highlights"
+  | "extracting_structured"
   | "done"
   | "failed"
   | "cancelled";
@@ -32,6 +35,9 @@ export const STAGE_ORDER: UserStage[] = [
   "analyzing_video",
   "building_context",
   "summarizing",
+  "inferring_title",
+  "extracting_highlights",
+  "extracting_structured",
   "done",
 ];
 
@@ -44,6 +50,9 @@ export const STAGE_LABELS: Record<UserStage, string> = {
   analyzing_video: "Analyzing video…",
   building_context: "Building context…",
   summarizing: "Summarizing…",
+  inferring_title: "Inferring title…",
+  extracting_highlights: "Extracting highlights…",
+  extracting_structured: "Extracting structured output…",
   done: "Done",
   failed: "Failed",
   cancelled: "Cancelled",
@@ -108,6 +117,12 @@ export function getUserStage(meeting: Pick<Meeting, "status" | "sub_status">): U
       return "building_context";
     case "summarizing":
       return "summarizing";
+    case "inferring_title":
+      return "inferring_title";
+    case "extracting_highlights":
+      return "extracting_highlights";
+    case "extracting_structured":
+      return "extracting_structured";
     case "cleaning_up":
       return "done";
     default:

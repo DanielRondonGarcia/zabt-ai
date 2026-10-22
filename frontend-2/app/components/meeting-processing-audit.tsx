@@ -56,12 +56,19 @@ const stageLabels: Record<string, string> = {
   stage_transliterate: "Transliterate audio",
   stage_summarize: "Summarize",
   stage_extract_intelligence: "Extract intelligence",
+  stage_infer_title: "Infer title",
+  stage_extract_highlights: "Extract highlights",
+  stage_extract_structured_output: "Extract structured output",
   stage_embedding: "Generate embeddings",
   stage_visual_breakdown: "Visual breakdown",
   stage_optional_visual_breakdown: "Visual breakdown",
 };
 
 const stageDescriptions: Record<string, string> = {
+  stage_summarize: "Generates and saves the meeting summary.",
+  stage_infer_title: "Suggests a title from the saved summary, keeping custom titles.",
+  stage_extract_highlights: "Extracts chapters, action items, and key questions from the transcript.",
+  stage_extract_structured_output: "Extracts structured details for the meeting type.",
   stage_download:
     "Checks audio in storage and retrieves it for transcription when needed. Nothing is downloaded to your device.",
   stage_youtube_download:

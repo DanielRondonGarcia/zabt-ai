@@ -324,6 +324,22 @@ it never switches providers automatically.
 | `VISION_RUNPOD_API_KEY` / `VISION_RUNPOD_ENDPOINT_ID` / `VISION_POLL_INTERVAL` / `VISION_TIMEOUT` | — | RunPod vision path. |
 | `SUMMARY_CHUNK_SECONDS` / `SUMMARY_MAX_INPUT_TOKENS` | `600` / `6000` | Ten-minute temporal windows and the per-request summary evidence budget. |
 
+### Summary processing stages
+
+The processing audit separates **Summarize → Infer title → Extract highlights →
+Extract structured output → Generate embeddings**. Each model operation has its
+own start, duration, and terminal result. Title inference keeps custom titles.
+
+If a later stage fails, a usable saved summary is preserved. **Resume processing**
+keeps completed title/highlight work when the immediately preceding eligible run's
+completion markers match the saved transcript and dispatch attempt. Missing or
+legacy markers are treated conservatively: unproven extraction may run again.
+**Start over instead** and an explicit summary regeneration start fresh work.
+
+Output-producing model stages commit their completion marker with the output,
+including successful empty highlight lists. Reused markers identify their source
+run in the audit. No historical meeting records are repaired automatically.
+
 ### Use OpenAI for visual analysis
 
 The summary service and visual worker use separate credentials. `OPENAI_API_KEY` may remain an
