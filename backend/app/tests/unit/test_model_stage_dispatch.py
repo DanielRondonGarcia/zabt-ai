@@ -3,9 +3,6 @@
 
 import sys
 from types import ModuleType, SimpleNamespace
-from unittest.mock import patch
-
-import pytest
 
 MEETING_ID = 15
 RUN_ID = 101

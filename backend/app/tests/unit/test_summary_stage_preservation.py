@@ -249,8 +249,6 @@ def _meeting_service():
 
 
 def test_mark_failed_preserves_usable_summary_when_requested(monkeypatch):
-    from app.db.engine import engine
-
     service = _meeting_service()
     meeting = _mark_failed_meeting("Executive summary of the weekly review.")
     monkeypatch.setattr(
