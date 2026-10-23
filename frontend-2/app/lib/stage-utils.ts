@@ -131,6 +131,41 @@ export function getUserStage(meeting: Pick<Meeting, "status" | "sub_status">): U
 }
 
 /**
+ * Format safe audit metadata for one summary provider call.
+ */
+export function formatSummaryProgress(
+  metadata: Record<string, unknown> | null | undefined
+): string | null {
+  if (!metadata) return null;
+
+  const phase = metadata.phase;
+  const blockIndex = metadata.block_index;
+  const blockTotal = metadata.block_total;
+  if (
+    typeof blockIndex !== "number"
+    || !Number.isSafeInteger(blockIndex)
+    || typeof blockTotal !== "number"
+    || !Number.isSafeInteger(blockTotal)
+    || blockIndex < 1
+    || blockTotal < 1
+    || blockIndex > blockTotal
+  ) {
+    return null;
+  }
+
+  if (phase === "partial_chunk_summary" || phase === "single_chunk_summary") {
+    return `Summary block ${blockIndex} of ${blockTotal}`;
+  }
+  if (phase === "summary_synthesis") {
+    return `Final synthesis (${blockIndex} of ${blockTotal})`;
+  }
+  if (phase === "transcript_summary") {
+    return `Transcript summary (${blockIndex} of ${blockTotal})`;
+  }
+  return null;
+}
+
+/**
  * Get the index of a stage in the pipeline order (0-based).
  * Returns -1 for terminal stages that are not in the linear pipeline.
  */

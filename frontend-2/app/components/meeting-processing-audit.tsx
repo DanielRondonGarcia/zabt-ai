@@ -5,6 +5,7 @@
 import { useState } from "react";
 import type { MeetingProcessingAudit, MeetingProcessingEvent, MeetingProcessingRun } from "@/app/lib/api";
 import { CheckCircle2, Circle, Clock3, XCircle } from "lucide-react";
+import { formatSummaryProgress } from "@/app/lib/stage-utils";
 
 interface MeetingProcessingAuditProps {
   audit: MeetingProcessingAudit | null;
@@ -55,6 +56,7 @@ const stageLabels: Record<string, string> = {
   stage_transcribe: "Transcribe audio",
   stage_transliterate: "Transliterate audio",
   stage_summarize: "Summarize",
+  stage_summarize_progress: "Summary progress",
   stage_extract_intelligence: "Extract intelligence",
   stage_infer_title: "Infer title",
   stage_extract_highlights: "Extract highlights",
@@ -66,6 +68,7 @@ const stageLabels: Record<string, string> = {
 
 const stageDescriptions: Record<string, string> = {
   stage_summarize: "Generates and saves the meeting summary.",
+  stage_summarize_progress: "Per-window and final-synthesis audit; summary content is not stored.",
   stage_infer_title: "Suggests a title from the saved summary, keeping custom titles.",
   stage_extract_highlights: "Extracts chapters, action items, and key questions from the transcript.",
   stage_extract_structured_output: "Extracts structured details for the meeting type.",
@@ -158,6 +161,9 @@ function StageRow({ group }: { group: StageGroup }) {
   const outcome = groupOutcome(group);
   const stage = group.start?.stage ?? group.terminal?.stage ?? "";
   const description = stageDescriptions[stage];
+  const progress = stage === "stage_summarize_progress"
+    ? formatSummaryProgress(group.terminal?.metadata ?? group.start?.metadata)
+    : null;
   const startTime = group.start?.started_at ?? group.start?.created_at ?? null;
   const endTime = group.terminal?.completed_at ?? group.terminal?.created_at ?? null;
 
@@ -194,6 +200,7 @@ function StageRow({ group }: { group: StageGroup }) {
           </span>
         </div>
         {description && <p className="text-xs text-muted-foreground">{description}</p>}
+        {progress && <p className="text-xs font-medium text-muted-foreground">{progress}</p>}
         <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
           <span>started {formatDate(startTime)}</span>
           {group.terminal ? (

@@ -502,6 +502,96 @@ def _update_sub_status_for_attempt(
     return True
 
 
+SUMMARY_PROGRESS_STAGE = "stage_summarize_progress"
+
+
+def _summarize_progress_auditor(task, meeting_id: int, run_id: int, attempt_id: str):
+    """Build a bounded per-call progress auditor for the summarize stage.
+
+    Each provider call (temporal partial block, single-block path, or final
+    synthesis) produces one ``started`` plus one terminal ``completed``/
+    ``failed`` audit event on ``SUMMARY_PROGRESS_STAGE``. Events are fenced to
+    the exact processing run and dispatch attempt; the audit service silently
+    drops rows for a cancelled run or a rotated attempt, and write failures
+    never affect provider work. Only fixed messages, 1-based block index/
+    total, phase, duration, and the sanitized error class are stored — never
+    prompt, transcript, partial or final summary content, URLs, or credentials.
+    """
+    base_task_id = _task_request_id(task)
+
+    def audit_progress(
+        *,
+        phase: str,
+        block_index: int,
+        block_total: int,
+        outcome: str,
+        duration_ms: int | None = None,
+        error_class: str | None = None,
+    ) -> None:
+        try:
+            discriminator = (
+                f"{base_task_id}:{block_index}"
+                if base_task_id
+                else f"summarize:{block_index}"
+            )
+            metadata = {
+                "phase": phase,
+                "block_index": block_index,
+                "block_total": block_total,
+            }
+            if outcome == "started":
+                meeting_processing_audit.stage_started(
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    meeting_id=meeting_id,
+                    stage=SUMMARY_PROGRESS_STAGE,
+                    task_id=discriminator,
+                    message=f"summary progress {phase} block "
+                    f"{block_index}/{block_total} started",
+                    metadata=metadata,
+                )
+            elif outcome == "failed":
+                if duration_ms is not None:
+                    metadata["duration_ms"] = duration_ms
+                meeting_processing_audit.stage_failed(
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    meeting_id=meeting_id,
+                    stage=SUMMARY_PROGRESS_STAGE,
+                    task_id=discriminator,
+                    error=error_class or "UnknownError",
+                    metadata=metadata,
+                )
+            else:
+                if duration_ms is not None:
+                    metadata["duration_ms"] = duration_ms
+                meeting_processing_audit.stage_completed(
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    meeting_id=meeting_id,
+                    stage=SUMMARY_PROGRESS_STAGE,
+                    task_id=discriminator,
+                    message=f"summary progress {phase} block "
+                    f"{block_index}/{block_total} completed",
+                    metadata=metadata,
+                )
+        except Exception:
+            # Progress telemetry is best-effort; it must never fail or extend
+            # the provider work it observes, and audit rows never carry the
+            # exception content.
+            logger.warning(
+                "summary progress audit write failed meeting_id=%s run_id=%s "
+                "block_index=%s outcome=%s",
+                meeting_id,
+                run_id,
+                block_index,
+                outcome,
+                exc_info=True,
+            )
+
+    return audit_progress
+
+
 def _meeting_id_from_task_args(args) -> int | None:
     if not args:
         return None
@@ -1269,6 +1359,9 @@ def stage_summarize(meeting_id: int, template_id: int | None = None) -> int:
             context=context_result,
             output_language=meeting.requested_language,
             completion_client=completion_client,
+            progress_callback=_summarize_progress_auditor(
+                stage_summarize, meeting_id, run_id, attempt_id
+            ),
         )
 
     saved_meeting = meeting_service.save_summary_for_attempt(

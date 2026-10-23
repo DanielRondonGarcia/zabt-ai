@@ -38,3 +38,34 @@ for (const file of ["../app/lib/stage-utils.ts", "../../zabt-mobile/lib/stage-ut
     }
   });
 }
+
+const auditStages = loadStages("../app/lib/stage-utils.ts");
+test("summary audit progress labels show bounded block and synthesis positions", () => {
+  assert.equal(
+    auditStages.formatSummaryProgress({
+      phase: "partial_chunk_summary",
+      block_index: 3,
+      block_total: 13,
+    }),
+    "Summary block 3 of 13",
+  );
+  assert.equal(
+    auditStages.formatSummaryProgress({
+      phase: "summary_synthesis",
+      block_index: 14,
+      block_total: 14,
+    }),
+    "Final synthesis (14 of 14)",
+  );
+  assert.equal(
+    auditStages.formatSummaryProgress({
+      phase: "single_chunk_summary",
+      block_index: 1,
+      block_total: 1,
+    }),
+    "Summary block 1 of 1",
+  );
+  assert.equal(auditStages.formatSummaryProgress({ phase: "secret-prompt", block_index: 1, block_total: 1 }), null);
+  assert.equal(auditStages.formatSummaryProgress({ phase: "partial_chunk_summary", block_index: "1", block_total: 4 }), null);
+  assert.equal(auditStages.formatSummaryProgress(null), null);
+});

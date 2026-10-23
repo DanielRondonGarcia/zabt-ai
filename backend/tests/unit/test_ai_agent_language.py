@@ -58,6 +58,49 @@ def _system_prompts(client: MagicMock) -> list[str]:
     ]
 
 
+_ALLOWED_PROGRESS_PHASES = {
+    "single_chunk_summary",
+    "partial_chunk_summary",
+    "summary_synthesis",
+    "transcript_summary",
+}
+_ALLOWED_PROGRESS_OUTCOMES = {"started", "completed", "failed"}
+_ALLOWED_PROGRESS_KEYS = {
+    "phase",
+    "block_index",
+    "block_total",
+    "outcome",
+    "duration_ms",
+    "error_class",
+}
+
+
+def _progress_recorder() -> tuple[object, list[dict]]:
+    events: list[dict] = []
+
+    def record(**kwargs) -> None:
+        events.append(kwargs)
+
+    return record, events
+
+
+def _client_with_failing_call(index: int, error_message: str = "boom"):
+    """Build a mock client whose *index*-th completion call raises AIProviderError."""
+    client = MagicMock()
+    call_count = [0]
+
+    def _side_effect(*args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == index:
+            raise ai_agent.AIProviderError(error_message)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
+        )
+
+    client.chat.completions.create.side_effect = _side_effect
+    return client
+
+
 def test_spanish_instruction_is_added_to_context_and_transcript_prompts(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -137,3 +180,154 @@ def test_no_language_keeps_prompts_free_of_a_language_directive(
 )
 def test_language_label_supports_catalog_and_regional_codes(code: str, expected: str):
     assert ai_agent._language_label(code) == expected
+
+
+def _phase_index_total(event: dict) -> tuple[str, int, int]:
+    return (event["phase"], event["block_index"], event["block_total"])
+
+
+def _sequence(events: list[dict]) -> list[tuple[str, int, int, str]]:
+    return [(*_phase_index_total(event), event["outcome"]) for event in events]
+
+
+def test_single_block_context_reports_started_then_completed(monkeypatch):
+    _mock_client(monkeypatch)
+    record, events = _progress_recorder()
+
+    ai_agent.summarize_context(_context(), progress_callback=record)
+
+    assert _sequence(events) == [
+        ("single_chunk_summary", 1, 1, "started"),
+        ("single_chunk_summary", 1, 1, "completed"),
+    ]
+    assert events[0]["duration_ms"] is None
+    assert events[1]["duration_ms"] >= 0
+
+
+def test_each_window_and_synthesis_report_started_then_terminal(monkeypatch):
+    # Two successes, then window 2 fails, then the synthesis succeeds:
+    # exactly the omit-one-window flow.
+    client = _client_with_failing_call(2)
+    monkeypatch.setattr(ai_agent, "_client", client)
+    record, events = _progress_recorder()
+
+    summary = ai_agent.summarize_context(_context(chunk_count=3), progress_callback=record)
+
+    assert summary
+    assert _sequence(events) == [
+        ("partial_chunk_summary", 1, 3, "started"),
+        ("partial_chunk_summary", 1, 3, "completed"),
+        ("partial_chunk_summary", 2, 3, "started"),
+        ("partial_chunk_summary", 2, 3, "failed"),
+        ("partial_chunk_summary", 3, 3, "started"),
+        ("partial_chunk_summary", 3, 3, "completed"),
+        ("summary_synthesis", 4, 4, "started"),
+        ("summary_synthesis", 4, 4, "completed"),
+    ]
+    failed = events[3]
+    assert failed["error_class"] == "AIProviderError"
+    assert failed["duration_ms"] >= 0
+    # No synthesis completed duration without synthesis completing.
+    assert events[6]["duration_ms"] is None
+
+
+def test_failed_partial_window_keeps_later_windows_and_synthesis_running(monkeypatch):
+    # Window 2 fails but the summary still completes: exactly one failed window.
+    client = _client_with_failing_call(2)
+    monkeypatch.setattr(ai_agent, "_client", client)
+    record, events = _progress_recorder()
+
+    ai_agent.summarize_context(_context(chunk_count=3), progress_callback=record)
+
+    failed_outcomes = [event["outcome"] for event in events if event["outcome"] == "failed"]
+    assert len(failed_outcomes) == 1
+    assert events[-1]["outcome"] == "completed"
+
+
+def test_all_windows_failing_raises_without_synthesis_progress(monkeypatch):
+    # Every window fails: the summary fails and no synthesis event is reported.
+    client = MagicMock()
+
+    def _always_fail(*args, **kwargs):
+        raise ai_agent.AIProviderError("boom")
+
+    client.chat.completions.create.side_effect = _always_fail
+    monkeypatch.setattr(ai_agent, "_client", client)
+    record, events = _progress_recorder()
+
+    with pytest.raises(ai_agent.AIProviderError):
+        ai_agent.summarize_context(_context(chunk_count=2), progress_callback=record)
+
+    assert _sequence(events) == [
+        ("partial_chunk_summary", 1, 2, "started"),
+        ("partial_chunk_summary", 1, 2, "failed"),
+        ("partial_chunk_summary", 2, 2, "started"),
+        ("partial_chunk_summary", 2, 2, "failed"),
+    ]
+
+
+def test_failed_synthesis_propagates_and_reports_the_failure(monkeypatch):
+    # Both windows succeed, the synthesis call fails: the failure must surface.
+    client = _client_with_failing_call(3)
+    monkeypatch.setattr(ai_agent, "_client", client)
+    record, events = _progress_recorder()
+
+    with pytest.raises(ai_agent.AIProviderError):
+        ai_agent.summarize_context(_context(chunk_count=2), progress_callback=record)
+
+    assert events[-1]["phase"] == "summary_synthesis"
+    assert events[-1]["outcome"] == "failed"
+    assert events[-1]["error_class"] == "AIProviderError"
+    synthesis_events = [event for event in events if event["phase"] == "summary_synthesis"]
+    assert [event["outcome"] for event in synthesis_events] == ["started", "failed"]
+
+
+def test_transcript_only_path_reports_a_single_block(monkeypatch):
+    _mock_client(monkeypatch)
+    record, events = _progress_recorder()
+
+    ai_agent.summarize_transcript("Transcript", progress_callback=record)
+
+    assert _sequence(events) == [
+        ("transcript_summary", 1, 1, "started"),
+        ("transcript_summary", 1, 1, "completed"),
+    ]
+
+
+def test_context_path_forwards_the_progress_callback(monkeypatch):
+    _mock_client(monkeypatch)
+    record, events = _progress_recorder()
+
+    ai_agent.summarize_transcript("Transcript", context=_context(), progress_callback=record)
+
+    assert [event["phase"] for event in events] == ["single_chunk_summary", "single_chunk_summary"]
+
+
+def test_progress_payload_never_carries_content_urls_or_messages(monkeypatch):
+    transcript_content = "The team agreed to review the proposal."
+    client = _client_with_failing_call(2)
+    monkeypatch.setattr(ai_agent, "_client", client)
+    record, events = _progress_recorder()
+
+    ai_agent.summarize_context(_context(chunk_count=3), progress_callback=record)
+
+    assert events
+    for event in events:
+        assert set(event.keys()) == _ALLOWED_PROGRESS_KEYS
+        assert event["phase"] in _ALLOWED_PROGRESS_PHASES
+        assert event["outcome"] in _ALLOWED_PROGRESS_OUTCOMES
+        assert isinstance(event["block_index"], int) and event["block_index"] >= 1
+        assert isinstance(event["block_total"], int) and event["block_total"] >= 1
+        assert event["duration_ms"] is None or isinstance(event["duration_ms"], int)
+        error_class = event["error_class"]
+        if error_class is not None:
+            assert isinstance(error_class, str)
+            # A sanitized error class is a bare identifier, never a message.
+            assert error_class.strip() == error_class
+            assert not any(ch.isspace() for ch in error_class)
+            assert len(error_class) <= 64
+        for key, value in event.items():
+            if isinstance(value, str):
+                assert transcript_content not in value
+                assert "http" not in value
+                assert "sk-" not in value

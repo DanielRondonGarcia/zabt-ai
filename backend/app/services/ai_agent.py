@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from time import perf_counter
 from typing import List, Optional
 from pydantic import BaseModel, Field
@@ -342,6 +342,38 @@ def _summary_completion(
     return result
 
 
+def _elapsed_ms(started_at: float) -> int:
+    return max(0, round((perf_counter() - started_at) * 1000))
+
+
+def _emit_progress(
+    callback: Callable[..., None] | None,
+    *,
+    phase: str,
+    block_index: int,
+    block_total: int,
+    outcome: str,
+    duration_ms: int | None = None,
+    error_class: str | None = None,
+) -> None:
+    """Report bounded summary progress metadata; never summary content.
+
+    The payload stays fixed (phase/index/total/outcome/duration/error class) so
+    an audit layer can persist it without storing prompt, transcript, or
+    summary text, URLs, or credentials.
+    """
+    if callback is None:
+        return
+    callback(
+        phase=phase,
+        block_index=block_index,
+        block_total=block_total,
+        outcome=outcome,
+        duration_ms=duration_ms,
+        error_class=error_class,
+    )
+
+
 def summarize_context(
     context: ContextBuildResult,
     *,
@@ -350,6 +382,7 @@ def summarize_context(
     upload_date: str | None = None,
     output_language: str | None = None,
     completion_client: CompletionClient | None = None,
+    progress_callback: Callable[..., None] | None = None,
 ) -> str:
     """Generate a hierarchical summary from complete, ephemeral context chunks."""
     system_prompt = _build_system_prompt(style_examples)
@@ -380,35 +413,81 @@ def summarize_context(
         raise AIProviderError("no summary evidence chunks")
 
     if len(context.chunks) == 1:
-        return _completion_text(
-            system_prompt,
-            "Generate the final meeting notes from this bounded evidence chunk.\n"
-            + format_context_chunk(context.chunks[0])
-            + warning_text,
-            temperature=0.3,
-            completion_client=completion_client,
+        started_at = perf_counter()
+        _emit_progress(
+            progress_callback,
             phase="single_chunk_summary",
+            block_index=1,
+            block_total=1,
+            outcome="started",
         )
+        try:
+            result = _completion_text(
+                system_prompt,
+                "Generate the final meeting notes from this bounded evidence chunk.\n"
+                + format_context_chunk(context.chunks[0])
+                + warning_text,
+                temperature=0.3,
+                completion_client=completion_client,
+                phase="single_chunk_summary",
+            )
+        except Exception as exc:
+            _emit_progress(
+                progress_callback,
+                phase="single_chunk_summary",
+                block_index=1,
+                block_total=1,
+                outcome="failed",
+                duration_ms=_elapsed_ms(started_at),
+                error_class=type(exc).__name__,
+            )
+            raise
+        _emit_progress(
+            progress_callback,
+            phase="single_chunk_summary",
+            block_index=1,
+            block_total=1,
+            outcome="completed",
+            duration_ms=_elapsed_ms(started_at),
+        )
+        return result
 
     partials: list[str] = []
     omitted_windows: list[int] = []
+    block_total = len(context.chunks)
     for index, chunk in enumerate(context.chunks):
+        started_at = perf_counter()
+        _emit_progress(
+            progress_callback,
+            phase="partial_chunk_summary",
+            block_index=index + 1,
+            block_total=block_total,
+            outcome="started",
+        )
         try:
-            partials.append(
-                f"PARTIAL WINDOW {index + 1}\n"
-                + _completion_text(
-                    system_prompt
-                    + "\n\nYou are preparing a bounded partial evidence summary. "
-                    "Do not invent missing context or expose hidden reasoning.",
-                    "Create a concise, factual partial summary for this time window. "
-                    "Keep every source reference needed for later synthesis.\n"
-                    + format_context_chunk(chunk),
-                    temperature=0.2,
-                    completion_client=completion_client,
-                    phase="partial_chunk_summary",
-                )
+            partial = _completion_text(
+                system_prompt
+                + "\n\nYou are preparing a bounded partial evidence summary. "
+                "Do not invent missing context or expose hidden reasoning.",
+                "Create a concise, factual partial summary for this time window. "
+                "Keep every source reference needed for later synthesis.\n"
+                + format_context_chunk(chunk),
+                temperature=0.2,
+                completion_client=completion_client,
+                phase="partial_chunk_summary",
             )
-        except AIProviderError as exc:
+        except Exception as exc:
+            _emit_progress(
+                progress_callback,
+                phase="partial_chunk_summary",
+                block_index=index + 1,
+                block_total=block_total,
+                outcome="failed",
+                duration_ms=_elapsed_ms(started_at),
+                error_class=type(exc).__name__,
+            )
+            if not isinstance(exc, AIProviderError):
+                raise
             # One stubborn window must not cost the whole meeting its summary.
             # Keep the remaining windows and disclose the omission downstream.
             logger.warning(
@@ -418,6 +497,16 @@ def summarize_context(
                 str(exc)[:120],
             )
             omitted_windows.append(index + 1)
+        else:
+            _emit_progress(
+                progress_callback,
+                phase="partial_chunk_summary",
+                block_index=index + 1,
+                block_total=block_total,
+                outcome="completed",
+                duration_ms=_elapsed_ms(started_at),
+            )
+            partials.append(f"PARTIAL WINDOW {index + 1}\n" + partial)
 
     if not partials:
         raise AIProviderError("empty summary response")
@@ -430,19 +519,50 @@ def summarize_context(
         )
 
     partial_context = "\n\n".join(partials)
-    return _completion_text(
-        system_prompt
-        + "\n\nYou are performing the final hierarchical synthesis. "
-        "Use only the partial evidence summaries and their source references.",
-        "Synthesize the complete meeting notes from every bounded partial window. "
-        "Do not omit a window, silently truncate it, or invent owners, decisions, "
-        "deadlines, or visual facts.\n"
-        + partial_context
-        + warning_text,
-        temperature=0.3,
-        completion_client=completion_client,
+    synthesis_index = block_total + 1
+    started_at = perf_counter()
+    _emit_progress(
+        progress_callback,
         phase="summary_synthesis",
+        block_index=synthesis_index,
+        block_total=synthesis_index,
+        outcome="started",
     )
+    try:
+        result = _completion_text(
+            system_prompt
+            + "\n\nYou are performing the final hierarchical synthesis. "
+            "Use only the partial evidence summaries and their source references.",
+            "Synthesize the complete meeting notes from every bounded partial window. "
+            "Do not omit a window, silently truncate it, or invent owners, decisions, "
+            "deadlines, or visual facts.\n"
+            + partial_context
+            + warning_text,
+            temperature=0.3,
+            completion_client=completion_client,
+            phase="summary_synthesis",
+        )
+    except Exception as exc:
+        # A failed synthesis propagates: there is nothing left to save.
+        _emit_progress(
+            progress_callback,
+            phase="summary_synthesis",
+            block_index=synthesis_index,
+            block_total=synthesis_index,
+            outcome="failed",
+            duration_ms=_elapsed_ms(started_at),
+            error_class=type(exc).__name__,
+        )
+        raise
+    _emit_progress(
+        progress_callback,
+        phase="summary_synthesis",
+        block_index=synthesis_index,
+        block_total=synthesis_index,
+        outcome="completed",
+        duration_ms=_elapsed_ms(started_at),
+    )
+    return result
 
 
 def infer_title(
@@ -497,6 +617,7 @@ def summarize_transcript(
     visual_segments: Iterable[object] | None = None,
     output_language: str | None = None,
     completion_client: CompletionClient | None = None,
+    progress_callback: Callable[..., None] | None = None,
 ) -> str:
     """Generate a markdown summary from transcript-only or ephemeral context."""
     if context is None and (spoken_segments is not None or visual_segments is not None):
@@ -514,6 +635,7 @@ def summarize_transcript(
             upload_date=upload_date,
             output_language=output_language,
             completion_client=completion_client,
+            progress_callback=progress_callback,
         )
 
     system_prompt = _build_system_prompt(style_examples)
@@ -525,10 +647,39 @@ def summarize_transcript(
         )
     system_prompt = _append_template_instruction(system_prompt, template_body)
     system_prompt = _append_output_language_instruction(system_prompt, output_language)
-    return _completion_text(
-        system_prompt,
-        transcript_text,
-        temperature=0.3,
-        completion_client=completion_client,
+    started_at = perf_counter()
+    _emit_progress(
+        progress_callback,
         phase="transcript_summary",
+        block_index=1,
+        block_total=1,
+        outcome="started",
     )
+    try:
+        result = _completion_text(
+            system_prompt,
+            transcript_text,
+            temperature=0.3,
+            completion_client=completion_client,
+            phase="transcript_summary",
+        )
+    except Exception as exc:
+        _emit_progress(
+            progress_callback,
+            phase="transcript_summary",
+            block_index=1,
+            block_total=1,
+            outcome="failed",
+            duration_ms=_elapsed_ms(started_at),
+            error_class=type(exc).__name__,
+        )
+        raise
+    _emit_progress(
+        progress_callback,
+        phase="transcript_summary",
+        block_index=1,
+        block_total=1,
+        outcome="completed",
+        duration_ms=_elapsed_ms(started_at),
+    )
+    return result
