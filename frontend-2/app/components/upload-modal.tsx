@@ -3,7 +3,7 @@
 import { useRef, useState, useEffect } from "react";
 import axios from "axios";
 import { usePostHog } from "posthog-js/react";
-import { Stethoscope, AudioLines } from "lucide-react";
+import { Stethoscope, AudioLines, AlertCircle, X } from "lucide-react";
 import { Button } from "@/app/components/ui/button";
 import {
   Dialog,
@@ -51,6 +51,7 @@ function formatBytes(bytes: number, decimals = 1) {
 export function UploadModal({ isOpen, onOpenChange }: UploadModalProps) {
     const fileInputRef = useRef<HTMLInputElement>(null);
     const [uploads, setUploads] = useState<UploadItem[]>([]);
+    const [rejectedFiles, setRejectedFiles] = useState<string[]>([]);
     const [transcriptionType, setTranscriptionType] = useState<"general" | "medical">("general");
     const [meetingType, setMeetingType] = useState<MeetingType>("generic");
     const [language, setLanguage] = useState<string | null>(null);
@@ -102,15 +103,17 @@ export function UploadModal({ isOpen, onOpenChange }: UploadModalProps) {
             }
             cancelAll();
         }
+        setRejectedFiles([]);
         onOpenChange(false);
     };
 
     const handleFileSelect = (files: File[]) => {
         const newUploads: UploadItem[] = [];
+        const oversizedFiles: string[] = [];
 
         files.forEach((file) => {
             if (file.size > 2147483648) {
-                alert(`File ${file.name} is larger than 2GB.`);
+                oversizedFiles.push(file.name);
                 return;
             }
 
@@ -126,6 +129,7 @@ export function UploadModal({ isOpen, onOpenChange }: UploadModalProps) {
             newUploads.push(item);
         });
 
+        setRejectedFiles(oversizedFiles);
         if (newUploads.length > 0) {
             setUploads((prev) => [...newUploads, ...prev]);
             newUploads.forEach(startUpload);
@@ -230,6 +234,28 @@ export function UploadModal({ isOpen, onOpenChange }: UploadModalProps) {
 
                 {/* Scrollable Body area */}
                 <div className="flex-1 overflow-y-auto p-6 flex flex-col items-center">
+
+                    {rejectedFiles.length > 0 && (
+                        <div role="alert" className="mb-5 flex w-full items-start gap-3 rounded-lg border border-primary/20 bg-primary/5 p-4 text-left">
+                            <AlertCircle aria-hidden="true" className="mt-0.5 size-5 shrink-0 text-primary" />
+                            <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium text-stone-900">
+                                    {rejectedFiles.length === 1 ? "File is too large" : "Some files are too large"}
+                                </p>
+                                <p className="mt-1 text-sm text-stone-600">
+                                    Files must be 2 GB or smaller. These files weren&apos;t added:
+                                </p>
+                                <ul className="mt-2 space-y-1 text-sm text-stone-700">
+                                    {rejectedFiles.map((name, index) => (
+                                        <li key={`${name}-${index}`} className="break-all">{name}</li>
+                                    ))}
+                                </ul>
+                            </div>
+                            <button type="button" onClick={() => setRejectedFiles([])} aria-label="Dismiss file size warning" className="rounded-lg p-1 text-stone-500 hover:bg-primary/10 hover:text-stone-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-primary">
+                                <X aria-hidden="true" className="size-4" />
+                            </button>
+                        </div>
+                    )}
 
                     {/* Zero State / Upload Trigger */}
                     <div className="flex flex-col items-center text-center w-full mb-6 py-4">
