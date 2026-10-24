@@ -13,7 +13,7 @@ Branch: `feat/summary-window-audit-progress`; delivery strategy: `ask-on-risk`; 
 - T11 [S1] Reproduce and inspect the latest reported run that appeared stuck after the first summary block; route: inline read-only diagnostic; done; audit confirms every block completed before synthesis failed; no meeting data mutation.
 - T12 [S1] Correct progress persistence/display only if T11 found a missed block or terminal event; route: inline; dropped because audit contained all 13 completed blocks and a failed final synthesis; no code change needed.
 - T13 [S5] Publish the audit-progress change and update ACT-TWC-11 after main CI/release gates; route: parent; done; tag `v1.8.0`, release run `39904225325`, deployment verified; Risk: item 5 (release and production environment).
-- T14 [S2] Generate a per-call LiteLLM trace ID, persist it with summary audit progress, and display it on the corresponding audit row; route: delegated writer after context backstop; done; commit `TBD`; Risk: item 3 (shared OpenAI-compatible client; sibling chat/title consumers remain unchanged without an ID).
+- T14 [S2] Generate a per-call LiteLLM trace ID, persist it with summary audit progress, and display it on the corresponding audit row; route: delegated writer after context backstop; done; commit `36daca3`; Risk: item 3 (shared OpenAI-compatible client; sibling chat/title consumers remain unchanged without an ID).
 
 ## Log
 - L1: mmm, necesito que dejes traza en logs de auditoria para saber hasta donde llega y si cada bloque de resumen lo está procesando y ver el avance en ese resumen
