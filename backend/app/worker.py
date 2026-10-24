@@ -504,6 +504,8 @@ def _update_sub_status_for_attempt(
 
 SUMMARY_PROGRESS_STAGE = "stage_summarize_progress"
 
+_SAFE_SUMMARY_CORRELATION_ID = re.compile(r"[0-9a-f]{32}\Z")
+
 
 def _summarize_progress_auditor(task, meeting_id: int, run_id: int, attempt_id: str):
     """Build a bounded per-call progress auditor for the summarize stage.
@@ -514,8 +516,10 @@ def _summarize_progress_auditor(task, meeting_id: int, run_id: int, attempt_id: 
     the exact processing run and dispatch attempt; the audit service silently
     drops rows for a cancelled run or a rotated attempt, and write failures
     never affect provider work. Only fixed messages, 1-based block index/
-    total, phase, duration, and the sanitized error class are stored — never
-    prompt, transcript, partial or final summary content, URLs, or credentials.
+    total, phase, duration, the sanitized error class, and the client-
+    generated opaque correlation ID shared with the provider request are
+    stored — never prompt, transcript, partial or final summary content, URLs,
+    or credentials.
     """
     base_task_id = _task_request_id(task)
 
@@ -527,6 +531,7 @@ def _summarize_progress_auditor(task, meeting_id: int, run_id: int, attempt_id: 
         outcome: str,
         duration_ms: int | None = None,
         error_class: str | None = None,
+        correlation_id: str | None = None,
     ) -> None:
         try:
             discriminator = (
@@ -539,6 +544,11 @@ def _summarize_progress_auditor(task, meeting_id: int, run_id: int, attempt_id: 
                 "block_index": block_index,
                 "block_total": block_total,
             }
+            if (
+                isinstance(correlation_id, str)
+                and _SAFE_SUMMARY_CORRELATION_ID.fullmatch(correlation_id)
+            ):
+                metadata["correlation_id"] = correlation_id
             if outcome == "started":
                 meeting_processing_audit.stage_started(
                     run_id=run_id,

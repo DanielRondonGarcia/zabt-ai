@@ -166,6 +166,19 @@ export function formatSummaryProgress(
 }
 
 /**
+ * Return the bounded LiteLLM correlation ID for one summary provider call.
+ * Only client-generated opaque 32-character lowercase hex tokens are exposed;
+ * anything else never reaches the audit UI.
+ */
+export function formatSummaryCorrelationId(
+  metadata: Record<string, unknown> | null | undefined
+): string | null {
+  const value = metadata?.correlation_id;
+  if (typeof value !== "string") return null;
+  return /^[0-9a-f]{32}$/.test(value) ? value : null;
+}
+
+/**
  * Get the index of a stage in the pipeline order (0-based).
  * Returns -1 for terminal stages that are not in the linear pipeline.
  */

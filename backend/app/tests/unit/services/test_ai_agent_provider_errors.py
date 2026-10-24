@@ -197,6 +197,53 @@ def test_summary_requests_the_dedicated_output_budget():
     assert completions.requests[0]["max_tokens"] == SUMMARY_OUTPUT_TOKENS
 
 
+def test_completion_client_sends_litellm_trace_id_only_when_requested():
+    client, completions = _sequenced_client(
+        [("Correlated summary", "stop"), ("Uncorrelated result", "stop")]
+    )
+    trace_id = "a" * 32
+
+    client.complete(
+        [{"role": "user", "content": "PROMPT_SECRET"}],
+        temperature=0.2,
+        correlation_id=trace_id,
+    )
+    client.complete(
+        [{"role": "user", "content": "SIBLING_PROMPT_SECRET"}],
+        temperature=0.2,
+    )
+
+    assert completions.requests[0]["extra_headers"] == {
+        "x-litellm-trace-id": trace_id,
+    }
+    assert "extra_headers" not in completions.requests[1]
+
+
+def test_summary_progress_correlation_ids_match_each_provider_call():
+    client, completions = _sequenced_client(
+        [("Window one", "stop"), ("Window two", "stop"), ("Final notes", "stop")]
+    )
+    progress = []
+
+    summarize_transcript(
+        "PROMPT_SECRET",
+        context=_context(chunk_count=2),
+        completion_client=client,
+        progress_callback=lambda **event: progress.append(event),
+    )
+
+    starts = [event for event in progress if event["outcome"] == "started"]
+    terminals = [event for event in progress if event["outcome"] != "started"]
+    trace_ids = [event["correlation_id"] for event in starts]
+    assert len(trace_ids) == 3
+    assert len(set(trace_ids)) == 3
+    assert all(len(value) == 32 and all(char in "0123456789abcdef" for char in value) for value in trace_ids)
+    for start, terminal, request, trace_id in zip(starts, terminals, completions.requests, trace_ids, strict=True):
+        assert terminal["correlation_id"] == trace_id
+        assert request["extra_headers"]["x-litellm-trace-id"] == trace_id
+    assert all("PROMPT_SECRET" not in repr(event) for event in progress)
+
+
 def test_network_failure_logs_safe_summary_diagnostics(caplog):
     request = httpx.Request(
         "POST", "https://provider.invalid/chat?api_key=URL_SECRET"

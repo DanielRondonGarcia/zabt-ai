@@ -48,6 +48,9 @@ _SAFE_REQUEST_ID = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z",
     re.IGNORECASE,
 )
+# Client-generated LiteLLM trace IDs are opaque lowercase 32-character hex
+# tokens (uuid4().hex). Anything else is never sent as trace metadata.
+_SAFE_CORRELATION_ID = re.compile(r"[0-9a-f]{32}\Z")
 _REQUEST_ID_SECRET_MARKER = re.compile(
     r"(?:sk|rk|pk|api[_-]?key|token|secret|bearer)[_-]", re.IGNORECASE
 )
@@ -352,6 +355,7 @@ class CompletionClient(Protocol):
         *,
         temperature: float,
         max_tokens: int | None = None,
+        correlation_id: str | None = None,
     ) -> str: ...
 
 
@@ -379,6 +383,7 @@ class OpenAICompatibleCompletionClient:
         *,
         temperature: float,
         max_tokens: int | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         request: dict[str, Any] = {
             "model": self.model,
@@ -390,6 +395,11 @@ class OpenAICompatibleCompletionClient:
                 max_tokens, ceiling=MAX_OUTPUT_TOKENS_CEILING
             ),
         }
+        if correlation_id is not None and _SAFE_CORRELATION_ID.fullmatch(correlation_id):
+            # LiteLLM stores `x-litellm-trace-id` in its request metadata, so an
+            # operator can match this exact call in the gateway logs. The ID is
+            # opaque and client-generated; request content never travels with it.
+            request["extra_headers"] = {"x-litellm-trace-id": correlation_id}
         if self._endpoint_url:
             try:
                 validate_runtime_provider_endpoint(
@@ -460,6 +470,7 @@ class AnthropicCompletionClient:
         *,
         temperature: float,
         max_tokens: int | None = None,
+        correlation_id: str | None = None,
     ) -> str:
         system_parts: list[str] = []
         mapped_messages: list[dict[str, str]] = []

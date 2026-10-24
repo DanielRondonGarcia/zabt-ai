@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 import re
+import uuid
 from collections.abc import Callable, Iterable
 from time import perf_counter
 from typing import List, Optional
@@ -253,6 +254,11 @@ def _append_template_instruction(system_prompt: str, template_body: str | None) 
     )
 
 
+def _new_correlation_id() -> str:
+    """Return one opaque client-generated LiteLLM trace ID (32 lowercase hex)."""
+    return uuid.uuid4().hex
+
+
 def _completion_text(
     system_prompt: str,
     user_content: str,
@@ -260,6 +266,7 @@ def _completion_text(
     temperature: float,
     completion_client: CompletionClient | None = None,
     phase: str = "context_summary",
+    correlation_id: str | None = None,
 ) -> str:
     client = completion_client or OpenAICompatibleCompletionClient(
         _client,
@@ -273,6 +280,7 @@ def _completion_text(
         ],
         temperature=temperature,
         phase=phase,
+        correlation_id=correlation_id,
     )
 
 
@@ -299,6 +307,7 @@ def _summary_completion(
     *,
     temperature: float,
     phase: str,
+    correlation_id: str | None = None,
 ) -> str:
     started_at = perf_counter()
     try:
@@ -306,6 +315,7 @@ def _summary_completion(
             messages,
             temperature=temperature,
             max_tokens=SUMMARY_OUTPUT_TOKENS,
+            correlation_id=correlation_id,
         )
     except AIProviderError as exc:
         details = exc.diagnostics
@@ -355,12 +365,14 @@ def _emit_progress(
     outcome: str,
     duration_ms: int | None = None,
     error_class: str | None = None,
+    correlation_id: str | None = None,
 ) -> None:
     """Report bounded summary progress metadata; never summary content.
 
-    The payload stays fixed (phase/index/total/outcome/duration/error class) so
-    an audit layer can persist it without storing prompt, transcript, or
-    summary text, URLs, or credentials.
+    The payload stays fixed (phase/index/total/outcome/duration/error class)
+    plus the client-generated opaque `correlation_id` that also rides with the
+    provider request, so an audit layer can persist it without storing prompt,
+    transcript, or summary text, URLs, or credentials.
     """
     if callback is None:
         return
@@ -371,6 +383,7 @@ def _emit_progress(
         outcome=outcome,
         duration_ms=duration_ms,
         error_class=error_class,
+        correlation_id=correlation_id,
     )
 
 
@@ -414,12 +427,14 @@ def summarize_context(
 
     if len(context.chunks) == 1:
         started_at = perf_counter()
+        correlation_id = _new_correlation_id()
         _emit_progress(
             progress_callback,
             phase="single_chunk_summary",
             block_index=1,
             block_total=1,
             outcome="started",
+            correlation_id=correlation_id,
         )
         try:
             result = _completion_text(
@@ -430,6 +445,7 @@ def summarize_context(
                 temperature=0.3,
                 completion_client=completion_client,
                 phase="single_chunk_summary",
+                correlation_id=correlation_id,
             )
         except Exception as exc:
             _emit_progress(
@@ -440,6 +456,7 @@ def summarize_context(
                 outcome="failed",
                 duration_ms=_elapsed_ms(started_at),
                 error_class=type(exc).__name__,
+                correlation_id=correlation_id,
             )
             raise
         _emit_progress(
@@ -449,6 +466,7 @@ def summarize_context(
             block_total=1,
             outcome="completed",
             duration_ms=_elapsed_ms(started_at),
+            correlation_id=correlation_id,
         )
         return result
 
@@ -457,12 +475,14 @@ def summarize_context(
     block_total = len(context.chunks)
     for index, chunk in enumerate(context.chunks):
         started_at = perf_counter()
+        correlation_id = _new_correlation_id()
         _emit_progress(
             progress_callback,
             phase="partial_chunk_summary",
             block_index=index + 1,
             block_total=block_total,
             outcome="started",
+            correlation_id=correlation_id,
         )
         try:
             partial = _completion_text(
@@ -475,6 +495,7 @@ def summarize_context(
                 temperature=0.2,
                 completion_client=completion_client,
                 phase="partial_chunk_summary",
+                correlation_id=correlation_id,
             )
         except Exception as exc:
             _emit_progress(
@@ -485,6 +506,7 @@ def summarize_context(
                 outcome="failed",
                 duration_ms=_elapsed_ms(started_at),
                 error_class=type(exc).__name__,
+                correlation_id=correlation_id,
             )
             if not isinstance(exc, AIProviderError):
                 raise
@@ -505,6 +527,7 @@ def summarize_context(
                 block_total=block_total,
                 outcome="completed",
                 duration_ms=_elapsed_ms(started_at),
+                correlation_id=correlation_id,
             )
             partials.append(f"PARTIAL WINDOW {index + 1}\n" + partial)
 
@@ -521,12 +544,14 @@ def summarize_context(
     partial_context = "\n\n".join(partials)
     synthesis_index = block_total + 1
     started_at = perf_counter()
+    synthesis_correlation_id = _new_correlation_id()
     _emit_progress(
         progress_callback,
         phase="summary_synthesis",
         block_index=synthesis_index,
         block_total=synthesis_index,
         outcome="started",
+        correlation_id=synthesis_correlation_id,
     )
     try:
         result = _completion_text(
@@ -541,6 +566,7 @@ def summarize_context(
             temperature=0.3,
             completion_client=completion_client,
             phase="summary_synthesis",
+            correlation_id=synthesis_correlation_id,
         )
     except Exception as exc:
         # A failed synthesis propagates: there is nothing left to save.
@@ -552,6 +578,7 @@ def summarize_context(
             outcome="failed",
             duration_ms=_elapsed_ms(started_at),
             error_class=type(exc).__name__,
+            correlation_id=synthesis_correlation_id,
         )
         raise
     _emit_progress(
@@ -561,6 +588,7 @@ def summarize_context(
         block_total=synthesis_index,
         outcome="completed",
         duration_ms=_elapsed_ms(started_at),
+        correlation_id=synthesis_correlation_id,
     )
     return result
 
@@ -648,12 +676,14 @@ def summarize_transcript(
     system_prompt = _append_template_instruction(system_prompt, template_body)
     system_prompt = _append_output_language_instruction(system_prompt, output_language)
     started_at = perf_counter()
+    correlation_id = _new_correlation_id()
     _emit_progress(
         progress_callback,
         phase="transcript_summary",
         block_index=1,
         block_total=1,
         outcome="started",
+        correlation_id=correlation_id,
     )
     try:
         result = _completion_text(
@@ -662,6 +692,7 @@ def summarize_transcript(
             temperature=0.3,
             completion_client=completion_client,
             phase="transcript_summary",
+            correlation_id=correlation_id,
         )
     except Exception as exc:
         _emit_progress(
@@ -672,6 +703,7 @@ def summarize_transcript(
             outcome="failed",
             duration_ms=_elapsed_ms(started_at),
             error_class=type(exc).__name__,
+            correlation_id=correlation_id,
         )
         raise
     _emit_progress(
@@ -681,5 +713,6 @@ def summarize_transcript(
         block_total=1,
         outcome="completed",
         duration_ms=_elapsed_ms(started_at),
+        correlation_id=correlation_id,
     )
     return result

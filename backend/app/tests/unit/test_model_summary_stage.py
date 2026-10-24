@@ -189,6 +189,7 @@ def _fake_summarize_with_progress(events: list[dict]):
             block_index=1,
             block_total=2,
             outcome="started",
+            correlation_id="a" * 32,
         )
         progress(
             phase="partial_chunk_summary",
@@ -196,12 +197,14 @@ def _fake_summarize_with_progress(events: list[dict]):
             block_total=2,
             outcome="completed",
             duration_ms=5,
+            correlation_id="a" * 32,
         )
         progress(
             phase="partial_chunk_summary",
             block_index=2,
             block_total=2,
             outcome="started",
+            correlation_id="b" * 32,
         )
         # Window 2 fails visibly while the pipeline keeps going.
         progress(
@@ -211,12 +214,14 @@ def _fake_summarize_with_progress(events: list[dict]):
             outcome="failed",
             duration_ms=7,
             error_class="AIProviderError",
+            correlation_id="b" * 32,
         )
         progress(
             phase="summary_synthesis",
             block_index=3,
             block_total=3,
             outcome="started",
+            correlation_id="c" * 32,
         )
         progress(
             phase="summary_synthesis",
@@ -224,6 +229,7 @@ def _fake_summarize_with_progress(events: list[dict]):
             block_total=3,
             outcome="completed",
             duration_ms=20,
+            correlation_id="c" * 32,
         )
         events.append(kwargs["progress_callback"])
         return "New summary text"
@@ -335,10 +341,19 @@ def test_summarize_stage_records_window_and_synthesis_progress_on_the_current_at
         "summary_synthesis",
     ]
     assert [event["metadata"]["block_total"] for event in started] == [2, 2, 3]
+    assert [event["metadata"]["correlation_id"] for event in started] == [
+        "a" * 32,
+        "b" * 32,
+        "c" * 32,
+    ]
 
     completed = writes["completed"]
     assert [event["metadata"]["block_index"] for event in completed] == [1, 3]
     assert [event["metadata"]["duration_ms"] for event in completed] == [5, 20]
+    assert [event["metadata"]["correlation_id"] for event in completed] == [
+        "a" * 32,
+        "c" * 32,
+    ]
     assert [event["message"] for event in completed] == [
         "summary progress partial_chunk_summary block 1/2 completed",
         "summary progress summary_synthesis block 3/3 completed",
@@ -348,6 +363,7 @@ def test_summarize_stage_records_window_and_synthesis_progress_on_the_current_at
     assert len(failed) == 1
     assert failed[0]["metadata"]["block_index"] == 2
     assert failed[0]["metadata"]["duration_ms"] == 7
+    assert failed[0]["metadata"]["correlation_id"] == "b" * 32
     # Only the sanitized error class is stored, never a provider message.
     assert failed[0]["error"] == "AIProviderError"
 

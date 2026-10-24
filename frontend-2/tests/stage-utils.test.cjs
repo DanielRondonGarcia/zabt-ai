@@ -69,3 +69,11 @@ test("summary audit progress labels show bounded block and synthesis positions",
   assert.equal(auditStages.formatSummaryProgress({ phase: "partial_chunk_summary", block_index: "1", block_total: 4 }), null);
   assert.equal(auditStages.formatSummaryProgress(null), null);
 });
+
+test("summary audit accepts only bounded LiteLLM trace IDs", () => {
+  const traceId = "a".repeat(32);
+  assert.equal(auditStages.formatSummaryCorrelationId({ correlation_id: traceId }), traceId);
+  assert.equal(auditStages.formatSummaryCorrelationId({ correlation_id: "a".repeat(31) }), null);
+  assert.equal(auditStages.formatSummaryCorrelationId({ correlation_id: "PROMPT_SECRET" }), null);
+  assert.equal(auditStages.formatSummaryCorrelationId(null), null);
+});
