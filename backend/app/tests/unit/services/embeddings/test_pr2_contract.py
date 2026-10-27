@@ -11,12 +11,24 @@ from app.services.embeddings.canonicalize import canonicalize_text, flatten_stru
 from app.services.embeddings.chunk import (
     CONTENT_CHUNK_OVERLAP_WORDS,
     CONTENT_CHUNK_WORDS,
+    EMBEDDING_INPUT_MAX_BYTES,
+    GROUP_CONTEXT_HEADER,
+    GROUP_CONTEXT_MAX_BYTES,
     build_meeting_chunks,
     point_id_for,
 )
 from app.services.embeddings.ollama import OllamaEmbeddingProvider
 from app.services.embeddings.openai import OpenAIEmbeddingProvider
 from app.services.vector_store import EmbeddingPoint, QdrantVectorStoreClient
+
+
+def _embedding_input(chunk):
+    """Return the exact string each embedding adapter sends to the provider."""
+    return chunk.embedding_text or chunk.text
+
+
+def _utf8_len(text: str) -> int:
+    return len(text.encode("utf-8"))
 
 
 def test_canonicalize_and_flatten_are_deterministic():
@@ -68,15 +80,22 @@ def test_long_summary_and_structured_output_use_conservative_windows():
         structured_output_status="completed",
     )
 
-    for kind in ("summary", "structured"):
+    sources = {"summary": summary, "structured": flatten_structured_output(structured)}
+    for kind, source in sources.items():
         kind_chunks = [chunk for chunk in chunks if chunk.kind == kind]
-        assert len(kind_chunks) == 2
+        assert all(
+            _utf8_len(_embedding_input(chunk)) <= EMBEDDING_INPUT_MAX_BYTES
+            for chunk in kind_chunks
+        )
         assert all(len(chunk.text.split()) <= CONTENT_CHUNK_WORDS for chunk in kind_chunks)
-        assert kind_chunks[0].text.split()[-CONTENT_CHUNK_OVERLAP_WORDS:] == kind_chunks[1].text.split()[
-            :CONTENT_CHUNK_OVERLAP_WORDS
-        ]
-        assert [chunk.chunk_index for chunk in kind_chunks] == [0, 1]
-        assert [chunk.chunk_count for chunk in kind_chunks] == [2, 2]
+        assert all(chunk.chunk_count == len(kind_chunks) for chunk in kind_chunks)
+        assert [chunk.chunk_index for chunk in kind_chunks] == list(range(len(kind_chunks)))
+        embedded_tokens = {token for chunk in kind_chunks for token in chunk.text.split()}
+        assert embedded_tokens == set(source.split())
+        for previous, current in zip(kind_chunks, kind_chunks[1:]):
+            assert previous.text.split()[-CONTENT_CHUNK_OVERLAP_WORDS:] == current.text.split()[
+                :CONTENT_CHUNK_OVERLAP_WORDS
+            ]
 
 
 def test_short_summary_and_structured_output_keep_single_chunk_contract():
@@ -91,6 +110,153 @@ def test_short_summary_and_structured_output_keep_single_chunk_contract():
         ("summary", 0, 1, "short summary"),
         ("structured", 0, 1, "status: ready"),
     ]
+
+
+def test_overlong_transcript_splits_every_embedding_input_to_byte_cap_without_losing_words():
+    # Timestamp-like tokens make word windows approach ~4 KiB, like meeting 15's 500-ing chunk.
+    text = " ".join(f"etiqueta-{index:03d}-" + "x" * 20 for index in range(300))
+
+    chunks = build_meeting_chunks(
+        meeting_id=123,
+        transcript_text=text,
+        summary_text="short summary",
+    )
+
+    transcript_chunks = [chunk for chunk in chunks if chunk.kind == "transcript"]
+    assert transcript_chunks
+    assert all(
+        _utf8_len(_embedding_input(chunk)) <= EMBEDDING_INPUT_MAX_BYTES
+        for chunk in chunks
+    )
+    # Every source token reaches some embedding slice; none is dropped or clipped.
+    embedded_tokens = {token for chunk in transcript_chunks for token in chunk.text.split()}
+    assert embedded_tokens == set(text.split())
+    assert all(len(chunk.text.split()) <= CONTENT_CHUNK_WORDS for chunk in transcript_chunks)
+    assert [chunk.chunk_index for chunk in transcript_chunks] == list(range(len(transcript_chunks)))
+    assert {chunk.chunk_count for chunk in transcript_chunks} == {len(transcript_chunks)}
+    assert transcript_chunks[0].id == point_id_for(123, "transcript", 0)
+    assert chunks[0].kind == "summary"
+    assert _embedding_input(chunks[0]) == "short summary"
+
+
+def test_group_introduction_boundary_keeps_short_context_verbatim_and_bounds_long_context():
+    short_summary = "resumen corto"
+    boundary_context = "Contexto " + "x" * 87
+    assert _utf8_len(boundary_context) == GROUP_CONTEXT_MAX_BYTES
+    longer_context = "Contexto " + "x" * 88
+    assert _utf8_len(longer_context) == GROUP_CONTEXT_MAX_BYTES + 1
+
+    boundary_chunks = build_meeting_chunks(
+        meeting_id=99,
+        summary_text=short_summary,
+        group_introduction=boundary_context,
+    )
+    assert boundary_chunks[0].embedding_text == (
+        f"Group introduction: {boundary_context}\n\n{short_summary}"
+    )
+
+    bounded_chunks = build_meeting_chunks(
+        meeting_id=99,
+        summary_text=short_summary,
+        group_introduction=longer_context,
+    )
+    bounded_input = _embedding_input(bounded_chunks[0])
+    assert bounded_input.startswith("Group introduction: ")
+    assert bounded_input.endswith(f"\n\n{short_summary}")
+    assert _utf8_len(bounded_input) <= EMBEDDING_INPUT_MAX_BYTES
+    assert "Contexto…" in bounded_input
+    assert "x" * 88 not in bounded_input
+
+    overlong_summary = " ".join(f"etiqueta-{index:03d}-" + "x" * 20 for index in range(200))
+    grouped_chunks = [
+        chunk
+        for chunk in build_meeting_chunks(
+            meeting_id=99,
+            summary_text=overlong_summary,
+            group_introduction=longer_context,
+        )
+        if chunk.kind == "summary"
+    ]
+    assert all(
+        _utf8_len(_embedding_input(chunk)) <= EMBEDDING_INPUT_MAX_BYTES
+        for chunk in grouped_chunks
+    )
+    assert all(
+        _embedding_input(chunk).startswith("Group introduction: ")
+        for chunk in grouped_chunks
+    )
+    assert all("Group introduction: " not in chunk.text for chunk in grouped_chunks)
+    embedded_tokens = {token for chunk in grouped_chunks for token in chunk.text.split()}
+    assert embedded_tokens == set(overlong_summary.split())
+
+
+def test_short_windows_and_word_overlap_keep_pre_cap_chunking_contract():
+    # One-byte tokens keep every 128-word window far below the byte cap, so the
+    # chunker must emit the exact pre-cap windows and their 32-word overlaps.
+    words = ["a", "b", "c", "d", "e"] * 400
+    text = " ".join(words)
+    chunks = build_meeting_chunks(meeting_id=7, transcript_text=text)
+    transcript_chunks = [chunk for chunk in chunks if chunk.kind == "transcript"]
+
+    expected_starts = range(0, len(words), CONTENT_CHUNK_WORDS - CONTENT_CHUNK_OVERLAP_WORDS)
+    expected = [
+        " ".join(words[start : start + CONTENT_CHUNK_WORDS])
+        for start in expected_starts
+    ]
+    assert [chunk.text for chunk in transcript_chunks] == expected
+    assert [chunk.chunk_index for chunk in transcript_chunks] == list(range(len(expected)))
+    assert {chunk.chunk_count for chunk in transcript_chunks} == {len(expected)}
+    assert all(_embedding_input(chunk) == chunk.text for chunk in chunks)
+    assert all(
+        _utf8_len(chunk.text) <= EMBEDDING_INPUT_MAX_BYTES
+        for chunk in transcript_chunks
+    )
+
+    short_chunks = build_meeting_chunks(meeting_id=7, summary_text="short summary")
+    assert [
+        (chunk.kind, chunk.chunk_index, chunk.chunk_count, chunk.text)
+        for chunk in short_chunks
+    ] == [("summary", 0, 1, "short summary")]
+    assert short_chunks[0].embedding_text is None
+
+
+def test_oversized_utf8_word_and_grouped_context_reconstruct_bounded_inputs_in_order():
+    """A no-whitespace UTF-8 word larger than the cap keeps all codepoints in
+    order across emitted chunks, and an oversized single-token group
+    introduction keeps visible bounded context instead of a bare ellipsis."""
+    giant = "á" * 600  # 1,200 UTF-8 bytes, no whitespace
+    text = f"{giant} después"
+    long_context = "ñ" * 200  # single 400-byte token introduction
+
+    transcript_chunks = [
+        chunk
+        for chunk in build_meeting_chunks(
+            meeting_id=55,
+            transcript_text=text,
+            group_introduction=long_context,
+        )
+        if chunk.kind == "transcript"
+    ]
+
+    inputs = [_embedding_input(chunk) for chunk in transcript_chunks]
+    assert inputs
+    assert all(_utf8_len(value) <= EMBEDDING_INPUT_MAX_BYTES for value in inputs)
+    for value in inputs:
+        assert value.startswith(GROUP_CONTEXT_HEADER)
+        body = value[len(GROUP_CONTEXT_HEADER) :]
+        context_part, separator, window_part = body.partition("\n\n")
+        assert separator
+        assert window_part
+        # Visible, non-empty bounded context (never a bare ellipsis): a
+        # UTF-8-safe prefix of the introduction plus the ellipsis marker.
+        assert context_part.endswith("…")
+        preserved, marker = context_part[:-1], context_part[-1]
+        assert marker == "…"
+        assert 0 < _utf8_len(preserved) + _utf8_len("…") <= GROUP_CONTEXT_MAX_BYTES
+        assert long_context.startswith(preserved)
+
+    reconstructed = "".join("".join(chunk.text.split()) for chunk in transcript_chunks)
+    assert reconstructed == "".join(text.split())
 
 
 def test_visual_descriptions_are_chunked_with_their_time_ranges():

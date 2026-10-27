@@ -32,6 +32,27 @@ not a tokenizer-exact token limit; it leaves headroom for gateways with a
 physical limit of 512 provider tokens. The same bounded windows apply to
 transcripts, transliterations, long summaries, and long structured output.
 
+Every emitted embedding input is additionally capped at 480 UTF-8 bytes
+(`EMBEDDING_INPUT_MAX_BYTES`, a chunker constant, not a setting). This keeps
+long single inputs such as meeting 15's failing 1,312-byte summary window out
+of the provider request; it does not guarantee success if the gateway fails for
+another reason or has a smaller physical token limit. Over-budget word windows
+are subdivided with the same 32-word overlap; a single word longer than the
+budget is split at character boundaries. Every source character appears in at
+least one emitted chunk. Overlap repeats some words, while long-word fragments
+are carried by consecutive chunks. Chunk IDs remain deterministic; citation
+text contains only source text or its ordered fragments.
+
+The optional group introduction is part of each embedding input and is kept
+verbatim when it fits within `GROUP_CONTEXT_MAX_BYTES` (96 UTF-8 bytes). Longer
+introductions are truncated deterministically at word boundaries within that
+byte budget and marked with a trailing ellipsis (`…`); an introduction whose
+first word alone exceeds the budget keeps a UTF-8-safe character prefix of that
+word plus the ellipsis, so the bounded context is never empty. This is a
+deliberate bounded-context policy: short introductions (the common case) are unchanged,
+an oversized introduction never silently replaces meeting text, and meeting
+evidence itself is always embedded in full.
+
 `EMBEDDING_MAX_BATCH` limits the number of input strings sent in one HTTP request,
 not the number of chunks allowed in one meeting index. The OpenAI-compatible and
 Ollama adapters send larger meeting indexes in sequential batches and concatenate

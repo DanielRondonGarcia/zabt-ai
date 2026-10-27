@@ -15,6 +15,101 @@ from app.services.embeddings.canonicalize import canonicalize_text, flatten_stru
 CONTENT_CHUNK_WORDS = 128
 CONTENT_CHUNK_OVERLAP_WORDS = 32
 
+# Hard UTF-8 byte cap for each emitted embedding input.
+EMBEDDING_INPUT_MAX_BYTES = 480
+
+# Deliberate bounded-context budget for the group introduction.
+GROUP_CONTEXT_MAX_BYTES = 96
+GROUP_CONTEXT_HEADER = "Group introduction: "
+
+
+def _utf8_len(text: str) -> int:
+    return len(text.encode("utf-8"))
+
+
+def _bounded_group_context(context: str) -> str:
+    """Return the group introduction kept in each window, byte-bounded.
+
+    Introductions that fit are kept verbatim. Longer ones are truncated to
+    word boundaries within the byte budget and marked with an ellipsis, so
+    the bounded context is visible in the embedding input instead of being
+    silently clipped.
+    """
+    if _utf8_len(context) <= GROUP_CONTEXT_MAX_BYTES:
+        return context
+    truncated = ""
+    for word in context.split():
+        candidate = f"{truncated} {word}" if truncated else word
+        if _utf8_len(f"{candidate}…") > GROUP_CONTEXT_MAX_BYTES:
+            break
+        truncated = candidate
+    if not truncated:
+        # One word larger than the whole budget still keeps a UTF-8-safe
+        # character prefix, so the introduction is never reduced to a bare
+        # ellipsis with all of its context lost.
+        truncated = _char_word_pieces(
+            context, GROUP_CONTEXT_MAX_BYTES - _utf8_len("…")
+        )[0]
+    return f"{truncated}…"
+
+
+def _char_word_pieces(word: str, budget: int) -> list[str]:
+    """Slice one token larger than ``budget`` into character pieces."""
+    pieces: list[str] = []
+    current = ""
+    for char in word:
+        if current and _utf8_len(current) + _utf8_len(char) > budget:
+            pieces.append(current)
+            current = ""
+        current += char
+    if current:
+        pieces.append(current)
+    return pieces
+
+
+def _window_end(words: list[str], start: int, budget: int) -> int:
+    """Return one past the end of the longest word run fitting ``budget``."""
+    total = 0
+    index = start
+    while index < len(words):
+        addition = _utf8_len(words[index]) + (1 if index > start else 0)
+        if total + addition > budget:
+            break
+        total += addition
+        index += 1
+    return index
+
+
+def _byte_windows(
+    text: str,
+    *,
+    budget: int,
+    overlap: int = CONTENT_CHUNK_OVERLAP_WORDS,
+) -> list[str]:
+    """Keep ``text`` as one window when it fits, or subdivide it at word
+    boundaries so every emitted window stays within ``budget`` UTF-8 bytes,
+    preserving the same word overlap across adjacent windows. A single token
+    larger than the whole budget is sliced at character boundaries so that no
+    source text is ever dropped."""
+    words = text.split()
+    if not words:
+        return []
+    if _utf8_len(text) <= budget:
+        return [" ".join(words)]
+    windows: list[str] = []
+    start = 0
+    while start < len(words):
+        end = _window_end(words, start, budget)
+        if end == start:
+            windows.extend(_char_word_pieces(words[start], budget))
+            start += 1
+            continue
+        windows.append(" ".join(words[start:end]))
+        if end >= len(words):
+            break
+        start = max(end - overlap, start + 1)
+    return windows
+
 
 @dataclass(frozen=True)
 class MeetingContentChunk:
@@ -65,9 +160,21 @@ def _chunked_text(
     embedding_context: str | None = None,
 ) -> list[MeetingContentChunk]:
     canonical = canonicalize_text(text)
-    windows = _window_text(canonical)
-    count = len(windows)
     context = canonicalize_text(embedding_context or "")
+    prefix = ""
+    if context:
+        prefix = f"{GROUP_CONTEXT_HEADER}{_bounded_group_context(context)}\n\n"
+    # Word windows bound token counts; byte windows additionally bound the
+    # exact UTF-8 payload (including the group introduction prefix) sent to
+    # providers whose physical input limit is smaller than a full window.
+    budget = EMBEDDING_INPUT_MAX_BYTES - _utf8_len(prefix)
+    windows = [
+        bounded_window
+        for window in _window_text(canonical)
+        for bounded_window in _byte_windows(window, budget=budget)
+        if bounded_window
+    ]
+    count = len(windows)
     return [
         MeetingContentChunk(
             id=point_id_for(meeting_id, kind, index),
@@ -76,11 +183,7 @@ def _chunked_text(
             text=window,
             chunk_index=index,
             chunk_count=count,
-            embedding_text=(
-                f"Group introduction: {context}\n\n{window}"
-                if context
-                else None
-            ),
+            embedding_text=f"{prefix}{window}" if prefix else None,
         )
         for index, window in enumerate(windows)
         if window
