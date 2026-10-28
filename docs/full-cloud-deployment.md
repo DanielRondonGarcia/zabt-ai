@@ -77,7 +77,12 @@ long words; window results are combined in order before the stage saves its outp
 any window fails, the stage fails without saving a partial extraction. A previously
 saved summary remains available. The completion client's per-request timeout stays
 120 seconds; bounding requests does not guarantee that an unavailable or overloaded
-provider will respond. Reindexing vectors does not retry a failed highlights stage.
+provider will respond. The generic structured response accepts the observed
+`resumen_ejecutivo` key from a compatible gateway as `summary` and persists the
+English field name. For a long transcript, a response with neither key still
+fails the stage rather than saving partial structured output; short transcripts
+retain their existing minimal-output fallback. Reindexing vectors does not retry
+a failed highlights stage.
 
 ## Upload confirmation
 

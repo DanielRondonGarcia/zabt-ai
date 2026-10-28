@@ -177,3 +177,95 @@ def test_failed_window_does_not_return_partial_highlights(monkeypatch):
     with pytest.raises(TimeoutError, match="Request timed out"):
         meeting_intelligence.intelligence_service.extract_highlights("[0.0] Speaker: " + "word " * 2000)
     assert len(calls) == 2
+
+
+def test_localized_generic_summary_is_validated_and_preserved_across_windows(monkeypatch):
+    transcript = "[0.0] Speaker: " + "word " * 1300
+    requests = []
+
+    def parse(**kwargs):
+        requests.append(kwargs)
+        index = len(requests)
+        payload = (
+            {"summary": "English window 1"}
+            if index == 1 else {"resumen_ejecutivo": f"Resumen de ventana {index}"}
+        )
+        parsed = kwargs["response_format"].model_validate(payload)
+        return _response(parsed.model_dump())
+
+    monkeypatch.setattr(
+        meeting_intelligence, "_client",
+        SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
+    )
+
+    result = meeting_intelligence.intelligence_service.extract_structured_output(transcript, "generic")
+
+    assert len(requests) > 1
+    assert "".join(request["messages"][1]["content"] for request in requests) == transcript
+    assert result["summary"] == "\n\n".join(
+        ["English window 1", *(f"Resumen de ventana {index}" for index in range(2, len(requests) + 1))]
+    )
+    assert set(result) == {"meeting_type", "summary", "topics", "decisions", "follow_ups"}
+    assert "summary" in meeting_intelligence.GenericOutput.model_json_schema()["properties"]
+
+
+def test_english_generic_summary_remains_valid_for_short_requests(monkeypatch):
+    requests = []
+
+    def parse(**kwargs):
+        requests.append(kwargs)
+        parsed = kwargs["response_format"].model_validate({"summary": "English summary"})
+        return _response(parsed.model_dump())
+
+    monkeypatch.setattr(
+        meeting_intelligence, "_client",
+        SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
+    )
+
+    result = meeting_intelligence.intelligence_service.extract_structured_output(
+        "[0.0] Speaker: hello", "generic"
+    )
+
+    assert result["summary"] == "English summary"
+    assert len(requests) == 1
+    assert requests[0]["messages"][1]["content"] == "[0.0] Speaker: hello"
+
+
+def test_unknown_generic_summary_key_fails_long_stage_without_partial_result(monkeypatch):
+    requests = []
+
+    def parse(**kwargs):
+        requests.append(kwargs)
+        payload = {"summary": "first window"} if len(requests) == 1 else {"resumen": "unknown key"}
+        parsed = kwargs["response_format"].model_validate(payload)
+        return _response(parsed.model_dump())
+
+    monkeypatch.setattr(
+        meeting_intelligence, "_client",
+        SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
+    )
+
+    with pytest.raises(ValueError, match="summary"):
+        meeting_intelligence.intelligence_service.extract_structured_output(
+            "[0.0] Speaker: " + "word " * 1300, "generic"
+        )
+    assert len(requests) == 2
+
+
+def test_short_invalid_generic_output_keeps_existing_minimal_fallback(monkeypatch):
+    requests = []
+
+    def parse(**kwargs):
+        requests.append(kwargs)
+        kwargs["response_format"].model_validate({"resumen": "unknown key"})
+        pytest.fail("the response must not validate")
+
+    monkeypatch.setattr(
+        meeting_intelligence, "_client",
+        SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
+    )
+
+    assert meeting_intelligence.intelligence_service.extract_structured_output(
+        "[0.0] Speaker: hello", "generic"
+    ) == {"meeting_type": "generic"}
+    assert len(requests) == 1

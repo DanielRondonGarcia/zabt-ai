@@ -2,7 +2,7 @@
 # Copyright (C) 2025-2026 Afeef Janjua
 from enum import Enum
 from typing import Optional, List
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import AliasChoices, BaseModel, Field, ValidationError
 from langfuse.openai import OpenAI
 from sqlmodel import Session, select, col
 
@@ -133,7 +133,9 @@ class GenericItem(BaseModel):
 
 class GenericOutput(BaseModel):
     meeting_type: str = "generic"
-    summary: str
+    # Some compatible gateways localize this key despite the English schema.
+    # Accept that observed spelling at the validation boundary; serialize as summary.
+    summary: str = Field(validation_alias=AliasChoices("summary", "resumen_ejecutivo"))
     topics: List[GenericItem] = Field(default_factory=list)
     decisions: List[str] = Field(default_factory=list)
     follow_ups: List[str] = Field(default_factory=list)
