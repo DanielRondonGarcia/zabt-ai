@@ -68,6 +68,17 @@ corresponding allowlist value; visual inference still requires HTTPS,
 `VISION_CLOUD_ALLOWED=true`, `VISION_EGRESS_POLICY=allowlist`, and a matching
 `VISION_ALLOWED_HOSTS` entry.
 
+## Transcript-only intelligence
+
+Highlight and structured-output extraction preserve short transcripts as one model request.
+Longer transcripts are split into sequential, nonoverlapping windows of at most 4096 UTF-8
+bytes each. Every transcript character remains in one window, including timestamps and
+long words; window results are combined in order before the stage saves its output. If
+any window fails, the stage fails without saving a partial extraction. A previously
+saved summary remains available. The completion client's per-request timeout stays
+120 seconds; bounding requests does not guarantee that an unavailable or overloaded
+provider will respond. Reindexing vectors does not retry a failed highlights stage.
+
 ## Upload confirmation
 
 External S3-compatible storage has no local object-storage webhook wired into this Compose file;

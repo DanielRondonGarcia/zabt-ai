@@ -18,6 +18,69 @@ from app.services.meeting_recovery import transcript_fingerprint
 
 logger = get_logger(__name__)
 
+# Keep long transcript-only extraction requests well below the 26 KB input
+# that timed out on the configured completion gateway. Short requests retain
+# their original single-call behavior.
+TRANSCRIPT_ANALYSIS_MAX_BYTES = 4096
+
+
+def _transcript_windows(transcript_text: str) -> list[str]:
+    """Partition all transcript characters into UTF-8-bounded windows.
+
+    Prefer a recent line or word boundary, without discarding timestamps,
+    whitespace, or an unusually long word. Windows have no overlap, so their
+    structured results can be combined without duplicating window boundaries.
+    """
+    if len(transcript_text.encode("utf-8")) <= TRANSCRIPT_ANALYSIS_MAX_BYTES:
+        return [transcript_text]
+
+    windows: list[str] = []
+    start = 0
+    while start < len(transcript_text):
+        end = start
+        byte_count = 0
+        last_line = start
+        last_space = start
+        while end < len(transcript_text):
+            char = transcript_text[end]
+            char_bytes = len(char.encode("utf-8"))
+            if byte_count + char_bytes > TRANSCRIPT_ANALYSIS_MAX_BYTES:
+                break
+            byte_count += char_bytes
+            end += 1
+            if char == "\n":
+                last_line = end
+            elif char.isspace():
+                last_space = end
+
+        halfway = start + (end - start) // 2
+        cut = (
+            last_line if last_line > halfway
+            else last_space if last_space > halfway
+            else end
+        )
+        windows.append(transcript_text[start:cut])
+        start = cut
+    return windows
+
+
+def _combine_structured_windows(outputs: list[dict]) -> dict:
+    """Merge typed per-window fields in transcript order without dropping data."""
+    combined = outputs[0].copy()
+    for key, value in combined.items():
+        if key == "meeting_type":
+            continue
+        values = [output[key] for output in outputs]
+        if isinstance(value, list):
+            combined[key] = [item for items in values for item in items]
+        elif key == "summary":
+            combined[key] = "\n\n".join(text for text in values if text)
+        else:
+            # Optional scalar fields (for example sprint_name) are deduplicated
+            # if repeated, but distinct evidence from later windows is kept.
+            combined[key] = " / ".join(dict.fromkeys(text for text in values if text)) or None
+    return combined
+
 
 class HighlightSaveRejected(Enum):
     STALE_OR_CANCELLED = "stale_or_cancelled"
@@ -214,28 +277,44 @@ class MeetingIntelligenceService:
     """Extracts structured intelligence from meeting transcripts."""
 
     def extract_highlights(self, transcript_text: str) -> dict:
-        """Call 1: Extract action items, key questions, and chapters from transcript."""
-        try:
-            response = _client.beta.chat.completions.parse(
-                model=settings.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": HIGHLIGHT_EXTRACTION_PROMPT},
-                    {"role": "user", "content": transcript_text},
-                ],
-                temperature=0.2,
-                response_format=HighlightsExtraction,
-            )
-        except ValidationError:
-            logger.warning(
-                "extract_highlights: response did not match the structured schema; "
-                "falling back to empty highlights"
-            )
-            return {"chapters": [], "action_items": [], "key_questions": []}
-        parsed = response.choices[0].message.parsed
-        if parsed is None:
-            logger.warning("extract_highlights: parse returned None, falling back to empty")
-            return {"chapters": [], "action_items": [], "key_questions": []}
-        return parsed.model_dump()
+        """Extract action items, key questions, and chapters from every window."""
+        windows = _transcript_windows(transcript_text)
+        combined: dict[str, list] = {"chapters": [], "action_items": [], "key_questions": []}
+        for window in windows:
+            prompt = HIGHLIGHT_EXTRACTION_PROMPT
+            if len(windows) > 1:
+                prompt += (
+                    "\nAnalyze only this transcript window. Timestamps still refer to the "
+                    "whole meeting. Chapters should cover this window, not invent "
+                    "content in other windows.\n"
+                )
+            try:
+                response = _client.beta.chat.completions.parse(
+                    model=settings.OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": window},
+                    ],
+                    temperature=0.2,
+                    response_format=HighlightsExtraction,
+                )
+            except ValidationError:
+                if len(windows) > 1:
+                    raise  # Never save a partial meeting extraction.
+                logger.warning(
+                    "extract_highlights: response did not match the structured schema; "
+                    "falling back to empty highlights"
+                )
+                return combined
+            parsed = response.choices[0].message.parsed
+            if parsed is None:
+                if len(windows) > 1:
+                    raise ValueError("highlight extraction returned no parsed window")
+                logger.warning("extract_highlights: parse returned None, falling back to empty")
+                return combined
+            for key in combined:
+                combined[key].extend(parsed.model_dump()[key])
+        return combined
 
     def extract_structured_output(self, transcript_text: str, meeting_type: str) -> dict:
         """Call 2: Extract meeting-type-specific structured output."""
@@ -248,28 +327,42 @@ class MeetingIntelligenceService:
             "Do not include Markdown, headings, or commentary.\n\n"
         )
 
-        try:
-            response = _client.beta.chat.completions.parse(
-                model=settings.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": transcript_only_prompt + type_config["prompt"]},
-                    {"role": "user", "content": transcript_text},
-                ],
-                temperature=0.2,
-                response_format=pydantic_model,
+        windows = _transcript_windows(transcript_text)
+        prompt = transcript_only_prompt + type_config["prompt"]
+        if len(windows) > 1:
+            prompt += (
+                " Analyze only this transcript window. Do not infer facts from "
+                "parts of the meeting that are not in this window."
             )
-        except ValidationError:
-            logger.warning(
-                "extract_structured_output: response did not match the structured schema "
-                "for type=%s; falling back to minimal output",
-                meeting_type,
-            )
-            return {"meeting_type": meeting_type}
-        parsed = response.choices[0].message.parsed
-        if parsed is None:
-            logger.warning("extract_structured_output: parse returned None for type=%s", meeting_type)
-            return {"meeting_type": meeting_type}
-        return parsed.model_dump()
+        outputs: list[dict] = []
+        for window in windows:
+            try:
+                response = _client.beta.chat.completions.parse(
+                    model=settings.OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": window},
+                    ],
+                    temperature=0.2,
+                    response_format=pydantic_model,
+                )
+            except ValidationError:
+                if len(windows) > 1:
+                    raise  # Never mark incomplete intelligence as completed.
+                logger.warning(
+                    "extract_structured_output: response did not match the structured schema "
+                    "for type=%s; falling back to minimal output",
+                    meeting_type,
+                )
+                return {"meeting_type": meeting_type}
+            parsed = response.choices[0].message.parsed
+            if parsed is None:
+                if len(windows) > 1:
+                    raise ValueError("structured extraction returned no parsed window")
+                logger.warning("extract_structured_output: parse returned None for type=%s", meeting_type)
+                return {"meeting_type": meeting_type}
+            outputs.append(parsed.model_dump())
+        return outputs[0] if len(outputs) == 1 else _combine_structured_windows(outputs)
 
     def save_highlights(
         self,
