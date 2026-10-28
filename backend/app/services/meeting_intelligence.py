@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+import math
 from enum import Enum
-from typing import Optional, List
+from typing import Optional, List, Sequence
 from pydantic import AliasChoices, BaseModel, Field, ValidationError
 from langfuse.openai import OpenAI
 from sqlmodel import Session, select, col
@@ -61,6 +62,129 @@ def _transcript_windows(transcript_text: str) -> list[str]:
         )
         windows.append(transcript_text[start:cut])
         start = cut
+    return windows
+
+
+def _format_evidence_seconds(value: float) -> str:
+    """Render a validated real segment time compactly and round-trip exactly."""
+    return repr(float(value))
+
+
+def _timed_evidence_header(start: float, end: float, speaker: Optional[str]) -> str:
+    """Compact readable segment header with real seconds, no interpolated values."""
+    prefix = f"[{_format_evidence_seconds(start)}-{_format_evidence_seconds(end)}]"
+    if speaker is not None:
+        return f"{prefix} {speaker}: "
+    return f"{prefix} "
+
+
+def _validated_timed_records(
+    segments: Sequence,
+) -> list[tuple[str, str, tuple[float, int]]]:
+    """Validate source segment evidence and order it by real start/id.
+
+    Only the ORIGINAL source time and speaker are serialized; malformed
+    evidence (missing, non-finite, or end-before-start times) raises before
+    any provider request instead of coercing values to zero. Explicitly empty
+    text records carry no characters and are skipped; this is the only
+    permitted drop. Zero-length intervals (start == end) stay valid data.
+    """
+    records: list[tuple[str, str, tuple[float, int]]] = []
+    for index, segment in enumerate(segments):
+        start, end = segment.start_time, segment.end_time
+        for label, value in (("start_time", start), ("end_time", end)):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(
+                    "timed segment evidence requires finite numeric "
+                    f"{label}, got {value!r} "
+                    f"(segment index {index})"
+                )
+        if start < 0:
+            raise ValueError(
+                f"timed segment evidence requires nonnegative start_time, "
+                f"got {start!r} (segment index {index})"
+            )
+        if end < start:
+            raise ValueError(
+                f"timed segment evidence requires end_time >= start_time, "
+                f"got [{start!r}, {end!r}] (segment index {index})"
+            )
+        text = segment.text
+        if not isinstance(text, str):
+            raise ValueError(
+                f"timed segment evidence requires segment text "
+                f"(segment index {index})"
+            )
+        speaker = segment.speaker
+        if speaker is not None and not isinstance(speaker, str):
+            raise ValueError(
+                f"timed segment evidence requires a string speaker or None "
+                f"(segment index {index})"
+            )
+        if text == "":
+            continue
+        identifier = getattr(segment, "id", None)
+        order_id = (
+            identifier
+            if isinstance(identifier, int) and not isinstance(identifier, bool)
+            else 0
+        )
+        records.append(
+            (_timed_evidence_header(start, end, speaker), text, (start, order_id))
+        )
+    records.sort(key=lambda record: record[2])
+    return records
+
+
+def _fragmented_evidence_text(header: str, text: str) -> list[str]:
+    """Fragment oversized segment text losslessly within its header budget.
+
+    The ORIGINAL header is repeated on every fragment; characters are never
+    interpolated, truncated, or rescaled, and speakers/timestamps are never
+    cut to fit.
+    """
+    budget = TRANSCRIPT_ANALYSIS_MAX_BYTES - len(header.encode("utf-8"))
+    fragments: list[str] = []
+    start = 0
+    while start < len(text):
+        byte_count = 0
+        end = start
+        while end < len(text):
+            char_bytes = len(text[end].encode("utf-8"))
+            if byte_count + char_bytes > budget:
+                break
+            byte_count += char_bytes
+            end += 1
+        if end == start:
+            raise ValueError(
+                "timed segment evidence cannot be fragmented "
+                "without truncating the original segment text"
+            )
+        fragments.append(text[start:end])
+        start = end
+    return fragments
+
+
+def _timed_evidence_windows(segments: Sequence) -> list[str]:
+    """Pack whole validated segment records into UTF-8-bounded windows."""
+    windows: list[str] = []
+    current = ""
+    for header, text, _key in _validated_timed_records(segments):
+        fragments = _fragmented_evidence_text(header, text)
+        for fragment in fragments:
+            line = header + fragment
+            addition = line if not current else "\n" + line
+            if len((current + addition).encode("utf-8")) <= TRANSCRIPT_ANALYSIS_MAX_BYTES:
+                current += addition
+            else:
+                windows.append(current)
+                current = line
+    if current:
+        windows.append(current)
     return windows
 
 
@@ -278,12 +402,35 @@ MEETING_TYPE_PROMPTS: dict = {
 class MeetingIntelligenceService:
     """Extracts structured intelligence from meeting transcripts."""
 
-    def extract_highlights(self, transcript_text: str) -> dict:
-        """Extract action items, key questions, and chapters from every window."""
-        windows = _transcript_windows(transcript_text)
+    def extract_highlights(self, transcript_text: str, segments=None) -> dict:
+        """Extract action items, key questions, and chapters from every window.
+
+        With supplied timed segment evidence (eager-loaded
+        ``Meeting.segments``), each record's real start/end seconds and
+        speaker label are packed into the same bounded windows and the timed
+        path never falls back to empty highlights. An absent or empty segment
+        list preserves the plain-transcript behavior exactly.
+        """
+        timed = bool(segments)
+        if timed:
+            windows = _timed_evidence_windows(segments)
+            if not windows:
+                raise ValueError(
+                    "timed segment evidence produced no extraction windows"
+                )
+        else:
+            windows = _transcript_windows(transcript_text)
         combined: dict[str, list] = {"chapters": [], "action_items": [], "key_questions": []}
         for window in windows:
             prompt = HIGHLIGHT_EXTRACTION_PROMPT
+            if timed:
+                prompt += (
+                    "\nEach input line is a timed transcript segment rendered as "
+                    "'[start-end] [Speaker: ]text', where start and end are real "
+                    "seconds from the start of the meeting. Use only these offsets "
+                    "and speaker labels; never invent a timestamp for text without "
+                    "one.\n"
+                )
             if len(windows) > 1:
                 prompt += (
                     "\nAnalyze only this transcript window. Timestamps still refer to the "
@@ -301,8 +448,8 @@ class MeetingIntelligenceService:
                     response_format=HighlightsExtraction,
                 )
             except ValidationError:
-                if len(windows) > 1:
-                    raise  # Never save a partial meeting extraction.
+                if timed or len(windows) > 1:
+                    raise  # The timed path and multi-window calls never save a partial extraction.
                 logger.warning(
                     "extract_highlights: response did not match the structured schema; "
                     "falling back to empty highlights"
@@ -310,7 +457,7 @@ class MeetingIntelligenceService:
                 return combined
             parsed = response.choices[0].message.parsed
             if parsed is None:
-                if len(windows) > 1:
+                if timed or len(windows) > 1:
                     raise ValueError("highlight extraction returned no parsed window")
                 logger.warning("extract_highlights: parse returned None, falling back to empty")
                 return combined

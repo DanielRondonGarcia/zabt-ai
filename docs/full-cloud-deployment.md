@@ -73,7 +73,18 @@ corresponding allowlist value; visual inference still requires HTTPS,
 Highlight and structured-output extraction preserve short transcripts as one model request.
 Longer transcripts are split into sequential, nonoverlapping windows of at most 4096 UTF-8
 bytes each. Every transcript character remains in one window, including timestamps and
-long words; window results are combined in order before the stage saves its output. If
+long words; window results are combined in order before the stage saves its output. When
+persisted transcript segments are supplied to `extract_highlights`, the service renders each
+segment as a compact `[start-end] [Speaker: ]text` line with real seconds from the meeting
+start, ordered by start, and packed into the same
+4096-byte windows. An oversized segment's text is fragmented losslessly with its original
+start, end, and speaker repeated on every fragment; nothing is interpolated, truncated, or
+synthesized, and only explicitly empty segment records are skipped. Segments with missing,
+non-finite, or end-before-start times fail the stage before any provider request. A null or
+schema-invalid response on the timed path still fails even for a single window, so a null
+provider timestamp is never coerced to zero, and rejecting a timed response saves no
+highlights or completion markers. Meetings without persisted segments, or with an empty
+segment list, keep the transcript-only behavior described below. If
 any window fails, the stage fails without saving a partial extraction. A previously
 saved summary remains available. The completion client's per-request timeout stays
 120 seconds; bounding requests does not guarantee that an unavailable or overloaded
