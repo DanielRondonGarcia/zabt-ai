@@ -158,6 +158,45 @@ def _build_system_prompt(style_examples: list[str] | None = None) -> str:
     return prompt
 
 
+PARTIAL_EVIDENCE_SYSTEM_PROMPT = """\
+You are Zabt, an evidence extractor working on one bounded time window of a larger meeting. A later step merges these digests into the final meeting notes.
+
+## Your task
+
+Summarize this time window as concise, source-grounded markdown bullets.
+
+## Rules
+- Record decisions, commitments, owners, deadlines, open questions, and key facts of this window as short bullets.
+- Attach the original source reference (`[source=... time=...]`) of each cited evidence item to the bullet that cites it.
+- Preserve speaker names exactly as they appear.
+- Do not produce any final report headings or document title; bullets only.
+- Do not repeat the raw transcript text verbatim; condense it.
+- If this window is too short or unintelligible, write one honest bullet saying so.
+"""
+
+
+def _build_partial_system_prompt(
+    *,
+    upload_date: str | None = None,
+    output_language: str | None = None,
+) -> str:
+    """Concise evidence-extraction prompt for per-window partial calls.
+
+    Partial windows receive neither the final-report SYSTEM_PROMPT nor the
+    selected style examples or custom template; those amplify input size on
+    every call while formatting only matters at synthesis. The prompt keeps the
+    shared evidence rules, the upload date, and the requested output language.
+    """
+    prompt = PARTIAL_EVIDENCE_SYSTEM_PROMPT + "\n\n" + MULTIMODAL_EVIDENCE_RULES
+    if upload_date:
+        prompt += (
+            "\n\n## Date context\n"
+            "If the meeting date is not supported by the evidence, use the upload date "
+            f"{upload_date} as the meeting date.\n"
+        )
+    return _append_output_language_instruction(prompt, output_language)
+
+
 def _language_label(language_code: str) -> str:
     """Return a deterministic display label without hiding unknown language codes."""
     raw_code = language_code.strip()
@@ -486,9 +525,10 @@ def summarize_context(
         )
         try:
             partial = _completion_text(
-                system_prompt
-                + "\n\nYou are preparing a bounded partial evidence summary. "
-                "Do not invent missing context or expose hidden reasoning.",
+                _build_partial_system_prompt(
+                    upload_date=upload_date,
+                    output_language=output_language,
+                ),
                 "Create a concise, factual partial summary for this time window. "
                 "Keep every source reference needed for later synthesis.\n"
                 + format_context_chunk(chunk),

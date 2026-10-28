@@ -94,6 +94,18 @@ and cost before enabling it. Leaving the override empty preserves prior model
 selection and failure semantics. Reindexing vectors does not retry
 a failed highlights stage.
 
+## Summary evidence windows
+
+Long meeting evidence is summarized in bounded windows. Each per-window partial
+call uses a concise evidence-extraction prompt: it keeps the shared evidence
+rules, source references, spoken-versus-visual labels, uncertainty, the upload
+date, and the requested output language, but it never carries the final report
+system prompt, selected style examples, or the custom output template. Those
+are applied once, on the final synthesis call (or on the single-window and
+transcript-only summary calls). The provider still controls its own context and
+output ceilings, and concise bullets are requested by the prompt, not
+guaranteed.
+
 ## Upload confirmation
 
 External S3-compatible storage has no local object-storage webhook wired into this Compose file;
