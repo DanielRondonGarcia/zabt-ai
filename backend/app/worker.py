@@ -1456,7 +1456,7 @@ def stage_extract_intelligence(meeting_id: int) -> int:
     if claim is None:
         raise Ignore()
 
-    meeting = meeting_service.get(Meeting, meeting_id)
+    meeting = meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise ValueError(f"Meeting {meeting_id} not found.")
     if meeting.owner_id is None:
@@ -1487,7 +1487,9 @@ def stage_extract_intelligence(meeting_id: int) -> int:
 
     meeting_type = meeting.meeting_type or "generic"
 
-    highlights_data = intelligence_service.extract_highlights(meeting.transcript_text)
+    highlights_data = intelligence_service.extract_highlights(
+        meeting.transcript_text, meeting.segments
+    )
     highlight_result = intelligence_service.save_highlights(
         meeting_id,
         highlights_data,
@@ -1649,7 +1651,7 @@ def stage_extract_highlights(meeting_id: int) -> int:
     ):
         raise Ignore()
 
-    meeting = meeting_service.get(Meeting, meeting_id)
+    meeting = meeting_service.get_meeting(meeting_id)
     if not meeting:
         raise ValueError(f"Meeting {meeting_id} not found.")
     if meeting.owner_id is None:
@@ -1678,7 +1680,9 @@ def stage_extract_highlights(meeting_id: int) -> int:
         intelligence_service,
     )
 
-    highlights_data = intelligence_service.extract_highlights(meeting.transcript_text)
+    highlights_data = intelligence_service.extract_highlights(
+        meeting.transcript_text, meeting.segments
+    )
     highlight_result = intelligence_service.save_highlights(
         meeting_id,
         highlights_data,

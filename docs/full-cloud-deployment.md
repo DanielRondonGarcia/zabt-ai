@@ -84,8 +84,10 @@ non-finite, or end-before-start times fail the stage before any provider request
 schema-invalid response on the timed path still fails even for a single window, so a null
 provider timestamp is never coerced to zero, and rejecting a timed response saves no
 highlights or completion markers. Meetings without persisted segments, or with an empty
-segment list, keep the transcript-only behavior described below. If
-any window fails, the stage fails without saving a partial extraction. A previously
+segment list, keep the transcript-only behavior described below. Both the split highlight
+stage and the legacy intelligence stage load the meeting with its persisted segments through
+`MeetingService.get_meeting` and forward those segments to extraction. They do not rebuild
+the saved summary or relax the per-attempt save fence. If any window fails, the stage fails without saving a partial extraction. A previously
 saved summary remains available. The completion client's per-request timeout stays
 120 seconds; bounding requests does not guarantee that an unavailable or overloaded
 provider will respond. The generic structured response accepts the observed
