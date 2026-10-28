@@ -407,7 +407,6 @@ def test_stage_extract_intelligence_forwards_eager_loaded_segments(monkeypatch):
 
 def test_timed_rejection_saves_no_highlights_and_completes_nothing(monkeypatch):
     worker = _worker()
-    from app.services import meeting_intelligence
 
     segments = [
         SimpleNamespace(
