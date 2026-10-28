@@ -4,27 +4,9 @@ import pytest
 from app.services import meeting_intelligence
 
 
-@pytest.mark.parametrize(
-    ("method_name", "method_args", "expected"),
-    [
-        (
-            "extract_highlights",
-            {"transcript_text": "Transcript text"},
-            {"chapters": [], "action_items": [], "key_questions": []},
-        ),
-        (
-            "extract_structured_output",
-            {"transcript_text": "Transcript text", "meeting_type": "generic"},
-            {"meeting_type": "generic"},
-        ),
-    ],
-)
-def test_structured_extraction_falls_back_on_invalid_json(
+def test_highlights_falls_back_on_invalid_json(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
-    method_name: str,
-    method_args: dict,
-    expected: dict,
 ) -> None:
     markdown_response = "# Resumen de la Reunión\nNo es JSON."
 
@@ -37,9 +19,31 @@ def test_structured_extraction_falls_back_on_invalid_json(
     )
     monkeypatch.setattr(meeting_intelligence, "_client", fake_client)
 
-    result = getattr(meeting_intelligence.intelligence_service, method_name)(**method_args)
+    result = meeting_intelligence.intelligence_service.extract_highlights("Transcript text")
 
-    assert result == expected
+    assert result == {"chapters": [], "action_items": [], "key_questions": []}
+    assert markdown_response not in caplog.text
+
+
+def test_structured_output_rejects_invalid_json(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    markdown_response = "# Resumen de la Reunión\nNo es JSON."
+
+    class FakeCompletions:
+        def parse(self, **kwargs):
+            kwargs["response_format"].model_validate_json(markdown_response)
+
+    fake_client = SimpleNamespace(
+        beta=SimpleNamespace(chat=SimpleNamespace(completions=FakeCompletions()))
+    )
+    monkeypatch.setattr(meeting_intelligence, "_client", fake_client)
+
+    with pytest.raises(ValueError, match="Invalid JSON"):
+        meeting_intelligence.intelligence_service.extract_structured_output(
+            "Transcript text", "generic"
+        )
     assert markdown_response not in caplog.text
 
 
