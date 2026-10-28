@@ -540,6 +540,9 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: str = ""
     OPENAI_API_KEY: str = ""
     OPENAI_MODEL: str = ""
+    # Opt into a schema-compatible model for typed meeting extraction only.
+    # Empty preserves the shared model used by all other AI stages.
+    STRUCTURED_OUTPUT_MODEL: str = ""
     # Credentials and optional CA bundle for the internal Actsis OpenAI-compatible gateway.
     # Keep both values in .env; Compose passes them only to backend services.
     ACTSIS_API_KEY: str = ""

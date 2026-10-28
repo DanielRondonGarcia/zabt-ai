@@ -121,6 +121,69 @@ def test_short_transcript_keeps_existing_single_request_shape_for_both_stages(mo
     assert all(request["temperature"] == 0.2 for request in requests)
 
 
+def test_structured_model_override_only_affects_typed_extraction(monkeypatch):
+    transcript = "[0.0] Speaker: " + "word " * 2000
+    requests = []
+    monkeypatch.setattr(
+        meeting_intelligence,
+        "settings",
+        SimpleNamespace(OPENAI_MODEL="summary-model", STRUCTURED_OUTPUT_MODEL="schema-model"),
+    )
+
+    def parse(**kwargs):
+        requests.append(kwargs)
+        if kwargs["response_format"] is meeting_intelligence.HighlightsExtraction:
+            return _response({"chapters": [], "action_items": [], "key_questions": []})
+        index = len([request for request in requests if request["response_format"] is meeting_intelligence.GenericOutput])
+        parsed = kwargs["response_format"].model_validate({"summary": f"window {index}"})
+        return _response(parsed.model_dump())
+
+    monkeypatch.setattr(
+        meeting_intelligence, "_client",
+        SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
+    )
+
+    assert meeting_intelligence.intelligence_service.extract_highlights("[0.0] Speaker: hello") == {
+        "chapters": [], "action_items": [], "key_questions": [],
+    }
+    result = meeting_intelligence.intelligence_service.extract_structured_output(transcript, "generic")
+
+    highlights, *structured = requests
+    assert highlights["model"] == "summary-model"
+    assert len(structured) > 1
+    assert all(request["model"] == "schema-model" for request in structured)
+    assert "".join(request["messages"][1]["content"] for request in structured) == transcript
+    assert result["summary"] == "\n\n".join(f"window {i}" for i in range(1, len(structured) + 1))
+    assert set(result) == {"meeting_type", "summary", "topics", "decisions", "follow_ups"}
+
+
+def test_unset_structured_model_keeps_existing_model_for_both_stages(monkeypatch):
+    requests = []
+    monkeypatch.setattr(
+        meeting_intelligence,
+        "settings",
+        SimpleNamespace(OPENAI_MODEL="summary-model", STRUCTURED_OUTPUT_MODEL=""),
+    )
+
+    def parse(**kwargs):
+        requests.append(kwargs)
+        if kwargs["response_format"] is meeting_intelligence.HighlightsExtraction:
+            return _response({"chapters": [], "action_items": [], "key_questions": []})
+        parsed = kwargs["response_format"].model_validate({"summary": "English summary"})
+        return _response(parsed.model_dump())
+
+    monkeypatch.setattr(
+        meeting_intelligence, "_client",
+        SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
+    )
+
+    meeting_intelligence.intelligence_service.extract_highlights("[0.0] Speaker: hello")
+    result = meeting_intelligence.intelligence_service.extract_structured_output("[0.0] Speaker: hello", "generic")
+
+    assert [request["model"] for request in requests] == ["summary-model", "summary-model"]
+    assert result["summary"] == "English summary"
+
+
 @pytest.mark.parametrize(
     ("meeting_type", "fields"),
     [
@@ -231,12 +294,20 @@ def test_english_generic_summary_remains_valid_for_short_requests(monkeypatch):
     assert requests[0]["messages"][1]["content"] == "[0.0] Speaker: hello"
 
 
-def test_unknown_generic_summary_key_fails_long_stage_without_partial_result(monkeypatch):
+@pytest.mark.parametrize(
+    "bad_payload",
+    [
+        {"resumen": "unknown key"},
+        {"meeting_title": "synthetic title"},
+        {"meeting_summary": {"main_topics": ["synthetic topic"]}},
+    ],
+)
+def test_unknown_generic_summary_key_fails_long_stage_without_partial_result(monkeypatch, bad_payload):
     requests = []
 
     def parse(**kwargs):
         requests.append(kwargs)
-        payload = {"summary": "first window"} if len(requests) == 1 else {"resumen": "unknown key"}
+        payload = {"summary": "first window"} if len(requests) == 1 else bad_payload
         parsed = kwargs["response_format"].model_validate(payload)
         return _response(parsed.model_dump())
 
@@ -252,7 +323,7 @@ def test_unknown_generic_summary_key_fails_long_stage_without_partial_result(mon
     assert len(requests) == 2
 
 
-def test_short_invalid_generic_output_keeps_existing_minimal_fallback(monkeypatch):
+def test_short_invalid_generic_output_fails_without_minimal_fallback(monkeypatch):
     requests = []
 
     def parse(**kwargs):
@@ -265,7 +336,27 @@ def test_short_invalid_generic_output_keeps_existing_minimal_fallback(monkeypatc
         SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
     )
 
-    assert meeting_intelligence.intelligence_service.extract_structured_output(
-        "[0.0] Speaker: hello", "generic"
-    ) == {"meeting_type": "generic"}
+    with pytest.raises(ValueError, match="summary"):
+        meeting_intelligence.intelligence_service.extract_structured_output(
+            "[0.0] Speaker: hello", "generic"
+        )
+    assert len(requests) == 1
+
+
+def test_short_missing_parsed_output_fails_without_minimal_fallback(monkeypatch):
+    requests = []
+
+    def parse(**kwargs):
+        requests.append(kwargs)
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=None))])
+
+    monkeypatch.setattr(
+        meeting_intelligence, "_client",
+        SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
+    )
+
+    with pytest.raises(ValueError, match="structured extraction returned no parsed window"):
+        meeting_intelligence.intelligence_service.extract_structured_output(
+            "[0.0] Speaker: hello", "generic"
+        )
     assert len(requests) == 1

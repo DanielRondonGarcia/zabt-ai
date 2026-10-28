@@ -132,7 +132,8 @@ variable name.
 |----------|---------|-------|
 | `OPENAI_BASE_URL` | `https://openrouter.ai/api/v1` | Any OpenAI-compatible endpoint, including Ollama Cloud. |
 | `OPENAI_API_KEY` | — | **REQUIRED for a remote summary endpoint.** It is also the default shared credential for `openai-file` when `TRANSCRIPTION_API_KEY` is empty; use a credential accepted by the official OpenAI API for that path. It remains independent from visual inference and auth settings. |
-| `OPENAI_MODEL` | `google/gemini-3.1-flash-lite-preview` | Model id understood by your endpoint. |
+| `OPENAI_MODEL` | `google/gemini-3.1-flash-lite-preview` | Model id understood by your endpoint; still used for summary, title and highlights. |
+| `STRUCTURED_OUTPUT_MODEL` | empty (uses `OPENAI_MODEL`) | Optional schema-compatible model on the same OpenAI-compatible endpoint, used only for typed meeting extraction. Set a model verified to respect the Pydantic response schema; missing or invalid output in any window (even a short transcript) fails without saving partial results. |
 
 ## Object storage
 

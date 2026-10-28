@@ -41,6 +41,7 @@ x-cloud-prod-backend-environment: &cloud-prod-backend-environment
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+  STRUCTURED_OUTPUT_MODEL: ${STRUCTURED_OUTPUT_MODEL:-}
   AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-https://api.openai.com/v1}
   AI_CHAT_MODEL: ${AI_CHAT_MODEL:-gpt-4o-mini}
   AI_CHAT_API_KEY: ${AI_CHAT_API_KEY:-}
@@ -143,6 +144,7 @@ x-cloud-actsis-backend-environment: &cloud-actsis-backend-environment
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://ai.actsis.internal/v1}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-${ACTSIS_API_KEY:-}}
   OPENAI_MODEL: ${OPENAI_MODEL:-glm-5.3-flash}
+  STRUCTURED_OUTPUT_MODEL: ${STRUCTURED_OUTPUT_MODEL:-}
   AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-https://ai.actsis.internal/v1}
   AI_CHAT_MODEL: ${AI_CHAT_MODEL:-glm-5.3-flash}
   AI_CHAT_API_KEY: ${AI_CHAT_API_KEY:-${ACTSIS_API_KEY:-}}
@@ -251,6 +253,7 @@ x-full-cloud-backend-environment: &full-cloud-backend-environment
   OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
   OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+  STRUCTURED_OUTPUT_MODEL: ${STRUCTURED_OUTPUT_MODEL:-}
   AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-}
   AI_CHAT_MODEL: ${AI_CHAT_MODEL:-gpt-4o-mini}
   AI_CHAT_API_KEY: ${AI_CHAT_API_KEY:-}
@@ -384,6 +387,7 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      STRUCTURED_OUTPUT_MODEL: ${STRUCTURED_OUTPUT_MODEL:-}
       # Chat can target a separate compatible gateway; by default it reuses OpenAI.
       AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-https://api.openai.com/v1}
       AI_CHAT_MODEL: ${AI_CHAT_MODEL:-gpt-4o-mini}
@@ -539,6 +543,7 @@ services:
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      STRUCTURED_OUTPUT_MODEL: ${STRUCTURED_OUTPUT_MODEL:-}
       # Chat can target a separate compatible gateway; by default it reuses OpenAI.
       AI_CHAT_BASE_URL: ${AI_CHAT_BASE_URL:-https://api.openai.com/v1}
       AI_CHAT_MODEL: ${AI_CHAT_MODEL:-gpt-4o-mini}

@@ -338,31 +338,18 @@ class MeetingIntelligenceService:
             )
         outputs: list[dict] = []
         for window in windows:
-            try:
-                response = _client.beta.chat.completions.parse(
-                    model=settings.OPENAI_MODEL,
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": window},
-                    ],
-                    temperature=0.2,
-                    response_format=pydantic_model,
-                )
-            except ValidationError:
-                if len(windows) > 1:
-                    raise  # Never mark incomplete intelligence as completed.
-                logger.warning(
-                    "extract_structured_output: response did not match the structured schema "
-                    "for type=%s; falling back to minimal output",
-                    meeting_type,
-                )
-                return {"meeting_type": meeting_type}
+            response = _client.beta.chat.completions.parse(
+                model=settings.STRUCTURED_OUTPUT_MODEL or settings.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": window},
+                ],
+                temperature=0.2,
+                response_format=pydantic_model,
+            )
             parsed = response.choices[0].message.parsed
             if parsed is None:
-                if len(windows) > 1:
-                    raise ValueError("structured extraction returned no parsed window")
-                logger.warning("extract_structured_output: parse returned None for type=%s", meeting_type)
-                return {"meeting_type": meeting_type}
+                raise ValueError("structured extraction returned no parsed window")
             outputs.append(parsed.model_dump())
         return outputs[0] if len(outputs) == 1 else _combine_structured_windows(outputs)
 
