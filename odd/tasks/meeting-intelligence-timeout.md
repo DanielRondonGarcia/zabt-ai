@@ -9,11 +9,11 @@ S3. "Sí, corregir y desplegar" — correct and publish the fix without resuming
 
 ## Tasks
 T1 [S1-S2] inline; done; commit: none — Diagnose run 56 and identify the timeout boundary without a production mutation.
-T2 [S2-S3] inline; done; commit: pending — Public service RED tests show both long-transcript methods submit a single oversized request; short input remains one request.
-T3 [S2-S3] inline; done; commit: pending — GREEN and independent review; production recovery grace 9000s covers meeting 18's bounded request count; general default-900s risk disclosed.
-T6 [S2-S3] inline; blocked (awaiting local isolated database runner); commit: pending — Docker Desktop daemon unavailable; audit DB tests cannot run on host and production DB is excluded.
-T4 [S1-S3] inline + independent verify; in_progress; commit: pending — Check stage behavior, regressions, failure preservation, and diff; record unavailable proof.
-T5 [S3] inline; pending; commit: pending — Integrate isolated commits, publish patch release, deploy to ACT-TWC-11, and verify without reprocessing meeting 18.
+T2 [S2-S3] inline; done; commit: 18e67e7 — Public service RED tests show both long-transcript methods submit a single oversized request; short input remains one request.
+T3 [S2-S3] inline; done; commit: 18e67e7 — GREEN and independent review; production recovery grace 9000s covers meeting 18's bounded request count; general default-900s risk disclosed.
+T6 [S2-S3] inline; dropped — User accepted partial proof instead of waiting for an isolated DB runner; 71 audit setup errors remain disclosed.
+T4 [S1-S3] inline + independent verify; done with user-accepted DB proof gap; commit: 18e67e7 — 21 non-DB tests passed, differential and independent verifier passed; 71 audit setup errors explicitly accepted.
+T5 [S3] inline; in_progress; commit: pending — Integrate isolated commits, publish patch release, deploy to ACT-TWC-11, and verify without reprocessing meeting 18.
 
 ## Log
 L1. C:\Users\DANIEL~1.RON\AppData\Local\Temp\orca-paste-1793146701324-8c78b8a3-dc7a-4d0e-804b-18215324c353.png vea, falló
@@ -26,3 +26,5 @@ L7. Independent gentle-ai-verify approved S1/S2, S3 implementation (delivery pen
 L8. Broad local pytest suite: 21 passed, 71 setup errors in `test_processing_audit.py` because local DATABASE_URL host `db` does not resolve outside Docker; not a behavior failure. Local Docker Desktop Linux daemon is unavailable; no isolated DB runner. Do not use production DB to satisfy this test. T6 blocked pending an external isolated DB runner.
 L9. Read-only production config check: ACT-TWC-11 worker `MEETING_RECOVERY_GRACE_SECONDS=9000` (general default 900). At 26,191 transcript bytes with ≥2048-byte nonoverlapping window progress, at most ~13 windows × 120s <9000s for the reported meeting 18; the default-900s risk for much longer meetings on other environments remains an advisory. Diff currently ~136 insertions/43 deletions code, 179 new test lines, 11 docs lines, within one reviewable behavior slice. No production processing or writes.
 L10. Differential against `git show HEAD:backend/app/services/meeting_intelligence.py`: short public highlight extraction and all five structured meeting types retain identical outputs, system/user messages, model, response format and temperature. No new long-input production provider request was run; a bounded request is not a guarantee against gateway latency. The 71 database-backed audit checks remain unavailable locally.
+L11. Work-unit commit 18e67e704e536a743b653a6dd835dde2089f1a3b includes only `meeting_intelligence.py`, its new public service tests, `docs/full-cloud-deployment.md`, and this feature task document; 397 authored changed lines, no unrelated local changes included. Native gentle_review assess (even committedOnly) returned unassessable because of unrelated untracked files, while its risk plan requires the already-completed independent verifier. No production retry has been authorized.
+L12. User selected: Publicar y desplegar con evidencia parcial. Accepted 71 audit setup errors due to unavailable local DB and the unproven real-provider per-window latency, explicitly without resuming meeting 18. T6 dropped, T4 accepted with disclosed gap, T5 authorized for integration/release/deployment; production DB will never be used to run mutation-prone tests.
