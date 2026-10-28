@@ -106,6 +106,29 @@ transcript-only summary calls). The provider still controls its own context and
 output ceilings, and concise bullets are requested by the prompt, not
 guaranteed.
 
+## Summary streaming transport
+
+The OpenAI-compatible adapter exposes `complete_summary()` as a separate standard
+Chat Completions SSE transport; its existing bounded `complete()` path stays unchanged:
+- Exactly one HTTP request per summary call (`stream=true`, the same model,
+  messages and temperature as before). There is no empty-truncation retry at a
+  larger token budget and no provider fallback or SDK retry.
+- No `max_tokens`/`max_completion_tokens` cap is sent on summary calls, so the
+  provider's own output ceiling applies; Zabt keeps the bounded default budget
+  for titles, chat, highlights, and structured extraction.
+- The stream is consumed as text deltas only; hidden reasoning deltas are
+  ignored. A `length`/`max_tokens`, `content_filter`, or refusal result, an
+  interrupted stream with no terminal `finish_reason` fails with a safe,
+  credential-free provider error. A completed blank stream returns empty text
+  for the summary service to reject before saving.
+- Summary stream reads may idle up to `3600` seconds between chunks (the
+  one-hour allowance), while connect keeps the bounded `120`-second default;
+  this per-operation timeout is not a total wall-clock deadline for the whole
+  summary. The allowance applies only to summary calls. The completion client
+  for all other requests keeps its per-request `120`-second timeout; bounding
+  requests does not guarantee that an unavailable or overloaded provider will
+  respond.
+
 ## Upload confirmation
 
 External S3-compatible storage has no local object-storage webhook wired into this Compose file;

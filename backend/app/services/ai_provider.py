@@ -26,15 +26,20 @@ from app.services.ai_provider_configuration import (
 from app.services.integration import integration_service
 
 MAX_OUTPUT_TOKENS = 4096
-# Summaries run on reasoning-capable models that spend completion tokens before
-# emitting any text. Measured provider behaviour: 8 192 tokens truncated to an
-# empty response and 16 384 produced content for a short prompt, while a long
-# meeting window still exhausted 16 384. Summaries therefore start at 16 384 and
-# a truncated call retries once at the 32 768 ceiling the gateway accepts.
+# Summary requests ride the standard Chat Completions SSE streaming transport
+# (`complete_summary`) and send no Zabt-imposed output cap; the provider's own
+# output ceiling applies. This budget remains the bounded allowance for the
+# shared non-streaming `complete` request used by titles, chat, structured
+# extraction, and any summary provider without a streaming capability.
 SUMMARY_OUTPUT_TOKENS = 16384
 MAX_OUTPUT_TOKENS_CEILING = 32768
 _TRUNCATION_FINISH_REASONS = frozenset({"length", "max_tokens"})
 PROVIDER_TIMEOUT_SECONDS = 120.0
+# Summary-only per-operation read allowance. Reasoning models can idle between
+# streamed text deltas, so summary stream reads may wait up to one hour while
+# connect keeps the bounded provider default. A scalar timeout is not a total
+# wall-clock deadline for the whole summary.
+SUMMARY_PROVIDER_TIMEOUT_SECONDS = 3600.0
 MAX_PROVIDER_RETRIES = 0
 CompletionPurpose = Literal["summary", "chat"]
 CompletionMessage = Mapping[str, str]
@@ -102,6 +107,22 @@ _SAFE_INTERNAL_ERROR_MESSAGES = {
         "The AI provider ran out of output tokens before producing any text. "
         "Retry, or reduce the meeting evidence sent to the model."
     ),
+    "summary stream ended before the provider finished": (
+        "The AI provider connection ended before the summary finished. No summary "
+        "was saved; retry the meeting summary."
+    ),
+    "summary output reached the provider token limit": (
+        "The AI provider stopped the summary at its output token limit before the "
+        "notes were complete. Retry the meeting summary."
+    ),
+    "summary generation was refused by the provider": (
+        "The AI provider refused to generate the summary content. Check provider "
+        "content policies before retrying."
+    ),
+    "summary stream ended without completed content": (
+        "The AI provider ended the summary without completed content. Check provider "
+        "logs before retrying."
+    ),
 }
 
 
@@ -116,6 +137,30 @@ def _completion_content_and_finish(response: Any) -> tuple[str, str | None]:
     content = getattr(getattr(choice, "message", None), "content", None)
     finish_reason = getattr(choice, "finish_reason", None)
     return str(content or ""), finish_reason if isinstance(finish_reason, str) else None
+
+
+def _stream_summary_chunk(chunk: Any) -> tuple[str, str | None, bool]:
+    """Consume one streamed chunk's text delta, terminal reason, and refusal.
+
+    Hidden reasoning deltas (``content`` is not a string) are ignored; trailing
+    usage chunks with empty ``choices`` contribute nothing.
+    """
+    content = ""
+    finish_reason: str | None = None
+    refused = False
+    for choice in getattr(chunk, "choices", None) or ():
+        if getattr(choice, "index", 0) not in (None, 0):
+            continue
+        delta = getattr(choice, "delta", None)
+        piece = getattr(delta, "content", None)
+        if isinstance(piece, str):
+            content += piece
+        if getattr(delta, "refusal", None):
+            refused = True
+        reason = getattr(choice, "finish_reason", None)
+        if isinstance(reason, str):
+            finish_reason = reason
+    return content, finish_reason, refused
 
 
 def _was_truncated(finish_reason: str | None) -> bool:
@@ -436,6 +481,118 @@ class OpenAICompatibleCompletionClient:
                 configured=self.configured,
                 diagnostics=_provider_error_diagnostics(exc),
             ) from None
+
+    def complete_summary(
+        self,
+        messages: Sequence[CompletionMessage],
+        *,
+        temperature: float,
+        correlation_id: str | None = None,
+    ) -> str:
+        """Summarize with the standard Chat Completions streaming transport.
+
+        Summary-only behavior: exactly one HTTP request per call (no truncation
+        retry, no provider fallback), ``stream=True`` with no Zabt-imposed
+        ``max_tokens``/``max_completion_tokens`` cap so the provider ceiling
+        applies, and a summary-only one-hour per-read allowance while connect
+        keeps the bounded default. The stream is consumed as text deltas only;
+        a refusal delta, a ``length``/``max_tokens``/``content_filter`` terminal
+        reason, or an interrupted stream with no terminal reason fails with a
+        safe ``AIProviderError``. Blank content with a terminal ``stop`` is
+        returned as an empty string; the summary dispatch layer turns it into
+        the safe empty-summary failure so no truncated or missing result can be
+        saved. The stream is closed on success and on failure. Non-summary
+        callers and callers without a streaming capability keep the shared
+        contract in ``complete``.
+        """
+        if self._endpoint_url:
+            try:
+                validate_runtime_provider_endpoint(
+                    self._endpoint_url,
+                    provider=self.provider,
+                )
+            except ValueError:
+                raise AIProviderError(
+                    "configured AI provider is unavailable",
+                    configured=self.configured,
+                ) from None
+
+        request: dict[str, Any] = {
+            "model": self.model,
+            "messages": list(messages),
+            "temperature": temperature,
+            "stream": True,
+            "timeout": httpx.Timeout(
+                SUMMARY_PROVIDER_TIMEOUT_SECONDS,
+                connect=PROVIDER_TIMEOUT_SECONDS,
+            ),
+        }
+        if correlation_id is not None and _SAFE_CORRELATION_ID.fullmatch(correlation_id):
+            request["extra_headers"] = {"x-litellm-trace-id": correlation_id}
+
+        try:
+            stream = self._client.chat.completions.create(**request)
+        except Exception as exc:
+            raise AIProviderError(
+                f"{self.provider.value} summary provider request failed",
+                configured=self.configured,
+                diagnostics=_provider_error_diagnostics(exc),
+            ) from None
+
+        content_parts: list[str] = []
+        finish_reason: str | None = None
+        refused = False
+        try:
+            for chunk in stream:
+                chunk_content, chunk_finish, chunk_refused = _stream_summary_chunk(chunk)
+                if chunk_content:
+                    content_parts.append(chunk_content)
+                if chunk_finish is not None:
+                    finish_reason = chunk_finish
+                refused = refused or chunk_refused
+        except AIProviderError:
+            raise
+        except Exception as exc:
+            raise AIProviderError(
+                f"{self.provider.value} summary provider request failed",
+                configured=self.configured,
+                diagnostics=_provider_error_diagnostics(exc),
+            ) from None
+        finally:
+            close = getattr(stream, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
+
+        if finish_reason is None:
+            raise AIProviderError(
+                "summary stream ended before the provider finished",
+                configured=self.configured,
+            )
+        if refused:
+            raise AIProviderError(
+                "summary generation was refused by the provider",
+                configured=self.configured,
+            )
+        if finish_reason in _TRUNCATION_FINISH_REASONS:
+            raise AIProviderError(
+                "summary output reached the provider token limit",
+                configured=self.configured,
+            )
+        if finish_reason == "content_filter":
+            raise AIProviderError(
+                "summary generation was refused by the provider",
+                configured=self.configured,
+            )
+        if finish_reason != "stop":
+            raise AIProviderError(
+                "summary stream ended without completed content",
+                configured=self.configured,
+            )
+        # Blank content stays a caller-level failure (`empty summary response`).
+        return "".join(content_parts)
 
 
 class AnthropicCompletionClient:
