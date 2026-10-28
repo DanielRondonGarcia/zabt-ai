@@ -350,12 +350,26 @@ def _summary_completion(
 ) -> str:
     started_at = perf_counter()
     try:
-        result = client.complete(
-            messages,
-            temperature=temperature,
-            max_tokens=SUMMARY_OUTPUT_TOKENS,
-            correlation_id=correlation_id,
-        )
+        summary_stream = getattr(client, "complete_summary", None)
+        if callable(summary_stream):
+            # Summary-only standard OpenAI streaming transport: one HTTP request
+            # per call, no Zabt-imposed output cap, provider-ceiling output and
+            # a one-hour per-read allowance. The sibling title/chat/structured
+            # stages call `complete` with their own bounded budgets instead.
+            result = summary_stream(
+                messages,
+                temperature=temperature,
+                correlation_id=correlation_id,
+            )
+        else:
+            # Anthropic and fake/non-streaming CompletionClients keep the
+            # shared bounded request and truncation retry.
+            result = client.complete(
+                messages,
+                temperature=temperature,
+                max_tokens=SUMMARY_OUTPUT_TOKENS,
+                correlation_id=correlation_id,
+            )
     except AIProviderError as exc:
         details = exc.diagnostics
         provider = getattr(getattr(client, "provider", None), "value", None)

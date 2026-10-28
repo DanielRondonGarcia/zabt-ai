@@ -9,11 +9,54 @@ from app.services import ai_agent
 from app.services.multimodal_context import ContextBuildResult, ContextChunk, ContextItem
 
 
+def _ns_chunk(content: str | None, finish_reason: str | None = None) -> SimpleNamespace:
+    """A synthetic ChatCompletionChunk-shaped object for streamed summaries."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                index=0,
+                delta=SimpleNamespace(content=content),
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+
+
+def _summary_stream(content: str = "Generated notes"):
+    """One synthetic SSE-shaped stream matching the summary dispatch protocol."""
+    return iter([_ns_chunk(None), _ns_chunk(content), _ns_chunk(None, "stop")])
+
+
+def _completion_side_effect(
+    *,
+    stream_content: str = "Generated notes",
+    fail_on_call: int | None = None,
+    fail_every_call: bool = False,
+    error_message: str = "boom",
+):
+    """A create side effect speaking both mocked transports.
+
+    Summary calls request `stream=True` and receive the synthetic SSE stream;
+    non-summary calls (titles) keep the previous non-stream completion object.
+    """
+    call_count = [0]
+
+    def side_effect(*args, **kwargs):
+        call_count[0] += 1
+        if fail_every_call or (fail_on_call is not None and call_count[0] == fail_on_call):
+            raise ai_agent.AIProviderError(error_message)
+        if kwargs.get("stream"):
+            return _summary_stream(stream_content)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=stream_content))]
+        )
+
+    return side_effect
+
+
 def _mock_client(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
     client = MagicMock()
-    client.chat.completions.create.return_value = SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content="Generated notes"))]
-    )
+    client.chat.completions.create.side_effect = _completion_side_effect()
     monkeypatch.setattr(ai_agent, "_client", client)
     return client
 
@@ -87,17 +130,10 @@ def _progress_recorder() -> tuple[object, list[dict]]:
 def _client_with_failing_call(index: int, error_message: str = "boom"):
     """Build a mock client whose *index*-th completion call raises AIProviderError."""
     client = MagicMock()
-    call_count = [0]
-
-    def _side_effect(*args, **kwargs):
-        call_count[0] += 1
-        if call_count[0] == index:
-            raise ai_agent.AIProviderError(error_message)
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content="ok"))]
-        )
-
-    client.chat.completions.create.side_effect = _side_effect
+    client.chat.completions.create.side_effect = _completion_side_effect(
+        fail_on_call=index,
+        error_message=error_message,
+    )
     return client
 
 
@@ -247,11 +283,9 @@ def test_failed_partial_window_keeps_later_windows_and_synthesis_running(monkeyp
 def test_all_windows_failing_raises_without_synthesis_progress(monkeypatch):
     # Every window fails: the summary fails and no synthesis event is reported.
     client = MagicMock()
-
-    def _always_fail(*args, **kwargs):
-        raise ai_agent.AIProviderError("boom")
-
-    client.chat.completions.create.side_effect = _always_fail
+    client.chat.completions.create.side_effect = _completion_side_effect(
+        fail_every_call=True
+    )
     monkeypatch.setattr(ai_agent, "_client", client)
     record, events = _progress_recorder()
 

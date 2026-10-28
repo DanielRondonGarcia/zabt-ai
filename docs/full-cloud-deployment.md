@@ -108,8 +108,10 @@ guaranteed.
 
 ## Summary streaming transport
 
-The OpenAI-compatible adapter exposes `complete_summary()` as a separate standard
-Chat Completions SSE transport; its existing bounded `complete()` path stays unchanged:
+The summary service uses the OpenAI-compatible adapter's `complete_summary()`
+capability when available. Providers without it retain their existing completion
+contract. Title inference and chat keep using bounded `complete()` even when they
+share the same client. The summary transport uses standard Chat Completions SSE:
 - Exactly one HTTP request per summary call (`stream=true`, the same model,
   messages and temperature as before). There is no empty-truncation retry at a
   larger token budget and no provider fallback or SDK retry.

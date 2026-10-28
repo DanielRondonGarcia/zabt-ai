@@ -10,7 +10,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app.services.ai_agent import summarize_transcript
+from app.services.ai_agent import infer_title, summarize_transcript
 from app.services.multimodal_context import ContextBuildResult, ContextChunk, ContextItem
 from app.services.ai_provider import (
     AIProviderError,
@@ -20,22 +20,22 @@ from app.services.ai_provider import (
 )
 
 
-class FakeCompletions:
-    def __init__(self, outcome):
-        self.outcome = outcome
-
-    def create(self, **request):
-        if isinstance(self.outcome, BaseException):
-            raise self.outcome
-        return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=self.outcome))]
-        )
-
 
 def _completion_client(outcome):
-    sdk_client = SimpleNamespace(
-        chat=SimpleNamespace(completions=FakeCompletions(outcome))
-    )
+    """A summary-path client: exceptions raise from create, strings stream."""
+    if isinstance(outcome, str):
+        # Strings stream one content delta followed by a stop terminal.
+        outcome = (outcome, "stop")
+
+    class _Completions:
+        def create(self, **request):
+            if isinstance(outcome, BaseException):
+                raise outcome
+            content, finish_reason = outcome
+            chunks = [_chunk_ns(content)] if content else []
+            return StreamingSequencedStream(chunks + [_chunk_ns(None, finish_reason)])
+
+    sdk_client = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
     return OpenAICompatibleCompletionClient(sdk_client, model="oc/glm-5.3-flash")
 
 
@@ -59,8 +59,73 @@ class SequencedCompletions:
         )
 
 
+def _chunk_ns(content, finish_reason=None):
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                index=0,
+                delta=SimpleNamespace(content=content),
+                finish_reason=finish_reason,
+            )
+        ]
+    )
+
+
+class StreamingSequencedStream:
+    """One synthetic stream per summary call; close is observable for cleanup."""
+
+    def __init__(self, chunks):
+        self._chunks = list(chunks)
+        self.closed = False
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if not self._chunks:
+            raise StopIteration
+        event = self._chunks.pop(0)
+        if isinstance(event, BaseException):
+            raise event
+        return event
+
+    def close(self):
+        self.closed = True
+
+
+class StreamingSequencedCompletions:
+    """Return one scripted (content, finish_reason) stream per provider call."""
+
+    def __init__(self, outcomes):
+        self.outcomes = list(outcomes)
+        self.streams: list[StreamingSequencedStream] = []
+        self.requests: list[dict] = []
+
+    def create(self, **request):
+        self.requests.append(dict(request))
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        content, finish_reason = outcome
+        chunks = [_chunk_ns(content)] if content else []
+        stream = StreamingSequencedStream(chunks + [_chunk_ns(None, finish_reason)])
+        self.streams.append(stream)
+        return stream
+
+
 def _sequenced_client(outcomes):
+    """Sequenced non-streaming outcomes for the generic `complete` adapter."""
     completions = SequencedCompletions(outcomes)
+    sdk_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    return (
+        OpenAICompatibleCompletionClient(sdk_client, model="oc/glm-5.3-flash"),
+        completions,
+    )
+
+
+def _streaming_sequenced_client(outcomes):
+    """Sequenced summary streams for the standard OpenAI summary transport."""
+    completions = StreamingSequencedCompletions(outcomes)
     sdk_client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
     return (
         OpenAICompatibleCompletionClient(sdk_client, model="oc/glm-5.3-flash"),
@@ -156,11 +221,14 @@ def test_summary_truncation_retry_reaches_the_verified_ceiling():
     assert completions.requests[1]["max_tokens"] > SUMMARY_OUTPUT_TOKENS
 
 
+# Summary runs on the standard streaming transport: one HTTP request per call
+# and a stream that must end with a terminal finish_reason. A window truncated
+# by the provider's own output limit fails the window after that one request;
+# there is no empty-truncation retry for the summary transport.
 def test_one_truncated_window_keeps_the_summary_and_discloses_the_gap():
-    client, completions = _sequenced_client(
+    client, completions = _streaming_sequenced_client(
         [
-            ("", "length"),
-            ("", "length"),  # window 1 fails after its bounded retry
+            ("", "length"),  # window 1 fails after its single streaming request
             ("Window two notes", "stop"),
             ("Final notes", "stop"),
         ]
@@ -171,6 +239,7 @@ def test_one_truncated_window_keeps_the_summary_and_discloses_the_gap():
     )
 
     assert result == "Final notes"
+    assert len(completions.requests) == 3
     synthesis_prompt = completions.requests[-1]["messages"][1]["content"]
     assert "MISSING TIME WINDOWS" in synthesis_prompt
     assert "window(s) 1" in synthesis_prompt
@@ -179,8 +248,8 @@ def test_one_truncated_window_keeps_the_summary_and_discloses_the_gap():
 
 
 def test_every_truncated_window_fails_instead_of_returning_an_empty_summary():
-    client, _completions = _sequenced_client(
-        [("", "length"), ("", "length"), ("", "length"), ("", "length")]
+    client, completions = _streaming_sequenced_client(
+        [("", "length"), ("", "length")]
     )
 
     with pytest.raises(AIProviderError):
@@ -188,13 +257,21 @@ def test_every_truncated_window_fails_instead_of_returning_an_empty_summary():
             "PROMPT_SECRET", context=_context(chunk_count=2), completion_client=client
         )
 
+    # No 16k-to-32k truncation retry: one streaming request per window.
+    assert len(completions.requests) == 2
+    assert all(request["stream"] is True for request in completions.requests)
+    assert all("max_tokens" not in request for request in completions.requests)
 
-def test_summary_requests_the_dedicated_output_budget():
-    client, completions = _sequenced_client([("Safe summary", "stop")])
+
+def test_summary_stream_requests_no_zabt_token_cap_with_one_request_per_call():
+    client, completions = _streaming_sequenced_client([("Safe summary", "stop")])
 
     summarize_transcript("PROMPT_SECRET", completion_client=client)
 
-    assert completions.requests[0]["max_tokens"] == SUMMARY_OUTPUT_TOKENS
+    request = completions.requests[0]
+    assert request["stream"] is True
+    assert "max_tokens" not in request
+    assert len(completions.requests) == 1
 
 
 def test_completion_client_sends_litellm_trace_id_only_when_requested():
@@ -220,7 +297,7 @@ def test_completion_client_sends_litellm_trace_id_only_when_requested():
 
 
 def test_summary_progress_correlation_ids_match_each_provider_call():
-    client, completions = _sequenced_client(
+    client, completions = _streaming_sequenced_client(
         [("Window one", "stop"), ("Window two", "stop"), ("Final notes", "stop")]
     )
     progress = []
@@ -242,6 +319,19 @@ def test_summary_progress_correlation_ids_match_each_provider_call():
         assert terminal["correlation_id"] == trace_id
         assert request["extra_headers"]["x-litellm-trace-id"] == trace_id
     assert all("PROMPT_SECRET" not in repr(event) for event in progress)
+
+
+def test_sibling_infer_title_keeps_the_bounded_non_streaming_request():
+    """The same adapter used by the title stage keeps its 50-token request."""
+    client, completions = _sequenced_client([("Solid Meeting Focus", None)])
+
+    title = infer_title("PROMPT_SECRET_LONG_SUMMARY", completion_client=client)
+
+    assert title == "Solid Meeting Focus"
+    request = completions.requests[0]
+    assert request["max_tokens"] == 50
+    assert "stream" not in request
+    assert len(completions.requests) == 1
 
 
 def test_network_failure_logs_safe_summary_diagnostics(caplog):
