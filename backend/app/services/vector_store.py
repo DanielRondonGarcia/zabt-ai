@@ -32,6 +32,15 @@ class EmbeddingPoint:
     model: str
 
 
+# Qdrant rejects JSON upsert payloads larger than 32 MiB (33554432 bytes), which
+# previously failed whole reindex stages with a single oversized request (e.g. a
+# 47 MB JSON payload). Batching is deterministic: a fixed point count (never a
+# size estimate) with order preserved and the last batch smaller. The count is
+# documented, not configurable, and stays well under the 32 MiB limit for every
+# supported embedding dimension and payload size.
+QDRANT_UPSERT_BATCH_POINTS = 128
+
+
 class QdrantVectorStoreClient:
     """Thin wrapper around Qdrant collection management and filtered operations."""
 
@@ -99,7 +108,15 @@ class QdrantVectorStoreClient:
         self._collection_ready = True
 
     def upsert_points(self, points: list[EmbeddingPoint]) -> None:
-        """Upsert embedding points into the active collection."""
+        """Upsert embedding points into the active collection in fixed batches.
+
+        Points are sent as deterministic batches of ``QDRANT_UPSERT_BATCH_POINTS``
+        with one ``client.upsert(wait=True)`` per batch, in order, so stage
+        completion is still only reported after Qdrant has accepted every point.
+        A failure inside any batch propagates immediately and the remaining
+        batches are not sent. Earlier accepted batches stay: a retried reindex
+        simply re-upserts the full point set, which is idempotent by point id.
+        """
         if not points:
             return
         self.ensure_collection()
@@ -125,12 +142,13 @@ class QdrantVectorStoreClient:
                 )
             )
         # Do not let the processing pipeline report completion before Qdrant has
-        # applied every point in the batch.
-        self.client.upsert(
-            collection_name=self.active_collection,
-            points=qdrant_points,
-            wait=True,
-        )
+        # applied every point: each batch upserts with wait=True, in order.
+        for start in range(0, len(qdrant_points), QDRANT_UPSERT_BATCH_POINTS):
+            self.client.upsert(
+                collection_name=self.active_collection,
+                points=qdrant_points[start : start + QDRANT_UPSERT_BATCH_POINTS],
+                wait=True,
+            )
 
     def delete_by_filter(
         self,

@@ -2577,6 +2577,20 @@ celery_app.conf.timezone = "UTC"
 _EMBEDDING_RETRY_EXCEPTIONS = (RuntimeError, TimeoutError, ConnectionError)
 
 
+def _embedding_failure_is_final(task: Any, exc: BaseException) -> bool:
+    """Return True when a raised stage exception will not be autorempted.
+
+    ``stage_embedding`` autoretries only ``_EMBEDDING_RETRY_EXCEPTIONS`` up to
+    ``max_retries``; run-error recording must not mark the run failed before
+    Celery has had its retry chances. Any other exception type fails the task
+    immediately, even on the first attempt.
+    """
+    if not isinstance(exc, _EMBEDDING_RETRY_EXCEPTIONS):
+        return True
+    retries = int(getattr(task.request, "retries", 0) or 0)
+    return retries >= int(task.max_retries or 0)
+
+
 def _capture_embedding_event(owner_id: int | None, event_name: str, properties: dict) -> None:
     """Best-effort operational telemetry without indexed text or credentials."""
     if owner_id is None:
@@ -2829,7 +2843,7 @@ def stage_embedding(meeting_id: int) -> int:
             _requeue_stale_meeting_content(meeting_id, meeting, stale_content)
     except Ignore:
         raise
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "stage_embedding failed meeting_id=%s owner_id=%s group_id=%s",
             meeting_id,
@@ -2841,6 +2855,15 @@ def stage_embedding(meeting_id: int) -> int:
             "embedding_index_failed",
             {"meeting_id": meeting_id, "group_id": meeting.group_id},
         )
+        # Persist a bounded, sanitized failure summary on the run row (via the
+        # existing run_failed/sanitize_message pattern) whenever this exception
+        # will not be retried, so a failed embedding stage is never left
+        # without final_error even when the Celery error callback cannot update
+        # the run. Retryable failures on non-final attempts are left alone.
+        if _embedding_failure_is_final(stage_embedding, exc):
+            meeting_processing_audit.run_failed(
+                run_id, attempt_id=attempt_id, error=exc
+            )
         raise
 
     logger.info("stage_embedding complete meeting_id=%s points=%s", meeting_id, len(points))

@@ -58,7 +58,7 @@ printing their values:
 | Object storage | `STORAGE_PROVIDER=s3`, `S3_ENDPOINT_URL`, `S3_PUBLIC_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`, `S3_BUCKET_NAME` | The public URL must be reachable by browsers for presigned upload/download operations. |
 | Actsis transcription | `ACTSIS_API_KEY`, `TRANSCRIPTION_BASE_URL` | `ACTSIS_CA_BUNDLE` is optional; Compose supplies the backend image's default CA path and accepts an override. `TRANSCRIPTION_PROVIDER` is fixed to `openai-file`; a dedicated `TRANSCRIPTION_API_KEY` may override the Actsis key. |
 | Actsis embeddings | `EMBEDDING_BASE_URL`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSION` | `EMBEDDING_PROVIDER` is fixed to `openai`; a dedicated `EMBEDDING_API_KEY` may override the Actsis key. |
-| Qdrant | `QDRANT_URL`, `QDRANT_API_KEY` | The backend passes the API key to the Qdrant client; keep it in secret storage. |
+| Qdrant | `QDRANT_URL`, `QDRANT_API_KEY` | The backend passes the API key to the Qdrant client; keep it in secret storage. Embedding upserts are sent in deterministic batches of 128 points (`QDRANT_UPSERT_BATCH_POINTS` in `app/services/vector_store.py`) so each request stays well under Qdrant's 32 MiB JSON limit; a failed reindex only needs its normal retry, which re-upserts idempotently by point id. |
 | OpenAI summary/chat | `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `AI_CHAT_BASE_URL` | Summary and structured intelligence use `OPENAI_*`; retrieval chat can use an optional dedicated `AI_CHAT_API_KEY`. |
 | OpenAI visual inference | `VISION_OPENAI_API_KEY`, `VISION_OPENAI_BASE_URL`, `VISION_ALLOWED_HOSTS` | The visual key is required separately and is never taken from `OPENAI_API_KEY`. |
 
