@@ -119,6 +119,31 @@ transcript-only summary calls). The provider still controls its own context and
 output ceilings, and concise bullets are requested by the prompt, not
 guaranteed.
 
+### Hierarchical synthesis
+
+When a meeting yields more completed partial windows than the documented group
+size (`SYNTHESIS_GROUP_SIZE = 4` in `app/services/ai_agent.py`), the partials
+are first merged deterministically, in window order, into fixed-size groups of
+at most 4 (the last group may be smaller). Each group runs one bounded
+intermediate synthesis call (progress phase `group_synthesis`, block
+`group_number/group_count`) before the final synthesis (`summary_synthesis`)
+merges only the ordered intermediate notes, so each provider call's output
+stays within the provider's own ceiling instead of one synthesis spanning every
+window. Only the final output is persisted; intermediate notes are ephemeral.
+A group call fails with the same omission semantics as a partial window: the
+failure is disclosed in the final synthesis warnings (`MISSING SYNTHESIS
+GROUPS`), the missing-window disclosure rides the first group and the final
+synthesis exactly once, and a run where no group completes fails closed. Style,
+template, and date selection, evidence rules, and the output-language
+directive keep the partial-versus-synthesis split the per-window calls already
+had. This costs one extra call per group compared with the single-synthesis
+flow; partial counts within the group size keep the unchanged single-synthesis
+path. Hierarchical synthesis does not make the summary faster or guarantee a
+wall-clock duration; it only bounds each provider call's output so a
+provider-side token ceiling cannot truncate one huge synthesis. A provider may
+still cut any group or the final synthesis at its ceiling, and that call fails
+closed with the same retriable provider error.
+
 ## Summary streaming transport
 
 The summary service uses the OpenAI-compatible adapter's `complete_summary()`

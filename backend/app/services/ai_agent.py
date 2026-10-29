@@ -158,6 +158,15 @@ def _build_system_prompt(style_examples: list[str] | None = None) -> str:
     return prompt
 
 
+# Hierarchical synthesis group size: once the completed partial windows exceed
+# this size, they are merged deterministically, in window order, into fixed-size
+# groups (last group may be smaller); each group runs one bounded intermediate
+# synthesis call and the final synthesis merges only the ordered intermediates,
+# keeping every per-call output within the provider's own ceiling.
+# Documented in docs/full-cloud-deployment.md.
+SYNTHESIS_GROUP_SIZE = 4
+
+
 PARTIAL_EVIDENCE_SYSTEM_PROMPT = """\
 You are Zabt, an evidence extractor working on one bounded time window of a larger meeting. A later step merges these digests into the final meeting notes.
 
@@ -188,6 +197,45 @@ def _build_partial_system_prompt(
     shared evidence rules, the upload date, and the requested output language.
     """
     prompt = PARTIAL_EVIDENCE_SYSTEM_PROMPT + "\n\n" + MULTIMODAL_EVIDENCE_RULES
+    if upload_date:
+        prompt += (
+            "\n\n## Date context\n"
+            "If the meeting date is not supported by the evidence, use the upload date "
+            f"{upload_date} as the meeting date.\n"
+        )
+    return _append_output_language_instruction(prompt, output_language)
+
+
+GROUP_SYNTHESIS_SYSTEM_PROMPT = """\
+You are Zabt, an evidence synthesizer working on one bounded group of window digests from a larger meeting. A later step merges these intermediate notes into the final meeting notes.
+
+## Your task
+
+Merge the window digests of this group into one concise, source-grounded intermediate note.
+
+## Rules
+- Preserve the decisions, commitments, owners, deadlines, open questions, and key facts of every window in the group as short bullets.
+- Attach the original source reference (`[source=... time=...]`) of each cited evidence item to the bullet that cites it.
+- Preserve speaker names exactly as they appear.
+- Do not produce any final report headings or document title; bullets only.
+- Do not repeat the window digests verbatim; condense them.
+- If a window's digest is empty or unintelligible, write one honest bullet saying so.
+"""
+
+
+def _build_group_synthesis_prompt(
+    *,
+    upload_date: str | None = None,
+    output_language: str | None = None,
+) -> str:
+    """Intermediate-synthesis prompt for one bounded group of partial windows.
+
+    Group calls merge, they do not format: like the per-window partial calls
+    they carry the evidence rules, the upload date, and the requested output
+    language, but never the final report prompt, style examples, or template,
+    which the final synthesis call applies once.
+    """
+    prompt = GROUP_SYNTHESIS_SYSTEM_PROMPT + "\n\n" + MULTIMODAL_EVIDENCE_RULES
     if upload_date:
         prompt += (
             "\n\n## Date context\n"
@@ -587,16 +635,123 @@ def summarize_context(
 
     if not partials:
         raise AIProviderError("empty summary response")
+
+    missing_windows_text = ""
     if omitted_windows:
-        warning_text += (
+        missing_windows_text = (
             "\n\nMISSING TIME WINDOWS: bounded evidence for window(s) "
             + ", ".join(str(window) for window in omitted_windows)
             + " could not be summarized. State that this part of the meeting is "
             "not covered instead of inventing it.\n"
         )
 
-    partial_context = "\n\n".join(partials)
-    synthesis_index = block_total + 1
+    # Hierarchical synthesis: once the completed partial windows exceed the
+    # documented group size, they are merged deterministically, in window
+    # order, into fixed-size groups and each group gets one bounded
+    # intermediate synthesis call; the final synthesis then merges only the
+    # ordered intermediate notes, so every per-call output stays within the
+    # provider's own ceiling. Partial counts at or below the group size keep
+    # the single final synthesis flow unchanged.
+    failed_groups: list[int] = []
+    if len(partials) > SYNTHESIS_GROUP_SIZE:
+        group_count = (len(partials) + SYNTHESIS_GROUP_SIZE - 1) // SYNTHESIS_GROUP_SIZE
+        intermediates: list[str] = []
+        for group_index in range(group_count):
+            group_number = group_index + 1
+            group_partials = partials[
+                group_index * SYNTHESIS_GROUP_SIZE: (group_index + 1) * SYNTHESIS_GROUP_SIZE
+            ]
+            started_at = perf_counter()
+            correlation_id = _new_correlation_id()
+            _emit_progress(
+                progress_callback,
+                phase="group_synthesis",
+                block_index=group_number,
+                block_total=group_count,
+                outcome="started",
+                correlation_id=correlation_id,
+            )
+            try:
+                intermediate = _completion_text(
+                    _build_group_synthesis_prompt(
+                        upload_date=upload_date,
+                        output_language=output_language,
+                    ),
+                    "Merge these bounded window digests into one concise intermediate "
+                    "note for a later final synthesis. Keep every source reference "
+                    "needed for later synthesis.\n"
+                    + "\n\n".join(group_partials)
+                    # The missing-window disclosure rides the first group; later
+                    # groups and the final synthesis never duplicate it.
+                    + (missing_windows_text if group_number == 1 else ""),
+                    temperature=0.2,
+                    completion_client=completion_client,
+                    phase="group_synthesis",
+                    correlation_id=correlation_id,
+                )
+            except Exception as exc:
+                _emit_progress(
+                    progress_callback,
+                    phase="group_synthesis",
+                    block_index=group_number,
+                    block_total=group_count,
+                    outcome="failed",
+                    duration_ms=_elapsed_ms(started_at),
+                    error_class=type(exc).__name__,
+                    correlation_id=correlation_id,
+                )
+                if not isinstance(exc, AIProviderError):
+                    raise
+                # One stubborn group loses only its own windows downstream, the
+                # same omission semantics a stubborn window already had.
+                logger.warning(
+                    "summary intermediate group omitted operation=summary stage=stage_summarize "
+                    "group=%s reason=%s",
+                    group_number,
+                    str(exc)[:120],
+                )
+                failed_groups.append(group_number)
+            else:
+                _emit_progress(
+                    progress_callback,
+                    phase="group_synthesis",
+                    block_index=group_number,
+                    block_total=group_count,
+                    outcome="completed",
+                    duration_ms=_elapsed_ms(started_at),
+                    correlation_id=correlation_id,
+                )
+                intermediates.append(f"INTERMEDIATE GROUP {group_number}\n" + intermediate)
+
+        if not intermediates:
+            # No group finished: there is nothing left to synthesize from, so
+            # this fails closed exactly like a run with no surviving partials.
+            raise AIProviderError("empty summary response")
+        if failed_groups:
+            warning_text += (
+                "\n\nMISSING SYNTHESIS GROUPS: intermediate group(s) "
+                + ", ".join(str(group) for group in failed_groups)
+                + " could not be synthesized. State that this part of the meeting is "
+                "not covered instead of inventing it.\n"
+            )
+        partial_context = "\n\n".join(intermediates)
+        synthesis_index = group_count + 1
+        synthesis_intro = (
+            "Synthesize the complete meeting notes from every bounded intermediate "
+            "group summary. Do not omit a group, silently truncate it, or invent "
+            "owners, decisions, deadlines, or visual facts.\n"
+        )
+    else:
+        partial_context = "\n\n".join(partials)
+        synthesis_index = block_total + 1
+        synthesis_intro = (
+            "Synthesize the complete meeting notes from every bounded partial window. "
+            "Do not omit a window, silently truncate it, or invent owners, decisions, "
+            "deadlines, or visual facts.\n"
+        )
+    # Missing-window omissions reach the final synthesis exactly once, whether
+    # the run went through groups or not.
+    warning_text += missing_windows_text
     started_at = perf_counter()
     synthesis_correlation_id = _new_correlation_id()
     _emit_progress(
@@ -612,9 +767,7 @@ def summarize_context(
             system_prompt
             + "\n\nYou are performing the final hierarchical synthesis. "
             "Use only the partial evidence summaries and their source references.",
-            "Synthesize the complete meeting notes from every bounded partial window. "
-            "Do not omit a window, silently truncate it, or invent owners, decisions, "
-            "deadlines, or visual facts.\n"
+            synthesis_intro
             + partial_context
             + warning_text,
             temperature=0.3,
