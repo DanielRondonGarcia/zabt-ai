@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Batched Qdrant upsert contract tests (see odd/tasks/batched-qdrant-upsert.md S1-S3)."""
 
-from types import SimpleNamespace
-
 import pytest
 
 from app.services.embeddings.chunk import point_id_for
