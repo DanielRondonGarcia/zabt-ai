@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
 import math
+import re
 from enum import Enum
 from typing import Optional, List, Sequence
 from pydantic import AliasChoices, BaseModel, Field, ValidationError
@@ -447,15 +448,31 @@ class MeetingIntelligenceService:
                     temperature=0.2,
                     response_format=HighlightsExtraction,
                 )
-            except ValidationError:
-                if timed or len(windows) > 1:
-                    raise  # The timed path and multi-window calls never save a partial extraction.
-                logger.warning(
-                    "extract_highlights: response did not match the structured schema; "
-                    "falling back to empty highlights"
+            except ValidationError as exc:
+                errors = exc.errors()
+                raw = errors[0].get("input") if len(errors) == 1 else None
+                fenced = (
+                    re.fullmatch(r"\s*```json\s*\n(.*?)\n```\s*", raw, re.DOTALL | re.IGNORECASE)
+                    if exc.title == "HighlightsExtraction"
+                    and len(errors) == 1
+                    and errors[0]["type"] == "json_invalid"
+                    and isinstance(raw, str)
+                    else None
                 )
-                return combined
-            parsed = response.choices[0].message.parsed
+                try:
+                    if fenced is None:
+                        raise exc
+                    parsed = HighlightsExtraction.model_validate_json(fenced.group(1))
+                except ValidationError:
+                    if timed or len(windows) > 1:
+                        raise  # Never save a partial timed or multi-window extraction.
+                    logger.warning(
+                        "extract_highlights: response did not match the structured schema; "
+                        "falling back to empty highlights"
+                    )
+                    return combined
+            else:
+                parsed = response.choices[0].message.parsed
             if parsed is None:
                 if timed or len(windows) > 1:
                     raise ValueError("highlight extraction returned no parsed window")
