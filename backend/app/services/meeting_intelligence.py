@@ -451,19 +451,29 @@ class MeetingIntelligenceService:
             except ValidationError as exc:
                 errors = exc.errors()
                 raw = errors[0].get("input") if len(errors) == 1 else None
-                fenced = (
-                    re.fullmatch(r"\s*```json\s*\n(.*?)\n```\s*", raw, re.DOTALL | re.IGNORECASE)
-                    if exc.title == "HighlightsExtraction"
+                candidates = []
+                if (
+                    isinstance(raw, str)
+                    and exc.title == "HighlightsExtraction"
                     and len(errors) == 1
                     and errors[0]["type"] == "json_invalid"
-                    and isinstance(raw, str)
-                    else None
-                )
-                try:
-                    if fenced is None:
-                        raise exc
-                    parsed = HighlightsExtraction.model_validate_json(fenced.group(1))
-                except ValidationError:
+                ):
+                    candidates = [
+                        match.group(1)
+                        for match in re.finditer(
+                            r"```(?:json)?\s*\n(.*?)\n```",
+                            raw,
+                            re.DOTALL | re.IGNORECASE,
+                        )
+                    ]
+                parsed = None
+                for candidate in candidates:
+                    try:
+                        parsed = HighlightsExtraction.model_validate_json(candidate)
+                        break
+                    except ValidationError:
+                        parsed = None
+                if parsed is None:
                     if timed or len(windows) > 1:
                         raise  # Never save a partial timed or multi-window extraction.
                     logger.warning(

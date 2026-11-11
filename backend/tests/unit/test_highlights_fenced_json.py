@@ -28,6 +28,32 @@ def test_fenced_json_is_validated_for_timed_highlights(monkeypatch):
     }
 
 
+def test_fenced_json_inside_prose_is_validated_for_timed_highlights(monkeypatch):
+    raw = "**Análisis de la reunión.**\n\n```json\n{\"chapters\": [], \"action_items\": [], \"key_questions\": []}\n```\n\n*Nota: usa el transcript original.*"
+    monkeypatch.setattr(intelligence, "_client", _client(_invalid_json_response(raw)))
+    monkeypatch.setattr(intelligence, "_timed_evidence_windows", lambda segments: ["timed"])
+    assert intelligence.MeetingIntelligenceService().extract_highlights("", segments=[object()]) == {
+        "chapters": [], "action_items": [], "key_questions": []
+    }
+
+
+def test_prose_without_fenced_json_keeps_prior_behavior(monkeypatch):
+    raw = "**Análisis de la reunión sin JSON.**"
+    monkeypatch.setattr(intelligence, "_client", _client(_invalid_json_response(raw)))
+    monkeypatch.setattr(intelligence, "_timed_evidence_windows", lambda segments: ["timed"])
+    with pytest.raises(ValidationError):
+        intelligence.MeetingIntelligenceService().extract_highlights("", segments=[object()])
+
+
+def test_first_fenced_json_block_is_selected(monkeypatch):
+    raw = '```json\n{"chapters": [], "action_items": [], "key_questions": []}\n```\n```json\n{"chapters": [{"title": "Later"}]}\n```'
+    monkeypatch.setattr(intelligence, "_client", _client(_invalid_json_response(raw)))
+    monkeypatch.setattr(intelligence, "_timed_evidence_windows", lambda segments: ["timed"])
+    assert intelligence.MeetingIntelligenceService().extract_highlights("", segments=[object()]) == {
+        "chapters": [], "action_items": [], "key_questions": []
+    }
+
+
 def test_existing_parsed_response_is_preserved(monkeypatch):
     parsed = intelligence.HighlightsExtraction(chapters=[{"title": "Topic", "timestamp_start": 0}])
     parse = Mock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=parsed))]))
