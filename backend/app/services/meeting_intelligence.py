@@ -519,16 +519,37 @@ class MeetingIntelligenceService:
         )
         outputs: list[dict] = []
         for window in windows:
-            response = _client.beta.chat.completions.parse(
-                model=settings.STRUCTURED_OUTPUT_MODEL or settings.OPENAI_MODEL,
-                messages=[
-                    {"role": "system", "content": prompt},
-                    {"role": "user", "content": window},
-                ],
-                temperature=0.2,
-                response_format=pydantic_model,
-            )
-            parsed = response.choices[0].message.parsed
+            try:
+                response = _client.beta.chat.completions.parse(
+                    model=settings.STRUCTURED_OUTPUT_MODEL or settings.OPENAI_MODEL,
+                    messages=[
+                        {"role": "system", "content": prompt},
+                        {"role": "user", "content": window},
+                    ],
+                    temperature=0.2,
+                    response_format=pydantic_model,
+                )
+            except ValidationError as exc:
+                # Recover only a framing error, never a schema mismatch or partial output.
+                errors = exc.errors()
+                if exc.title != pydantic_model.__name__ or len(errors) != 1 or errors[0]["type"] != "json_invalid":
+                    raise
+                raw = errors[0].get("input")
+                if not isinstance(raw, str):
+                    raise
+                fenced = re.fullmatch(r"```(?:json)?[^\S\r\n]*\r?\n(.*?)\r?\n```", raw.strip(), re.DOTALL | re.IGNORECASE)
+                if fenced is None:
+                    raise
+                try:
+                    parsed = pydantic_model.model_validate_json(fenced.group(1))
+                except ValidationError:
+                    pass
+                else:
+                    outputs.append(parsed.model_dump())
+                    continue
+                raise
+            else:
+                parsed = response.choices[0].message.parsed
             if parsed is None:
                 raise ValueError("structured extraction returned no parsed window")
             outputs.append(parsed.model_dump())
