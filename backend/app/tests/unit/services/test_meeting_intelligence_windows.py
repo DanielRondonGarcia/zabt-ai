@@ -403,20 +403,62 @@ def test_short_invalid_generic_output_fails_without_minimal_fallback(monkeypatch
     assert len(requests) == 1
 
 
-def test_short_missing_parsed_output_fails_without_minimal_fallback(monkeypatch):
+@pytest.mark.parametrize("empty_choice", [False, True])
+def test_structured_extraction_retries_only_the_empty_window(monkeypatch, empty_choice):
     requests = []
+    empty = SimpleNamespace(parsed=None, content=None, refusal=None, tool_calls=None)
 
     def parse(**kwargs):
         requests.append(kwargs)
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(parsed=None))])
+        if len(requests) == 2:
+            return SimpleNamespace(choices=[] if empty_choice else [SimpleNamespace(message=empty)])
+        summary = "First" if len(requests) == 1 else "Second"
+        return _response({"meeting_type": "generic", "summary": summary})
 
     monkeypatch.setattr(
         meeting_intelligence, "_client",
         SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
     )
+    transcript = "word " * 1000
+    output = meeting_intelligence.intelligence_service.extract_structured_output(transcript, "generic")
+    assert output["summary"] == "First\n\nSecond"
+    assert len(requests) == 3
+    assert requests[1] == requests[2]
+    assert "".join(r["messages"][1]["content"] for r in requests[:2]) == transcript
 
-    with pytest.raises(ValueError, match="structured extraction returned no parsed window"):
-        meeting_intelligence.intelligence_service.extract_structured_output(
-            "[0.0] Speaker: hello", "generic"
-        )
-    assert len(requests) == 1
+
+@pytest.mark.parametrize(
+    ("content", "refusal", "tool_calls", "attempts", "reason"),
+    [
+        (None, None, None, 2, "empty response after 2 attempts"),
+        (" \t", None, None, 2, "empty response after 2 attempts"),
+        (None, "synthetic private refusal", None, 1, "provider refused"),
+        ("synthetic private response", None, None, 1, "nonempty response was not parsed"),
+        (None, None, [object()], 1, "unexpected tool call"),
+    ],
+)
+def test_unusable_structured_window_fails_without_partial_output_or_content_in_error(
+    monkeypatch, content, refusal, tool_calls, attempts, reason
+):
+    requests = []
+
+    def parse(**kwargs):
+        requests.append(kwargs)
+        if len(requests) == 1:
+            return _response({"meeting_type": "generic", "summary": "First"})
+        if content and not content.strip():
+            # The SDK parses truthy content before returning the message.
+            kwargs["response_format"].model_validate_json(content)
+        message = SimpleNamespace(parsed=None, content=content, refusal=refusal, tool_calls=tool_calls)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+
+    monkeypatch.setattr(
+        meeting_intelligence, "_client",
+        SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
+    )
+    with pytest.raises(ValueError) as error:
+        meeting_intelligence.intelligence_service.extract_structured_output("word " * 1000, "generic")
+    assert str(error.value) == f"Structured extraction window 2/2: {reason}"
+    assert len(requests) == 1 + attempts
+    if attempts == 2:
+        assert requests[1] == requests[2]

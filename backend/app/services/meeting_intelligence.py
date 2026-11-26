@@ -518,41 +518,59 @@ class MeetingIntelligenceService:
             + json.dumps(pydantic_model.model_json_schema(), ensure_ascii=False, separators=(",", ":"))
         )
         outputs: list[dict] = []
-        for window in windows:
-            try:
-                response = _client.beta.chat.completions.parse(
-                    model=settings.STRUCTURED_OUTPUT_MODEL or settings.OPENAI_MODEL,
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": window},
-                    ],
-                    temperature=0.2,
-                    response_format=pydantic_model,
-                )
-            except ValidationError as exc:
-                # Recover only a framing error, never a schema mismatch or partial output.
-                errors = exc.errors()
-                if exc.title != pydantic_model.__name__ or len(errors) != 1 or errors[0]["type"] != "json_invalid":
-                    raise
-                raw = errors[0].get("input")
-                if not isinstance(raw, str):
-                    raise
-                fenced = re.fullmatch(r"```(?:json)?[^\S\r\n]*\r?\n(.*?)\r?\n```", raw.strip(), re.DOTALL | re.IGNORECASE)
-                if fenced is None:
-                    raise
+        for index, window in enumerate(windows, start=1):
+            label = f"Structured extraction window {index}/{len(windows)}"
+            for attempt in (1, 2):
                 try:
-                    parsed = pydantic_model.model_validate_json(fenced.group(1))
-                except ValidationError:
-                    pass
+                    response = _client.beta.chat.completions.parse(
+                        model=settings.STRUCTURED_OUTPUT_MODEL or settings.OPENAI_MODEL,
+                        messages=[
+                            {"role": "system", "content": prompt},
+                            {"role": "user", "content": window},
+                        ],
+                        temperature=0.2,
+                        response_format=pydantic_model,
+                    )
+                except ValidationError as exc:
+                    errors = exc.errors()
+                    if exc.title != pydantic_model.__name__ or len(errors) != 1 or errors[0]["type"] != "json_invalid":
+                        raise
+                    raw = errors[0].get("input")
+                    if not isinstance(raw, str):
+                        raise
+                    # The SDK tries to parse whitespace, but that is also an empty reply.
+                    parsed = None
+                    if raw.strip():
+                        fenced = re.fullmatch(
+                            r"```(?:json)?[^\S\r\n]*\r?\n(.*?)\r?\n```",
+                            raw.strip(), re.DOTALL | re.IGNORECASE,
+                        )
+                        if fenced is None:
+                            raise
+                        try:
+                            parsed = pydantic_model.model_validate_json(fenced.group(1))
+                        except ValidationError:
+                            pass
+                        if parsed is None:
+                            raise
                 else:
+                    parsed = None
+                    if response.choices:
+                        message = response.choices[0].message
+                        if getattr(message, "refusal", None):
+                            raise ValueError(f"{label}: provider refused")
+                        if getattr(message, "tool_calls", None):
+                            raise ValueError(f"{label}: unexpected tool call")
+                        parsed = message.parsed
+                        if parsed is None and (getattr(message, "content", None) or "").strip():
+                            raise ValueError(f"{label}: nonempty response was not parsed")
+                if parsed is not None:
                     outputs.append(parsed.model_dump())
-                    continue
-                raise
+                    break
+                if attempt == 1:
+                    logger.warning("%s: empty response; retrying once", label)
             else:
-                parsed = response.choices[0].message.parsed
-            if parsed is None:
-                raise ValueError("structured extraction returned no parsed window")
-            outputs.append(parsed.model_dump())
+                raise ValueError(f"{label}: empty response after 2 attempts")
         return outputs[0] if len(outputs) == 1 else _combine_structured_windows(outputs)
 
     def save_highlights(
