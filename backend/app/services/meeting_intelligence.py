@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+import json
 import math
 import re
 from enum import Enum
@@ -510,6 +511,12 @@ class MeetingIntelligenceService:
                 " Analyze only this transcript window. Do not infer facts from "
                 "parts of the meeting that are not in this window."
             )
+        # Some completion routes ignore response_format; still validate via the SDK.
+        prompt += (
+            "\n\nYour JSON object must conform to this JSON Schema. "
+            "Use the exact property names, including all required fields:\n"
+            + json.dumps(pydantic_model.model_json_schema(), ensure_ascii=False, separators=(",", ":"))
+        )
         outputs: list[dict] = []
         for window in windows:
             response = _client.beta.chat.completions.parse(

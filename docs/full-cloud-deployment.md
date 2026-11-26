@@ -95,17 +95,17 @@ provider will respond. The generic structured response accepts the observed
 English field name. For any transcript, a response with neither key, another
 schema mismatch or no parsed result fails structured extraction rather than saving
 partial or minimal output; highlights keep their separate short-input behavior.
-If the shared `OPENAI_MODEL` does not
-respect the typed JSON schema, set `STRUCTURED_OUTPUT_MODEL` in the deployment
-`.env` to a schema-compatible model on the same `OPENAI_BASE_URL`; the API and
-worker inherit it through Compose, while highlights, summary and title retain
-`OPENAI_MODEL`. The Actsis gateway's `oc/glm-5.3-flash` returned incompatible
-keys across multiple production attempts; `gpt-5.6-sol` passed six synthetic
-strict-schema probes (two generic windows, four other meeting types), not a real
-meeting replay or guarantee for all transcript content. Verify provider capability
-and cost before enabling it. Leaving the override empty preserves prior model
-selection and failure semantics. Reindexing vectors does not retry
-a failed highlights stage.
+The worker includes the JSON Schema in the extraction prompt as well as in
+`response_format`, so completion routes that ignore `response_format` still get
+explicit field names and types. SDK validation remains mandatory.
+
+Leave `STRUCTURED_OUTPUT_MODEL` empty to use `OPENAI_MODEL`. If extraction
+requires a separate model, set `STRUCTURED_OUTPUT_MODEL` in the deployment `.env`
+to an exact model ID listed for the worker's key at `OPENAI_BASE_URL`. Verify
+strict parsing with synthetic transcripts and check cost before using an override;
+being listed is not proof of schema support. Recreate the worker to apply the
+setting. It affects only structured extraction, not highlights, summary, or
+title inference. Reindexing vectors does not retry a failed highlights stage.
 
 ## Summary evidence windows
 
