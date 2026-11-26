@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Public service contract for bounded transcript-only intelligence requests."""
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -93,6 +94,32 @@ def test_long_transcript_structured_output_covers_every_character_and_aggregates
     assert result["summary"] == "\n\n".join(
         f"summary {index}" for index in range(1, len(requests) + 1)
     )
+
+
+@pytest.mark.parametrize("meeting_type", ["generic", "standup"])
+def test_typed_extraction_supplies_schema_to_gateways_that_ignore_response_format(monkeypatch, meeting_type):
+    transcript = "Speaker: We approved the synthetic inventory plan."
+    model = meeting_intelligence.MEETING_TYPE_PROMPTS[meeting_type]["model"]
+    expected = {"summary": "Inventory plan approved."} if meeting_type == "generic" else {"updates": []}
+
+    def parse(**kwargs):
+        system, user = kwargs["messages"]
+        assert system["role"] == "system"
+        assert user == {"role": "user", "content": transcript}
+        assert kwargs["response_format"] is model
+        _, marker, schema = system["content"].partition("including all required fields:\n")
+        assert marker, "Gateway needs the schema in the prompt, not just response_format"
+        assert json.loads(schema) == model.model_json_schema()
+        return _response(model.model_validate(expected).model_dump())
+
+    monkeypatch.setattr(
+        meeting_intelligence, "_client",
+        SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
+    )
+
+    assert meeting_intelligence.intelligence_service.extract_structured_output(
+        transcript, meeting_type
+    ) == model.model_validate(expected).model_dump()
 
 
 def test_short_transcript_keeps_existing_single_request_shape_for_both_stages(monkeypatch):
