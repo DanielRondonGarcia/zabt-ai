@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Copyright (C) 2025-2026 Afeef Janjua
+import re
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -115,6 +116,7 @@ _ALLOWED_PROGRESS_KEYS = {
     "outcome",
     "duration_ms",
     "error_class",
+    "correlation_id",
 }
 
 
@@ -360,6 +362,10 @@ def test_progress_payload_never_carries_content_urls_or_messages(monkeypatch):
             assert error_class.strip() == error_class
             assert not any(ch.isspace() for ch in error_class)
             assert len(error_class) <= 64
+        correlation_id = event["correlation_id"]
+        if correlation_id is not None:
+            assert isinstance(correlation_id, str)
+            assert re.fullmatch(r"[0-9a-f]{32}", correlation_id)
         for key, value in event.items():
             if isinstance(value, str):
                 assert transcript_content not in value
