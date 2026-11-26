@@ -100,7 +100,13 @@ The worker includes the JSON Schema in the extraction prompt as well as in
 explicit field names and types. SDK validation remains mandatory. If the model
 wraps an otherwise valid JSON object in a single Markdown code block, the worker
 removes that framing and validates the object against the same schema. Invalid
-or ambiguous responses still fail the stage without saving partial output.
+or ambiguous responses still fail the stage without saving partial output. An
+empty completion (including missing choices or whitespace-only content) gets
+one additional request for that transcript window only. If it is still unusable,
+the stage fails without returning partial output. A refusal, unexpected tool
+call, or nonempty unparsed response is not retried by this recovery. These
+missing-output errors identify the window and reason without including transcript
+or response text.
 
 Leave `STRUCTURED_OUTPUT_MODEL` empty to use `OPENAI_MODEL`. If extraction
 requires a separate model, set `STRUCTURED_OUTPUT_MODEL` in the deployment `.env`
