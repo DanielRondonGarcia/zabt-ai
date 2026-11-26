@@ -350,6 +350,39 @@ def test_unknown_generic_summary_key_fails_long_stage_without_partial_result(mon
     assert len(requests) == 2
 
 
+@pytest.mark.parametrize(
+    ("response_text", "expected_summary"),
+    [
+        ('```json\n{"summary": "Second window"}\n```', "Second window"),
+        ('```json\n{"meeting_title": "Missing summary"}\n```', None),
+        ('```json\n{"summary": "Ambiguous"}\n```\n```json\n{"summary": "Another"}\n```', None),
+    ],
+)
+def test_structured_window_recovers_only_a_single_schema_valid_fenced_object(
+    monkeypatch, response_text, expected_summary
+):
+    requests = []
+
+    def parse(**kwargs):
+        requests.append(kwargs)
+        content = '{"summary": "First window"}' if len(requests) == 1 else response_text
+        return _response(kwargs["response_format"].model_validate_json(content).model_dump())
+
+    monkeypatch.setattr(
+        meeting_intelligence, "_client",
+        SimpleNamespace(beta=SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(parse=parse)))),
+    )
+    extract = meeting_intelligence.intelligence_service.extract_structured_output
+    transcript = "word " * 1000
+    if expected_summary is None:
+        with pytest.raises(ValueError, match="Invalid JSON"):
+            extract(transcript, "generic")
+    else:
+        assert extract(transcript, "generic")["summary"] == "First window\n\n" + expected_summary
+    assert len(requests) == 2
+    assert "".join(request["messages"][1]["content"] for request in requests) == transcript
+
+
 def test_short_invalid_generic_output_fails_without_minimal_fallback(monkeypatch):
     requests = []
 

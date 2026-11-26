@@ -97,7 +97,10 @@ schema mismatch or no parsed result fails structured extraction rather than savi
 partial or minimal output; highlights keep their separate short-input behavior.
 The worker includes the JSON Schema in the extraction prompt as well as in
 `response_format`, so completion routes that ignore `response_format` still get
-explicit field names and types. SDK validation remains mandatory.
+explicit field names and types. SDK validation remains mandatory. If the model
+wraps an otherwise valid JSON object in a single Markdown code block, the worker
+removes that framing and validates the object against the same schema. Invalid
+or ambiguous responses still fail the stage without saving partial output.
 
 Leave `STRUCTURED_OUTPUT_MODEL` empty to use `OPENAI_MODEL`. If extraction
 requires a separate model, set `STRUCTURED_OUTPUT_MODEL` in the deployment `.env`
