@@ -3,10 +3,12 @@
 import json
 import math
 import re
+import time
 from enum import Enum
 from typing import Optional, List, Sequence
 from pydantic import AliasChoices, BaseModel, Field, ValidationError
 from langfuse.openai import OpenAI
+from openai import APIStatusError
 from sqlmodel import Session, select, col
 
 from app.core.config import settings
@@ -250,6 +252,25 @@ class HighlightsExtraction(BaseModel):
     key_questions: List[HighlightKeyQuestion] = Field(default_factory=list)
 
 
+def _parse_highlight_window(prompt: str, window: str):
+    for attempt in range(2):
+        try:
+            return _client.beta.chat.completions.parse(
+                model=settings.OPENAI_MODEL,
+                messages=[
+                    {"role": "system", "content": prompt},
+                    {"role": "user", "content": window},
+                ],
+                temperature=0.2,
+                response_format=HighlightsExtraction,
+            )
+        except APIStatusError as exc:
+            if exc.status_code != 502 or attempt:
+                raise
+            logger.warning("extract_highlights: provider returned HTTP 502; retrying window once")
+            time.sleep(0.5)
+
+
 # ── Per-meeting-type Pydantic models ─────────────────────────────────────────
 
 class GenericItem(BaseModel):
@@ -440,15 +461,7 @@ class MeetingIntelligenceService:
                     "content in other windows.\n"
                 )
             try:
-                response = _client.beta.chat.completions.parse(
-                    model=settings.OPENAI_MODEL,
-                    messages=[
-                        {"role": "system", "content": prompt},
-                        {"role": "user", "content": window},
-                    ],
-                    temperature=0.2,
-                    response_format=HighlightsExtraction,
-                )
+                response = _parse_highlight_window(prompt, window)
             except ValidationError as exc:
                 errors = exc.errors()
                 raw = errors[0].get("input") if len(errors) == 1 else None
